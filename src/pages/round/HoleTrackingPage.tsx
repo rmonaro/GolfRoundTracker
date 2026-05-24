@@ -381,29 +381,32 @@ export function HoleTrackingPage() {
           <StatPill label="Penalty" value={penaltyStrokes} />
         </Stack>
 
-        {/* View Shots — bottom-left. Opens the shots tracker in a drawer. */}
-        <Button
-          variant="contained"
-          size="large"
-          startIcon={<FormatListBulletedRoundedIcon />}
-          onClick={() => setShotsDrawerOpen(true)}
-          sx={{
-            position: 'absolute',
-            bottom: 'calc(16px + env(safe-area-inset-bottom))',
-            left: 16,
-            zIndex: 4,
-            minHeight: 56,
-            bgcolor: 'rgba(11,20,16,0.85)',
-            color: 'common.white',
-            border: 1,
-            borderColor: 'rgba(255,255,255,0.18)',
-            backdropFilter: 'blur(6px)',
-            WebkitBackdropFilter: 'blur(6px)',
-            '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
-          }}
-        >
-          View Shots ({hole.shots.length})
-        </Button>
+        {/* View Shots — bottom-left. Only renders once shots exist; opens the
+            shots tracker in a drawer. */}
+        {hole.shots.length > 0 && (
+          <Button
+            variant="contained"
+            size="large"
+            startIcon={<FormatListBulletedRoundedIcon />}
+            onClick={() => setShotsDrawerOpen(true)}
+            sx={{
+              position: 'absolute',
+              bottom: 'calc(16px + env(safe-area-inset-bottom))',
+              left: 16,
+              zIndex: 4,
+              minHeight: 56,
+              bgcolor: 'rgba(11,20,16,0.85)',
+              color: 'common.white',
+              border: 1,
+              borderColor: 'rgba(255,255,255,0.18)',
+              backdropFilter: 'blur(6px)',
+              WebkitBackdropFilter: 'blur(6px)',
+              '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
+            }}
+          >
+            View Shots ({hole.shots.length})
+          </Button>
+        )}
 
         {/* Add Shot — bottom-right. Opens the AddShotSheet for a new shot. */}
         <Button
