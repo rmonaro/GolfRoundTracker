@@ -17,6 +17,15 @@ export function haversineMeters(a: LngLat, b: LngLat): number {
   return 2 * R * Math.asin(Math.sqrt(h));
 }
 
+/** Total Haversine length along a polyline of [lng, lat] points. Returns 0 for <2 points. */
+export function pathLengthMeters(coords: LngLat[]): number {
+  let total = 0;
+  for (let i = 1; i < coords.length; i++) {
+    total += haversineMeters(coords[i - 1], coords[i]);
+  }
+  return total;
+}
+
 /** Simple arithmetic-mean centroid. Adequate for the small polygons OSM emits for golf features. */
 export function centroid(coords: LngLat[]): LngLat {
   let lng = 0;

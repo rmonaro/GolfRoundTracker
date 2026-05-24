@@ -7,6 +7,11 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { AppRouter } from '@/router/AppRouter';
 import { AuthProvider } from '@/features/auth/AuthProvider';
 import { SessionHydrator } from '@/features/auth/SessionHydrator';
+import { initMapbox } from '@/features/course/mapbox';
+
+// Set the Mapbox access token once at bootstrap. No-op if VITE_MAPBOX_TOKEN
+// is absent — the hole layout falls back to SVG rendering in that case.
+initMapbox();
 
 const queryClient = new QueryClient({
   defaultOptions: {

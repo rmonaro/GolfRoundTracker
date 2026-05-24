@@ -9,6 +9,7 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  Drawer,
   IconButton,
   InputAdornment,
   Stack,
@@ -22,6 +23,7 @@ import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import FlagCircleRoundedIcon from '@mui/icons-material/FlagCircleRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
+import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBulletedRounded';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
@@ -29,9 +31,10 @@ import { useAutosaveHole } from '@/features/round/useAutosaveHole';
 import { AddShotSheet, RESULT_LABELS, type ShotEditDraft } from '@/features/round/AddShotSheet';
 import { PENALTY_LABELS } from '@/features/round/ShotSelectors';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
+import { useHoleLayout } from '@/features/course/useHoleLayout';
+import { metersToYards } from '@/features/course/distance';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
 import { roundRepo } from '@/services/roundRepo';
-import { scoreVsPar } from '@/utils/format';
 import {
   STROKE_PENALTY_TYPES,
   type BagClub,
@@ -52,6 +55,7 @@ export function HoleTrackingPage() {
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
 
   if (!active) return <Navigate to="/round" replace />;
 
@@ -73,8 +77,18 @@ export function HoleTrackingPage() {
   const gir = strokes > 0 && (strokes - putts) <= Math.max(1, hole.par - 2);
 
   const holeScore = strokes + penaltyStrokes;
-  const totalScore = computeTotalScore(active.holes);
-  const isLast = idx === active.holes.length - 1;
+
+  // Yardage display rules (header chip + HoleLayoutCard chips):
+  //   1. Prefer the user-entered hole.yardage (explicit override via HoleDetailsDialog)
+  //   2. Fall back to the OSM centerline_distance_m from the cached layout row,
+  //      converted to yards. This is the same value the amber-line label shows.
+  //   3. Otherwise null — chips show "—" / "0 yds" depending on consumer.
+  // TanStack Query dedupes this call with HoleLayoutCard's own fetch.
+  const layoutQuery = useHoleLayout(active.courseId, hole.holeNumber);
+  const osmYards = layoutQuery.data?.hole.centerline_distance_m != null
+    ? Math.round(metersToYards(layoutQuery.data.hole.centerline_distance_m))
+    : null;
+  const displayYards = hole.yardage ?? osmYards;
 
   // Push derived values back into the local hole so autosave persists them.
   // Without this, the round_holes columns would stay stale because the user
@@ -283,123 +297,170 @@ export function HoleTrackingPage() {
           borderColor: 'divider'
         }}
       >
-        <Stack direction="row" alignItems="center" px={1.5} py={1} spacing={1}>
+        <Stack direction="row" alignItems="center" px={1} py={1} spacing={0.25}>
           <IconButton aria-label="exit" onClick={() => navigate('/round')}>
             <CloseRoundedIcon />
           </IconButton>
-          <Box sx={{ flex: 1, textAlign: 'center' }}>
-            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+          <IconButton aria-label="prev hole" onClick={goPrev} disabled={idx === 0}>
+            <ArrowBackIosNewRoundedIcon />
+          </IconButton>
+          <Box
+            onClick={() => setDetailsOpen(true)}
+            sx={{
+              flex: 1,
+              textAlign: 'center',
+              minWidth: 0,
+              cursor: 'pointer',
+              userSelect: 'none'
+            }}
+          >
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{
+                textTransform: 'uppercase',
+                letterSpacing: 0.6,
+                display: 'block',
+                lineHeight: 1
+              }}
+              noWrap
+            >
               {active.courseName}
             </Typography>
-            <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.1 }}>
-              Total {totalScore} · {scoreVsPar(totalScore, active.totalPar)}
+            <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }} noWrap>
+              {`Hole ${hole.holeNumber} · Par ${hole.par ?? '—'} · ${
+                displayYards ?? '—'
+              } yds`}
             </Typography>
           </Box>
+          <IconButton
+            aria-label="next hole"
+            onClick={goNext}
+            disabled={idx === active.holes.length - 1}
+          >
+            <ArrowForwardIosRoundedIcon />
+          </IconButton>
           <IconButton aria-label="finish" color="primary" onClick={finishRound}>
             <FlagCircleRoundedIcon />
           </IconButton>
         </Stack>
       </Box>
 
-      <Box sx={{ px: 2, pb: 12, pt: 2 }}>
-        <HoleHeader
-          hole={hole}
-          holeScore={holeScore}
-          idx={idx}
-          total={active.holes.length}
-          onPrev={goPrev}
-          onNext={goNext}
-          onOpenDetails={() => setDetailsOpen(true)}
+      {/* Full-screen map with floating overlays. Header lives in the sticky
+          top bar (hole / par / yardage / nav); the bottom nav has been folded
+          into the map via View Shots + Add Shot floating buttons. */}
+      <Box
+        sx={{
+          position: 'relative',
+          height: 'calc(100dvh - 64px - env(safe-area-inset-top))',
+          minHeight: 480
+        }}
+      >
+        <HoleLayoutCard
+          courseId={active.courseId}
+          holeNumber={hole.holeNumber}
+          par={hole.par}
+          yardage={displayYards}
+          compact
         />
 
-        <Stack spacing={2} mt={2}>
-          {/* Top-down hole layout (Phase 5). Renders nothing when courseId is null or the
-              course has no OSM coverage; otherwise shows the SVG or a clean fallback. */}
-          <Box sx={{ maxHeight: { xs: '30vh', sm: '40vh' } }}>
-            <HoleLayoutCard
-              courseId={active.courseId}
-              holeNumber={hole.holeNumber}
-              par={hole.par}
-              yardage={hole.yardage}
-              compact
-            />
-          </Box>
+        {/* Stat pills — top-right column. Score is the headline value (accent). */}
+        <Stack
+          spacing={1}
+          sx={{
+            position: 'absolute',
+            top: 12,
+            right: 12,
+            zIndex: 3,
+            pointerEvents: 'none'
+          }}
+        >
+          <StatPill label="Score" value={holeScore} accent />
+          <StatPill label="Shots" value={strokes} />
+          <StatPill label="Putts" value={putts} />
+          <StatPill label="Penalty" value={penaltyStrokes} />
+        </Stack>
 
-          {/* Derived score snapshot — all values come from the shot list. */}
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
-            <CardContent>
-              <Stack direction="row" alignItems="center" justifyContent="space-between">
-                <DerivedStat label="Shots" value={strokes} />
-                <DerivedStat label="Putts" value={putts} />
-                <DerivedStat label="Penalty" value={penaltyStrokes} />
-                <DerivedStat label="Hole" value={holeScore} accent />
-              </Stack>
-            </CardContent>
-          </Card>
+        {/* View Shots — bottom-left. Opens the shots tracker in a drawer. */}
+        <Button
+          variant="contained"
+          size="large"
+          startIcon={<FormatListBulletedRoundedIcon />}
+          onClick={() => setShotsDrawerOpen(true)}
+          sx={{
+            position: 'absolute',
+            bottom: 'calc(16px + env(safe-area-inset-bottom))',
+            left: 16,
+            zIndex: 4,
+            minHeight: 56,
+            bgcolor: 'rgba(11,20,16,0.85)',
+            color: 'common.white',
+            border: 1,
+            borderColor: 'rgba(255,255,255,0.18)',
+            backdropFilter: 'blur(6px)',
+            WebkitBackdropFilter: 'blur(6px)',
+            '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
+          }}
+        >
+          View Shots ({hole.shots.length})
+        </Button>
 
-          {/* SHOTS — timeline + add button */}
+        {/* Add Shot — bottom-right. Opens the AddShotSheet for a new shot. */}
+        <Button
+          variant="contained"
+          size="large"
+          color="primary"
+          startIcon={<AddRoundedIcon />}
+          onClick={() => {
+            setEditingShot(null);
+            setShotSheet(true);
+          }}
+          sx={{
+            position: 'absolute',
+            bottom: 'calc(16px + env(safe-area-inset-bottom))',
+            right: 16,
+            zIndex: 4,
+            minHeight: 56,
+            fontWeight: 700,
+            boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
+          }}
+        >
+          Add Shot
+        </Button>
+      </Box>
+
+      {/* Shots tracker drawer — opened by the View Shots button on the map. */}
+      <Drawer
+        anchor="bottom"
+        open={shotsDrawerOpen}
+        onClose={() => setShotsDrawerOpen(false)}
+        PaperProps={{
+          sx: {
+            borderTopLeftRadius: 16,
+            borderTopRightRadius: 16,
+            maxHeight: '85dvh',
+            bgcolor: 'background.default'
+          }
+        }}
+      >
+        <Box sx={{ p: 2, pb: 'calc(16px + env(safe-area-inset-bottom))' }}>
           <ShotsCard
             shots={hole.shots}
             bagClubs={bagClubs}
             onAdd={() => {
+              setShotsDrawerOpen(false);
               setEditingShot(null);
               setShotSheet(true);
             }}
             onEdit={(shot) => {
+              setShotsDrawerOpen(false);
               setEditingShot(shot);
               setShotSheet(true);
             }}
             onDelete={onDeleteShot}
           />
-        </Stack>
-      </Box>
-
-      <Box
-        sx={{
-          position: 'fixed',
-          left: 0,
-          right: 0,
-          bottom: 0,
-          p: 1.5,
-          pb: 'calc(env(safe-area-inset-bottom) + 12px)',
-          background: 'linear-gradient(to top, rgba(11,20,16,0.95) 60%, transparent)',
-          display: 'flex',
-          gap: 1,
-          zIndex: 6
-        }}
-      >
-        <Button
-          variant="outlined"
-          size="large"
-          startIcon={<ArrowBackIosNewRoundedIcon />}
-          onClick={goPrev}
-          disabled={idx === 0}
-          sx={{ minHeight: 56, flex: 1 }}
-        >
-          Prev
-        </Button>
-        {isLast ? (
-          <Button
-            variant="contained"
-            color="primary"
-            size="large"
-            onClick={finishRound}
-            sx={{ minHeight: 56, flex: 2 }}
-          >
-            Finish Round
-          </Button>
-        ) : (
-          <Button
-            variant="contained"
-            size="large"
-            endIcon={<ArrowForwardIosRoundedIcon />}
-            onClick={goNext}
-            sx={{ minHeight: 56, flex: 2 }}
-          >
-            Next Hole
-          </Button>
-        )}
-      </Box>
+        </Box>
+      </Drawer>
 
       <AddShotSheet
         open={shotSheet}
@@ -445,86 +506,8 @@ export function HoleTrackingPage() {
 // Header
 // ---------------------------------------------------------------------------
 
-interface HoleHeaderProps {
-  hole: LocalHole;
-  holeScore: number;
-  idx: number;
-  total: number;
-  onPrev: () => void;
-  onNext: () => void;
-  onOpenDetails: () => void;
-}
-
-function HoleHeader({ hole, holeScore, idx, total, onPrev, onNext, onOpenDetails }: HoleHeaderProps) {
-  return (
-    <Card
-      elevation={0}
-      sx={{
-        background: 'linear-gradient(135deg, rgba(46,125,50,0.5), rgba(76,175,80,0.3))',
-        color: 'common.white',
-        position: 'relative'
-      }}
-    >
-      <CardContent sx={{ py: 2.5 }}>
-        <Stack direction="row" alignItems="center" justifyContent="space-between">
-          <IconButton aria-label="prev" onClick={onPrev} disabled={idx === 0} sx={{ color: 'inherit' }}>
-            <ArrowBackIosNewRoundedIcon />
-          </IconButton>
-          <Box sx={{ textAlign: 'center' }}>
-            <Typography variant="body2" sx={{ opacity: 0.8 }}>
-              Hole {idx + 1} of {total}
-            </Typography>
-            <Typography variant="h2" sx={{ fontWeight: 800, lineHeight: 1, my: 0.5 }}>
-              {hole.holeNumber}
-            </Typography>
-            <Stack direction="row" spacing={1} justifyContent="center" mt={0.5}>
-              <Chip
-                label={`Par ${hole.par}`}
-                size="small"
-                onClick={onOpenDetails}
-                clickable
-                sx={{
-                  bgcolor: 'rgba(255,255,255,0.18)',
-                  color: 'inherit',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  '&:hover': { bgcolor: 'rgba(255,255,255,0.28)' }
-                }}
-              />
-              <Chip
-                label={`${hole.yardage ?? 0} yds`}
-                size="small"
-                onClick={onOpenDetails}
-                clickable
-                sx={{
-                  bgcolor: 'rgba(255,255,255,0.18)',
-                  color: 'inherit',
-                  fontWeight: 600,
-                  cursor: 'pointer',
-                  '&:hover': { bgcolor: 'rgba(255,255,255,0.28)' }
-                }}
-              />
-              <Chip
-                label={`Score ${holeScore}`}
-                size="small"
-                sx={{ bgcolor: 'rgba(255,255,255,0.28)', color: 'inherit', fontWeight: 700 }}
-              />
-            </Stack>
-            <Typography variant="caption" sx={{ opacity: 0.7, display: 'block', mt: 0.75 }}>
-              Tap par or yards to edit
-            </Typography>
-          </Box>
-          <IconButton aria-label="next" onClick={onNext} disabled={idx === total - 1} sx={{ color: 'inherit' }}>
-            <ArrowForwardIosRoundedIcon />
-          </IconButton>
-        </Stack>
-      </CardContent>
-    </Card>
-  );
-}
-
 // ---------------------------------------------------------------------------
-// Shots card + timeline
+// Shots card + timeline (rendered inside the View Shots drawer)
 // ---------------------------------------------------------------------------
 
 interface ShotsCardProps {
@@ -722,10 +705,11 @@ function ShotRow({
 }
 
 // ---------------------------------------------------------------------------
-// Derived stats row
+// Map overlay stat pill — rangefinder-style readout floating on top of the
+// hole layout. Three of these stack on the right side of the map.
 // ---------------------------------------------------------------------------
 
-function DerivedStat({
+function StatPill({
   label,
   value,
   accent = false
@@ -735,21 +719,38 @@ function DerivedStat({
   accent?: boolean;
 }) {
   return (
-    <Box sx={{ textAlign: 'center', flex: 1 }}>
+    <Box
+      sx={{
+        bgcolor: accent ? 'rgba(46,125,50,0.85)' : 'rgba(11,20,16,0.78)',
+        color: 'common.white',
+        borderRadius: 1.5,
+        border: 1,
+        borderColor: accent ? 'rgba(165,214,167,0.55)' : 'rgba(255,255,255,0.18)',
+        backdropFilter: 'blur(6px)',
+        WebkitBackdropFilter: 'blur(6px)',
+        px: 1.25,
+        py: 0.6,
+        minWidth: 64,
+        textAlign: 'center',
+        boxShadow: '0 2px 6px rgba(0,0,0,0.35)'
+      }}
+    >
       <Typography
         variant="caption"
-        color="text.secondary"
-        sx={{ textTransform: 'uppercase', letterSpacing: 0.6, display: 'block' }}
+        sx={{
+          display: 'block',
+          opacity: 0.85,
+          fontSize: '0.62rem',
+          letterSpacing: 0.6,
+          textTransform: 'uppercase',
+          lineHeight: 1
+        }}
       >
         {label}
       </Typography>
       <Typography
-        variant={accent ? 'h4' : 'h5'}
-        sx={{
-          fontWeight: 800,
-          lineHeight: 1.1,
-          color: accent ? 'primary.main' : 'text.primary'
-        }}
+        variant={accent ? 'h5' : 'h6'}
+        sx={{ fontWeight: 800, lineHeight: 1.1, mt: 0.25, color: 'common.white' }}
       >
         {value}
       </Typography>

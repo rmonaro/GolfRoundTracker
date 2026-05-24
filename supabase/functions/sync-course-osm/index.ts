@@ -28,6 +28,7 @@ import {
   centroid,
   expandBBox,
   haversineMeters,
+  pathLengthMeters,
   rotationRadians,
   type BBox,
   type LngLat
@@ -91,6 +92,17 @@ Deno.serve(async (req) => {
     false;
 
   try {
+    // ?action=recalc-distances — one-time backfill of the two distance columns
+    // for already-synced holes. Service role only (manual trigger after deploy).
+    // Computes from cached `centerline` + tee/green coords; never re-hits Overpass.
+    const url = new URL(req.url);
+    if (url.searchParams.get('action') === 'recalc-distances') {
+      if (!isServiceRole) return errorResponse(403, 'Service role required');
+      const supabase = serviceClient();
+      const result = await recalcAllDistances(supabase);
+      return jsonResponse(result);
+    }
+
     if (!isServiceRole) {
       const auth = await resolveAuth(req);
       requireAdmin(auth);
@@ -282,7 +294,9 @@ async function syncOneCourse(supabase: ReturnType<typeof serviceClient>, courseI
           bbox_min_lat: h.bbox?.minLat ?? null,
           bbox_max_lng: h.bbox?.maxLng ?? null,
           bbox_max_lat: h.bbox?.maxLat ?? null,
-          centerline: h.centerline as unknown
+          centerline: h.centerline as unknown,
+          centerline_distance_m: h.centerlineDistanceM,
+          straight_distance_m: h.straightDistanceM
         })),
         { onConflict: 'course_id,hole_number' }
       )
@@ -339,6 +353,83 @@ async function syncOneCourse(supabase: ReturnType<typeof serviceClient>, courseI
     holes: insertedHoles.length,
     features: featureCount
   };
+}
+
+// ---------------------------------------------------------------------------
+// One-time distance backfill (?action=recalc-distances)
+// Iterates every hole row in pages and updates centerline_distance_m +
+// straight_distance_m from cached `centerline` + tee/green coords. No Overpass.
+// ---------------------------------------------------------------------------
+
+interface RecalcResult {
+  processed: number;
+  updated: number;
+  skipped: number;
+  errors: number;
+}
+
+async function recalcAllDistances(
+  supabase: ReturnType<typeof serviceClient>
+): Promise<RecalcResult> {
+  const pageSize = 500;
+  let from = 0;
+  const result: RecalcResult = { processed: 0, updated: 0, skipped: 0, errors: 0 };
+
+  while (true) {
+    const { data, error } = await supabase
+      .from('holes')
+      .select('id, tee_lng, tee_lat, green_lng, green_lat, centerline')
+      .range(from, from + pageSize - 1);
+
+    if (error) throw new Error(`recalc page query failed: ${error.message}`);
+    if (!data || data.length === 0) break;
+
+    for (const h of data) {
+      result.processed++;
+
+      let straight: number | null = null;
+      if (
+        h.tee_lng != null && h.tee_lat != null &&
+        h.green_lng != null && h.green_lat != null
+      ) {
+        straight = haversineMeters(
+          [h.tee_lng as number, h.tee_lat as number],
+          [h.green_lng as number, h.green_lat as number]
+        );
+      }
+
+      let centerline: number | null = null;
+      const cl = h.centerline as LngLat[] | null;
+      if (Array.isArray(cl) && cl.length >= 2) {
+        centerline = pathLengthMeters(cl);
+      }
+
+      if (straight == null && centerline == null) {
+        result.skipped++;
+        continue;
+      }
+
+      const { error: updErr } = await supabase
+        .from('holes')
+        .update({
+          straight_distance_m: straight,
+          centerline_distance_m: centerline
+        })
+        .eq('id', h.id as string);
+
+      if (updErr) {
+        result.errors++;
+        console.warn(`[recalc] hole ${h.id} update failed: ${updErr.message}`);
+      } else {
+        result.updated++;
+      }
+    }
+
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+
+  return result;
 }
 
 async function markStatus(
@@ -499,6 +590,8 @@ interface HoleRowBuild {
   orientationConfidence: 'confirmed' | 'reversed' | 'assumed';
   bbox: BBox | null;
   centerline: LngLat[];
+  centerlineDistanceM: number | null;
+  straightDistanceM: number | null;
 }
 
 function buildHoleRow(
@@ -550,6 +643,11 @@ function buildHoleRow(
   const rotation = rotationRadians(tee, green);
   const bbox = expandBBox(bboxOf(hole.coords), 60);
 
+  const straightDistanceM =
+    tee && green ? haversineMeters(tee, green) : null;
+  const centerlineDistanceM =
+    hole.coords.length >= 2 ? pathLengthMeters(hole.coords) : null;
+
   const holeNumber = parseInt(hole.ref, 10) || 0;
   return {
     courseId,
@@ -560,7 +658,9 @@ function buildHoleRow(
     rotationRadians: rotation,
     orientationConfidence: confidence,
     bbox,
-    centerline: hole.coords
+    centerline: hole.coords,
+    centerlineDistanceM,
+    straightDistanceM
   };
 }
 

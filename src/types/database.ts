@@ -111,6 +111,8 @@ export interface HoleRow {
   bbox_max_lng: number | null;
   bbox_max_lat: number | null;
   centerline: Array<[number, number]> | null;
+  centerline_distance_m: number | null;
+  straight_distance_m: number | null;
 }
 
 /** Single coordinate pair as [lng, lat] — same convention as OSM/GeoJSON. */

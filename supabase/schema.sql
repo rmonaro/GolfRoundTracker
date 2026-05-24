@@ -147,6 +147,8 @@ create table if not exists public.holes (
   bbox_max_lng double precision,
   bbox_max_lat double precision,
   centerline jsonb,
+  centerline_distance_m numeric(8, 2),
+  straight_distance_m numeric(8, 2),
   unique (course_id, hole_number)
 );
 create index if not exists holes_course_idx on public.holes(course_id, hole_number);

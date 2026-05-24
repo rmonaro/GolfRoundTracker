@@ -30,6 +30,10 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
+        // Mapbox GL JS adds ~700 KB minified, pushing the main JS chunk past
+        // the 2 MiB default precache ceiling. Bump to 5 MiB so the offline
+        // shell still includes the full bundle.
+        maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
         runtimeCaching: [
           {
             urlPattern: /\/assets\//,
