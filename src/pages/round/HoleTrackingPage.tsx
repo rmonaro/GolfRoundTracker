@@ -362,6 +362,7 @@ export function HoleTrackingPage() {
           par={hole.par}
           yardage={displayYards}
           compact
+          aimMode={hole.shots.length === 0}
         />
 
         {/* Stat pills — top-right column. Score is the headline value (accent). */}

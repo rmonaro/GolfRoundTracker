@@ -16,6 +16,14 @@ interface HoleLayoutProps {
   layout: HoleLayoutData;
   compact?: boolean;
   className?: string;
+  /**
+   * Tee-shot planning mode. When true, the walkback distance-to-pin markers
+   * (100/150/200/250) are hidden and replaced with a single draggable handle
+   * on the centerline that displays the distance from the tee at the dragged
+   * point. Intended for the first shot of a hole (when there's no ball-on-
+   * course distance yet). Mapbox-only; SVG fallback keeps walkbacks.
+   */
+  aimMode?: boolean;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -166,6 +174,79 @@ function pointAlongFromEnd(
   return null;
 }
 
+/**
+ * Find the closest point on a polyline to a query point. Uses a local
+ * equirectangular projection (cos-lat correction) — sufficient for golf-hole
+ * scales (<500m). Returns the snapped point plus the segment index and the
+ * 0..1 parameter `t` along that segment, so callers can compute cumulative
+ * distance without re-projecting.
+ */
+function nearestPointOnPolyline(
+  query: [number, number],
+  polyline: [number, number][]
+): { point: [number, number]; segmentIndex: number; t: number } | null {
+  if (polyline.length < 2) return null;
+  const midLat = polyline.reduce((s, p) => s + p[1], 0) / polyline.length;
+  const cosLat = Math.cos((midLat * Math.PI) / 180);
+  const qx = query[0] * cosLat;
+  const qy = query[1];
+
+  let bestDist2 = Infinity;
+  let bestSegIdx = 0;
+  let bestT = 0;
+  let bestX = qx;
+  let bestY = qy;
+
+  for (let i = 0; i < polyline.length - 1; i++) {
+    const ax = polyline[i][0] * cosLat;
+    const ay = polyline[i][1];
+    const bx = polyline[i + 1][0] * cosLat;
+    const by = polyline[i + 1][1];
+    const dx = bx - ax;
+    const dy = by - ay;
+    const segLen2 = dx * dx + dy * dy;
+    if (segLen2 < 1e-20) continue;
+    let t = ((qx - ax) * dx + (qy - ay) * dy) / segLen2;
+    t = Math.max(0, Math.min(1, t));
+    const px = ax + t * dx;
+    const py = ay + t * dy;
+    const ddx = qx - px;
+    const ddy = qy - py;
+    const d2 = ddx * ddx + ddy * ddy;
+    if (d2 < bestDist2) {
+      bestDist2 = d2;
+      bestSegIdx = i;
+      bestT = t;
+      bestX = px;
+      bestY = py;
+    }
+  }
+
+  return {
+    point: [bestX / cosLat, bestY],
+    segmentIndex: bestSegIdx,
+    t: bestT
+  };
+}
+
+/**
+ * Distance in meters from the start of a tee→green oriented polyline to a
+ * point identified by its segmentIndex + t (as returned by
+ * nearestPointOnPolyline). Assumes the polyline is in tee-first order.
+ */
+function distanceAlongPolyline(
+  polyline: [number, number][],
+  segmentIndex: number,
+  t: number
+): number {
+  let total = 0;
+  for (let i = 0; i < segmentIndex; i++) {
+    total += haversineMetersFE(polyline[i], polyline[i + 1]);
+  }
+  const segLen = haversineMetersFE(polyline[segmentIndex], polyline[segmentIndex + 1]);
+  return total + segLen * t;
+}
+
 /** Projected-space variant — walks an [x, y] polyline backward from its last point. */
 function pointAlongFromEndProjected(
   points: Array<[number, number]>,
@@ -190,7 +271,12 @@ function pointAlongFromEndProjected(
 
 // -------------------- Component --------------------
 
-export function HoleLayout({ layout, compact = false, className }: HoleLayoutProps) {
+export function HoleLayout({
+  layout,
+  compact = false,
+  className,
+  aimMode = false
+}: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
   //   - Mapbox init throws / errors   → flip mapErrored, fall back to SVG
@@ -453,10 +539,83 @@ export function HoleLayout({ layout, compact = false, className }: HoleLayoutPro
           .addTo(map);
       }
 
-      // Walkback distance-to-pin markers along the centerline (100/150/200/250).
-      // Only render markers shorter than the hole — a 380-yard hole skips the 250.
       const holeLengthM = hole.centerline_distance_m;
-      if (holeLengthM != null) {
+
+      if (aimMode && holeLengthM != null) {
+        // Tee-shot aim picker. A draggable handle on the centerline; a label
+        // marker below it shows the snapped distance from the tee in yards.
+        // Mapbox's `draggable: true` lets the marker move freely with the
+        // pointer; we snap it back onto the centerline in the drag handler.
+        const initial = pointAlongFromEnd(centerlineCoords, holeLengthM / 2) ?? [
+          hole.green_lng!,
+          hole.green_lat!
+        ];
+
+        const handleEl = document.createElement('div');
+        Object.assign(handleEl.style, {
+          width: '20px',
+          height: '20px',
+          borderRadius: '50%',
+          background: '#fbbf24',
+          border: '2px solid #ffffff',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.55)',
+          cursor: 'grab',
+          touchAction: 'none'
+        } as Partial<CSSStyleDeclaration>);
+
+        const labelEl = document.createElement('div');
+        Object.assign(labelEl.style, {
+          marginTop: '6px',
+          padding: '3px 9px',
+          background: 'rgba(11,20,16,0.88)',
+          color: '#ffffff',
+          border: '1.5px solid #fbbf24',
+          borderRadius: '10px',
+          font: '700 11px system-ui, sans-serif',
+          whiteSpace: 'nowrap',
+          pointerEvents: 'none',
+          boxShadow: '0 2px 6px rgba(0,0,0,0.45)'
+        } as Partial<CSSStyleDeclaration>);
+
+        const updateLabelAtSnap = (snapSegIdx: number, snapT: number) => {
+          const dM = distanceAlongPolyline(centerlineCoords, snapSegIdx, snapT);
+          labelEl.textContent = `${Math.round(dM * (1 / YARDS_TO_METERS))} yds from tee`;
+        };
+
+        // Initial label: derive segment + t from the initial snap.
+        const initSnap = nearestPointOnPolyline(initial, centerlineCoords);
+        if (initSnap) {
+          updateLabelAtSnap(initSnap.segmentIndex, initSnap.t);
+        } else {
+          labelEl.textContent = '— yds from tee';
+        }
+
+        const handleMarker = new mapboxgl.Marker({
+          element: handleEl,
+          draggable: true,
+          anchor: 'center'
+        })
+          .setLngLat(initial)
+          .addTo(map);
+
+        const labelMarker = new mapboxgl.Marker({
+          element: labelEl,
+          anchor: 'top'
+        })
+          .setLngLat(initial)
+          .addTo(map);
+
+        handleMarker.on('drag', () => {
+          const ll = handleMarker.getLngLat();
+          const snap = nearestPointOnPolyline([ll.lng, ll.lat], centerlineCoords);
+          if (!snap) return;
+          handleMarker.setLngLat(snap.point);
+          labelMarker.setLngLat(snap.point);
+          updateLabelAtSnap(snap.segmentIndex, snap.t);
+        });
+      } else if (holeLengthM != null) {
+        // Walkback distance-to-pin markers along the centerline (100/150/200/250).
+        // Only render markers shorter than the hole — a 380-yard hole skips 250.
         for (const yds of YARDAGE_MARKERS) {
           const distM = yds * YARDS_TO_METERS;
           if (distM >= holeLengthM) continue;
@@ -507,7 +666,7 @@ export function HoleLayout({ layout, compact = false, className }: HoleLayoutPro
     return () => {
       map.remove();
     };
-  }, [useMapbox, layout, compact]);
+  }, [useMapbox, layout, compact, aimMode]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with
   // a 0×0 canvas at construction time. Matches HoleLayoutCard's wrapper.

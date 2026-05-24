@@ -11,6 +11,11 @@ interface HoleLayoutCardProps {
   yardage?: number | null;
   /** When true: smaller markers, tighter padding, fills width — used inside HoleTracking. */
   compact?: boolean;
+  /**
+   * Tee-shot planning mode — hides the walkback markers and shows a draggable
+   * distance-from-tee handle on the centerline. See HoleLayout for details.
+   */
+  aimMode?: boolean;
 }
 
 export function HoleLayoutCard({
@@ -18,7 +23,8 @@ export function HoleLayoutCard({
   holeNumber,
   par,
   yardage,
-  compact = false
+  compact = false,
+  aimMode = false
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -39,7 +45,7 @@ export function HoleLayoutCard({
         }}
       >
         <Box sx={{ flex: 1, minHeight: compact ? 160 : 240 }}>
-          <HoleLayout layout={data} compact={compact} />
+          <HoleLayout layout={data} compact={compact} aimMode={aimMode} />
         </Box>
         {(par != null || yardage != null) && (
           <Stack
