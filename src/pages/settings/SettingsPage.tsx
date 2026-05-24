@@ -14,6 +14,8 @@ import {
 } from '@mui/material';
 import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
 import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
+import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded';
+import { useIsAdmin } from '@/admin/hooks/useIsAdmin';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useAuthStore } from '@/stores/authStore';
@@ -32,6 +34,7 @@ export function SettingsPage() {
   const toggleTheme = useSettingsStore((s) => s.toggleTheme);
   const watchModeEnabled = useSettingsStore((s) => s.watchModeEnabled);
   const setWatchMode = useSettingsStore((s) => s.setWatchMode);
+  const { data: isAdmin } = useIsAdmin();
 
   const [firstName, setFirstName] = useState(profile?.first_name ?? '');
   const [lastName, setLastName] = useState(profile?.last_name ?? '');
@@ -163,6 +166,30 @@ export function SettingsPage() {
             </Stack>
           </CardContent>
         </Card>
+
+        {isAdmin && (
+          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+            <CardContent>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+              >
+                Admin
+              </Typography>
+              <Stack mt={1}>
+                <Button
+                  startIcon={<AdminPanelSettingsRoundedIcon />}
+                  variant="outlined"
+                  onClick={() => navigate('/admin')}
+                  sx={{ minHeight: 56 }}
+                >
+                  Open Admin Panel
+                </Button>
+              </Stack>
+            </CardContent>
+          </Card>
+        )}
 
         <Divider />
 

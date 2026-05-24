@@ -15,6 +15,13 @@ import { PastRoundsPage } from '@/pages/round/PastRoundsPage';
 import { StatsPage } from '@/pages/stats/StatsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
+import { AdminGuard } from '@/admin/AdminGuard';
+import { AdminLayout } from '@/admin/pages/AdminLayout';
+import { AdminOverview } from '@/admin/pages/AdminOverview';
+import { AdminCoursesList } from '@/admin/pages/AdminCoursesList';
+import { AdminImport } from '@/admin/pages/AdminImport';
+import { AdminCourseDetail } from '@/admin/pages/AdminCourseDetail';
+import { AdminReview } from '@/admin/pages/AdminReview';
 
 export function AppRouter() {
   return (
@@ -86,6 +93,21 @@ export function AppRouter() {
         <Route path="/stats" element={<StatsPage />} />
         <Route path="/bag" element={<BagPage />} />
         <Route path="/settings" element={<SettingsPage />} />
+      </Route>
+
+      <Route
+        path="/admin"
+        element={
+          <AdminGuard>
+            <AdminLayout />
+          </AdminGuard>
+        }
+      >
+        <Route index element={<AdminOverview />} />
+        <Route path="courses" element={<AdminCoursesList />} />
+        <Route path="courses/import" element={<AdminImport />} />
+        <Route path="courses/:id" element={<AdminCourseDetail />} />
+        <Route path="review" element={<AdminReview />} />
       </Route>
 
       <Route path="*" element={<Navigate to="/" replace />} />

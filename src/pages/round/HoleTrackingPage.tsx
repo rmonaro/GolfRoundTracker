@@ -28,6 +28,7 @@ import { useBagStore } from '@/stores/bagStore';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
 import { AddShotSheet, RESULT_LABELS, type ShotEditDraft } from '@/features/round/AddShotSheet';
 import { PENALTY_LABELS } from '@/features/round/ShotSelectors';
+import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
 import { roundRepo } from '@/services/roundRepo';
 import { scoreVsPar } from '@/utils/format';
@@ -312,6 +313,18 @@ export function HoleTrackingPage() {
         />
 
         <Stack spacing={2} mt={2}>
+          {/* Top-down hole layout (Phase 5). Renders nothing when courseId is null or the
+              course has no OSM coverage; otherwise shows the SVG or a clean fallback. */}
+          <Box sx={{ maxHeight: { xs: '30vh', sm: '40vh' } }}>
+            <HoleLayoutCard
+              courseId={active.courseId}
+              holeNumber={hole.holeNumber}
+              par={hole.par}
+              yardage={hole.yardage}
+              compact
+            />
+          </Box>
+
           {/* Derived score snapshot — all values come from the shot list. */}
           <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
             <CardContent>

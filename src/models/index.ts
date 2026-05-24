@@ -8,13 +8,20 @@ export type {
   TargetResult,
   Lie,
   PenaltyType,
+  CourseSource,
+  CourseOsmStatus,
+  OrientationConfidence,
+  LngLat,
+  FeatureCoords,
   ProfileRow as Profile,
   ClubRow as Club,
   UserBagRow as UserBagClub,
   CourseRow as Course,
   RoundRow as Round,
   RoundHoleRow as RoundHole,
-  ShotRow as Shot
+  ShotRow as Shot,
+  HoleRow as CourseHole,
+  HoleFeatureRow as HoleFeature
 } from '@/types/database';
 
 export const FAIRWAY_OPTIONS = ['hit', 'left', 'right', 'short', 'long', 'na'] as const;

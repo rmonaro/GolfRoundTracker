@@ -42,6 +42,7 @@ export interface ProfileRow {
   email: string;
   handicap_goal: number | null;
   dominant_hand: DominantHand | null;
+  is_admin: boolean;
   created_at: string;
 }
 
@@ -62,6 +63,9 @@ export interface UserBagRow {
   order_position: number;
 }
 
+export type CourseSource = 'user' | 'api';
+export type CourseOsmStatus = 'pending' | 'synced' | 'no_coverage' | 'failed' | 'skip';
+
 export interface CourseRow {
   id: string;
   name: string;
@@ -74,7 +78,57 @@ export interface CourseRow {
   city: string | null;
   state: string | null;
   zip: string | null;
+  // Course library (migration 007)
+  course_api_id: string | null;
+  club_name: string | null;
+  country: string | null;
+  lat: number | null;
+  lng: number | null;
+  search_radius: number | null;
+  scorecard_external: Record<string, unknown> | null;
+  osm_synced_at: string | null;
+  osm_status: CourseOsmStatus | null;
+  osm_error: string | null;
+  source: CourseSource | null;
   created_by_user: string | null;
+}
+
+export type OrientationConfidence = 'confirmed' | 'reversed' | 'assumed' | 'manual';
+
+export interface HoleRow {
+  id: string;
+  course_id: string;
+  hole_number: number;
+  par: number | null;
+  tee_lng: number | null;
+  tee_lat: number | null;
+  green_lng: number | null;
+  green_lat: number | null;
+  rotation_radians: number | null;
+  orientation_confidence: OrientationConfidence | null;
+  bbox_min_lng: number | null;
+  bbox_min_lat: number | null;
+  bbox_max_lng: number | null;
+  bbox_max_lat: number | null;
+  centerline: Array<[number, number]> | null;
+}
+
+/** Single coordinate pair as [lng, lat] — same convention as OSM/GeoJSON. */
+export type LngLat = [number, number];
+
+/** A polygon is one or more rings; first is outer, rest are holes. A linestring is a ring of points. */
+export type FeatureCoords = LngLat[] | LngLat[][];
+
+export interface HoleFeatureRow {
+  id: string;
+  course_id: string;
+  hole_id: string | null;
+  osm_id: number | null;
+  /** e.g. fairway, green, bunker, water, tee, rough, hole_line */
+  feature_type: string;
+  is_line: boolean;
+  coords: FeatureCoords;
+  created_at: string;
 }
 
 export interface RoundRow {
