@@ -26,6 +26,16 @@ export const courseRepo = {
     return data ?? [];
   },
 
+  async getOne(courseId: string): Promise<Course | null> {
+    const { data, error } = await supabase
+      .from('courses')
+      .select('*')
+      .eq('id', courseId)
+      .maybeSingle();
+    if (error) throw toAppError(error, 'Could not load course');
+    return (data ?? null) as Course | null;
+  },
+
   async create(payload: CourseInsert): Promise<Course> {
     const { data, error } = await supabase
       .from('courses')

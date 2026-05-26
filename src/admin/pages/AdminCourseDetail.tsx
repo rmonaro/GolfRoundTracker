@@ -7,7 +7,12 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Stack,
+  TextField,
   Typography
 } from '@mui/material';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
@@ -15,11 +20,15 @@ import { Navigate, useParams } from 'react-router-dom';
 import { adminCoursesRepo } from '@/services/adminCoursesRepo';
 import { useResyncCourse } from '../hooks/useCoursesApi';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
+import { CourseEditDialog } from '../components/CourseEditDialog';
 
 export function AdminCourseDetail() {
   const queryClient = useQueryClient();
   const { id } = useParams<{ id: string }>();
   const [holeNumber, setHoleNumber] = useState(1);
+  const [editOpen, setEditOpen] = useState(false);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pastedJson, setPastedJson] = useState('');
   const resync = useResyncCourse();
 
   const { data: course, isLoading } = useQuery({
@@ -37,16 +46,41 @@ export function AdminCourseDetail() {
     );
   }
 
-  const onResync = () => {
-    resync.mutate(course.id, {
-      onSuccess: () => {
-        queryClient.invalidateQueries({ queryKey: ['admin-course', id] });
-        queryClient.invalidateQueries({ queryKey: ['admin-all-courses'] });
-        queryClient.invalidateQueries({ queryKey: ['admin-stats'] });
-        queryClient.invalidateQueries({ queryKey: ['hole-layout'] });
-      }
-    });
+  const invalidateAfterSync = () => {
+    queryClient.invalidateQueries({ queryKey: ['admin-course', id] });
+    queryClient.invalidateQueries({ queryKey: ['admin-all-courses'] });
+    queryClient.invalidateQueries({ queryKey: ['admin-stats'] });
+    queryClient.invalidateQueries({ queryKey: ['hole-layout'] });
   };
+
+  const onResync = () => {
+    resync.mutate({ courseId: course.id }, { onSuccess: invalidateAfterSync });
+  };
+
+  const onSyncFromPaste = () => {
+    resync.mutate(
+      { courseId: course.id, overpassJson: pastedJson },
+      {
+        onSuccess: () => {
+          invalidateAfterSync();
+          setPasteOpen(false);
+          setPastedJson('');
+        }
+      }
+    );
+  };
+
+  // Same query the edge function runs. Surfaced as a deep link so the admin
+  // can see exactly what Overpass returns (or doesn't) for these coords.
+  const radius = course.search_radius ?? 1500;
+  const overpassQuery =
+    course.lat != null && course.lng != null
+      ? `[out:json][timeout:25];\n(\n  way["golf"](around:${radius},${course.lat},${course.lng});\n  relation["golf"](around:${radius},${course.lat},${course.lng});\n);\nout geom;`
+      : '';
+  const overpassTurboUrl =
+    course.lat != null && course.lng != null
+      ? `https://overpass-turbo.eu/?Q=${encodeURIComponent(overpassQuery)}&C=${course.lat};${course.lng};16&R`
+      : '';
 
   return (
     <Stack spacing={2} sx={{ p: 2 }}>
@@ -66,9 +100,23 @@ export function AdminCourseDetail() {
             <Chip size="small" label={`osm: ${course.osm_status ?? '—'}`} />
             {course.course_api_id && <Chip size="small" label={`api id: ${course.course_api_id}`} />}
           </Stack>
-          <Stack direction="row" spacing={1} mt={2}>
-            <Button variant="outlined" onClick={onResync} disabled={resync.isPending}>
+          <Stack direction="row" spacing={1} mt={2} flexWrap="wrap" useFlexGap>
+            <Button variant="contained" onClick={() => setEditOpen(true)}>
+              Edit
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={onResync}
+              disabled={resync.isPending || course.lat == null || course.lng == null}
+            >
               {resync.isPending ? 'Syncing…' : 'Resync OSM'}
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={() => setPasteOpen(true)}
+              disabled={resync.isPending}
+            >
+              Sync from JSON
             </Button>
             <Button
               variant="text"
@@ -82,15 +130,147 @@ export function AdminCourseDetail() {
             >
               Open in OSM
             </Button>
+            <Button
+              variant="text"
+              disabled={!overpassTurboUrl}
+              onClick={() => window.open(overpassTurboUrl, '_blank')}
+            >
+              Inspect on Overpass Turbo
+            </Button>
           </Stack>
+          {(course.lat == null || course.lng == null) && (
+            <Alert severity="info" sx={{ mt: 1.5 }}>
+              This course has no lat/lng — tap <strong>Edit</strong> to add coordinates
+              before syncing OSM geometry.
+            </Alert>
+          )}
+          {course.osm_status === 'no_coverage' &&
+            course.lat != null &&
+            course.lng != null && (
+              <Alert severity="warning" sx={{ mt: 1.5 }}>
+                <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                  Overpass returned zero <code>golf=*</code> features around these
+                  coordinates (radius {radius}m).
+                </Typography>
+                <Typography variant="body2" component="div">
+                  Common fixes, in order of likelihood:
+                  <Box component="ol" sx={{ mt: 0.5, mb: 0, pl: 2.5 }}>
+                    <li>
+                      <strong>Bump the search radius</strong> via Edit — many courses
+                      span 2km+; try 3000m or 5000m.
+                    </li>
+                    <li>
+                      <strong>Verify lat/lng</strong> — the address geocode may have
+                      landed on the clubhouse driveway rather than the course. Open in
+                      OSM, zoom on the actual fairway, and copy coords from the URL.
+                    </li>
+                    <li>
+                      <strong>Inspect on Overpass Turbo</strong> (button above) to see
+                      what's actually tagged within {radius}m. If the result is empty
+                      but the boundary shows on osm.org, the course has{' '}
+                      <code>leisure=golf_course</code> but no per-hole{' '}
+                      <code>golf=*</code> features — we can't render holes without
+                      them.
+                    </li>
+                  </Box>
+                </Typography>
+              </Alert>
+            )}
           {resync.error && (
             <Alert severity="error" sx={{ mt: 1 }}>
               {(resync.error as Error).message}
             </Alert>
           )}
           {resync.data && (
-            <Alert severity={resync.data.ok ? 'success' : 'error'} sx={{ mt: 1 }}>
-              {resync.data.status} — holes: {resync.data.holes ?? 0}, features: {resync.data.features ?? 0}
+            <Alert
+              severity={
+                resync.data.ok
+                  ? resync.data.status === 'synced'
+                    ? 'success'
+                    : 'warning'
+                  : 'error'
+              }
+              sx={{ mt: 1 }}
+            >
+              <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                {resync.data.status} — holes: {resync.data.holes ?? 0}, features:{' '}
+                {resync.data.features ?? 0}
+              </Typography>
+              {resync.data.diagnostics && (
+                <Box component="div" sx={{ mt: 1, fontSize: '0.8rem' }}>
+                  <div>
+                    Overpass returned <strong>{resync.data.diagnostics.overpassElements}</strong>{' '}
+                    element{resync.data.diagnostics.overpassElements === 1 ? '' : 's'}.
+                  </div>
+                  {Object.keys(resync.data.diagnostics.golfTagCounts).length > 0 && (
+                    <div>
+                      golf=* breakdown:{' '}
+                      {Object.entries(resync.data.diagnostics.golfTagCounts)
+                        .map(([tag, n]) => `${tag}=${n}`)
+                        .join(', ')}
+                    </div>
+                  )}
+                  {resync.data.diagnostics.golfTaggedWithoutGeometry > 0 && (
+                    <div>
+                      <strong>
+                        {resync.data.diagnostics.golfTaggedWithoutGeometry}
+                      </strong>{' '}
+                      golf-tagged element(s) had no geometry attached — likely an
+                      Overpass partial response. Retry the sync.
+                    </div>
+                  )}
+                  {resync.data.diagnostics.holeWaysWithoutRef > 0 && (
+                    <div>
+                      <strong>{resync.data.diagnostics.holeWaysWithoutRef}</strong>{' '}
+                      golf=hole way(s) lacked a <code>ref</code> tag (hole number) and
+                      were skipped. We can still build holes from green+tee polygons if
+                      those exist.
+                    </div>
+                  )}
+                  {resync.data.diagnostics.overpassRemark && (
+                    <div>
+                      <strong>Overpass remark:</strong>{' '}
+                      {resync.data.diagnostics.overpassRemark}
+                    </div>
+                  )}
+                  {resync.data.diagnostics.mirror && (
+                    <div>
+                      Mirror used: <code>{resync.data.diagnostics.mirror}</code>
+                    </div>
+                  )}
+                  {resync.data.diagnostics.attemptedMirrors &&
+                    resync.data.diagnostics.attemptedMirrors.length > 1 && (
+                      <div>
+                        Tried:{' '}
+                        {resync.data.diagnostics.attemptedMirrors.join(' → ')}
+                      </div>
+                    )}
+                  {resync.data.diagnostics.attemptDetails &&
+                    resync.data.diagnostics.attemptDetails.length > 0 && (
+                      <Box
+                        component="ul"
+                        sx={{
+                          mt: 0.75,
+                          mb: 0,
+                          pl: 2,
+                          fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                          fontSize: '0.7rem'
+                        }}
+                      >
+                        {resync.data.diagnostics.attemptDetails.map((d, i) => (
+                          <li key={i}>
+                            <strong>{d.id}</strong> → {String(d.status)} (
+                            {d.bodyChars} chars)
+                            {d.error ? ` — ${d.error}` : ''}
+                            {d.snippet
+                              ? `: ${d.snippet.replace(/\s+/g, ' ').slice(0, 120)}`
+                              : ''}
+                          </li>
+                        ))}
+                      </Box>
+                    )}
+                </Box>
+              )}
             </Alert>
           )}
         </CardContent>
@@ -119,6 +299,74 @@ export function AdminCourseDetail() {
           </Stack>
         </CardContent>
       </Card>
+
+      <CourseEditDialog
+        open={editOpen}
+        course={course}
+        onClose={() => setEditOpen(false)}
+      />
+
+      <Dialog
+        open={pasteOpen}
+        onClose={() => {
+          if (resync.isPending) return;
+          setPasteOpen(false);
+        }}
+        fullWidth
+        maxWidth="md"
+      >
+        <DialogTitle>Sync from pasted Overpass JSON</DialogTitle>
+        <DialogContent dividers>
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+            When our edge function can't reach the Overpass mirrors (IP blocking),
+            you can fetch the same query in your browser and paste the result here:
+          </Typography>
+          <Box
+            component="ol"
+            sx={{ mt: 0, mb: 2, pl: 3, fontSize: '0.85rem', color: 'text.secondary' }}
+          >
+            <li>Tap <strong>Inspect on Overpass Turbo</strong> on this page to open the exact query.</li>
+            <li>In Overpass Turbo, click <strong>Data</strong> in the top right.</li>
+            <li>Select all (Cmd/Ctrl+A) and copy.</li>
+            <li>Paste below and click Sync.</li>
+          </Box>
+          <TextField
+            label="Overpass JSON"
+            multiline
+            minRows={10}
+            maxRows={20}
+            fullWidth
+            value={pastedJson}
+            onChange={(e) => setPastedJson(e.target.value)}
+            placeholder='{"version":0.6,"generator":"Overpass API",…,"elements":[…]}'
+            slotProps={{
+              htmlInput: {
+                style: {
+                  fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+                  fontSize: '0.75rem'
+                }
+              }
+            }}
+          />
+          {resync.error && (
+            <Alert severity="error" sx={{ mt: 1.5 }}>
+              {(resync.error as Error).message}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setPasteOpen(false)} disabled={resync.isPending}>
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={onSyncFromPaste}
+            disabled={resync.isPending || pastedJson.trim().length === 0}
+          >
+            {resync.isPending ? 'Syncing…' : 'Sync'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }

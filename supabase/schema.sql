@@ -74,6 +74,7 @@ create table if not exists public.user_bag (
 alter table public.user_bag add column if not exists brand text;
 alter table public.user_bag add column if not exists model text;
 alter table public.user_bag add column if not exists loft numeric(4,1);
+alter table public.user_bag add column if not exists typical_distance_yards numeric(5,1);
 
 create index if not exists user_bag_user_idx on public.user_bag(user_id, order_position);
 

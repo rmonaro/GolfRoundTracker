@@ -27,6 +27,7 @@ export function useBag() {
       brand?: string | null;
       model?: string | null;
       loft?: number | null;
+      typicalDistanceYards?: number | null;
     }) => {
       if (!userId) throw new Error('Not authenticated');
       const club = await bagRepo.createClub(input.name.trim(), input.category);
@@ -34,7 +35,8 @@ export function useBag() {
       await bagRepo.addToBag(userId, club.id, next, {
         brand: input.brand ?? null,
         model: input.model ?? null,
-        loft: input.loft ?? null
+        loft: input.loft ?? null,
+        typicalDistanceYards: input.typicalDistanceYards ?? null
       });
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['bag', userId] })
@@ -47,6 +49,7 @@ export function useBag() {
       brand?: string | null;
       model?: string | null;
       loft?: number | null;
+      typicalDistanceYards?: number | null;
       /** If supplied, creates a fresh clubs row with this name+category and re-links user_bag.club_id. */
       newClub?: { name: string; category: ClubCategory };
     }) => {
@@ -55,12 +58,15 @@ export function useBag() {
         brand?: string | null;
         model?: string | null;
         loft?: number | null;
+        typical_distance_yards?: number | null;
         club_id?: string;
       } = {};
       if ('customName' in input) patch.custom_name = input.customName ?? null;
       if ('brand' in input) patch.brand = input.brand ?? null;
       if ('model' in input) patch.model = input.model ?? null;
       if ('loft' in input) patch.loft = input.loft ?? null;
+      if ('typicalDistanceYards' in input)
+        patch.typical_distance_yards = input.typicalDistanceYards ?? null;
       if (input.newClub) {
         const club = await bagRepo.createClub(input.newClub.name, input.newClub.category);
         patch.club_id = club.id;

@@ -42,11 +42,45 @@ export function useBulkImport() {
   });
 }
 
+/**
+ * Single-course import. Used by the Start Round picker so a regular user can
+ * grab a course from GolfCourseAPI on demand. Returns the upserted DB row so
+ * the caller can auto-select it after import.
+ */
+export interface ImportedCourse {
+  id: string;
+  name: string;
+  course_api_id: string | null;
+  source: string | null;
+  [k: string]: unknown;
+}
+
+export function useImportCourse() {
+  return useMutation({
+    mutationFn: (courseApiId: string) =>
+      callCoursesApi<{ course: ImportedCourse }>('import', { courseApiId })
+  });
+}
+
+export interface ResyncArgs {
+  courseId: string;
+  /**
+   * When provided, the edge function skips its Overpass network call and uses
+   * this pasted JSON instead. Use case: our edge IPs are blocked by Overpass
+   * mirrors but the admin can fetch the same query in their browser via
+   * Overpass Turbo and paste the result here.
+   */
+  overpassJson?: string;
+}
+
 export function useResyncCourse() {
   return useMutation({
-    mutationFn: async (courseId: string) => {
+    mutationFn: async (args: ResyncArgs) => {
       const { data, error } = await supabase.functions.invoke('sync-course-osm', {
-        body: { courseId }
+        body: {
+          courseId: args.courseId,
+          ...(args.overpassJson ? { overpassJson: args.overpassJson } : {})
+        }
       });
       if (error) throw new Error(error.message ?? 'Function call failed');
       if (data && typeof data === 'object' && 'error' in data) {
@@ -58,7 +92,26 @@ export function useResyncCourse() {
         status: string;
         holes?: number;
         features?: number;
+        diagnostics?: SyncDiagnostics;
       };
     }
   });
+}
+
+/** Mirrors the SyncDiagnostics interface in the sync-course-osm edge function. */
+export interface SyncDiagnostics {
+  overpassElements: number;
+  golfTagCounts: Record<string, number>;
+  golfTaggedWithoutGeometry: number;
+  holeWaysWithoutRef: number;
+  overpassRemark?: string;
+  mirror?: string;
+  attemptedMirrors?: string[];
+  attemptDetails?: Array<{
+    id: string;
+    status: number | 'error';
+    bodyChars: number;
+    snippet?: string;
+    error?: string;
+  }>;
 }

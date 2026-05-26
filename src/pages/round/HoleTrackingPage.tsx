@@ -25,9 +25,18 @@ import FlagCircleRoundedIcon from '@mui/icons-material/FlagCircleRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBulletedRounded';
+import MyLocationRoundedIcon from '@mui/icons-material/MyLocationRounded';
+import StopCircleRoundedIcon from '@mui/icons-material/StopCircleRounded';
+import {
+  ensureGpsPermission,
+  getCurrentPosition,
+  haversineMeters,
+  isGpsAvailable
+} from '@/services/gpsService';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
+import { useSettingsStore } from '@/stores/settingsStore';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
 import { AddShotSheet, RESULT_LABELS, type ShotEditDraft } from '@/features/round/AddShotSheet';
 import { PENALTY_LABELS } from '@/features/round/ShotSelectors';
@@ -36,6 +45,8 @@ import { useHoleLayout } from '@/features/course/useHoleLayout';
 import { metersToYards } from '@/features/course/distance';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
 import { roundRepo } from '@/services/roundRepo';
+import { courseRepo } from '@/services/courseRepo';
+import { useQuery } from '@tanstack/react-query';
 import {
   STROKE_PENALTY_TYPES,
   type BagClub,
@@ -57,6 +68,135 @@ export function HoleTrackingPage() {
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
+  // GPS shot tracking — capture start on tap, stop captures end + opens
+  // AddShotSheet pre-filled with the calculated distance.
+  // GPS opt-in. Off by default so we don't prompt non-GPS users for location.
+  const gpsEnabled = useSettingsStore((s) => s.gpsEnabled);
+
+  // At-course detection. Skipped entirely when GPS is disabled.
+  const courseQuery = useQuery({
+    queryKey: ['course', active?.courseId],
+    enabled: !!active?.courseId && gpsEnabled,
+    queryFn: () => (active?.courseId ? courseRepo.getOne(active.courseId) : null)
+  });
+  const [userLoc, setUserLoc] = useState<{ lat: number; lng: number } | null>(null);
+  useEffect(() => {
+    if (!gpsEnabled || !isGpsAvailable()) return;
+    let mounted = true;
+    (async () => {
+      try {
+        await ensureGpsPermission();
+        const pt = await getCurrentPosition({ maximumAge: 30_000 });
+        if (mounted) setUserLoc({ lat: pt.lat, lng: pt.lng });
+      } catch {
+        // Best-effort; at-course detection is non-critical.
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, [gpsEnabled]);
+  const atCourseStatus = (() => {
+    const cLat = courseQuery.data?.lat;
+    const cLng = courseQuery.data?.lng;
+    if (cLat == null || cLng == null || !userLoc) return null;
+    const distM = haversineMeters(
+      { ...userLoc, accuracyM: 0, timestamp: 0 },
+      { lat: cLat, lng: cLng, accuracyM: 0, timestamp: 0 }
+    );
+    // Courses span 1-2 km. 2 km buffer from the centroid is generous coverage.
+    return { distM, atCourse: distM < 2000 };
+  })();
+
+  const [tracking, setTracking] = useState<{ lat: number; lng: number } | null>(null);
+  const [trackingBusy, setTrackingBusy] = useState(false);
+  const [trackingError, setTrackingError] = useState<string | null>(null);
+  const [pendingGps, setPendingGps] = useState<{
+    startLat: number;
+    startLng: number;
+    endLat: number;
+    endLng: number;
+    calculatedDistanceM: number;
+    inferredLie?: import('@/models').Lie | null;
+    inferredTargetResult?: import('@/models').TargetResult | null;
+  } | null>(null);
+
+  const onStartTracking = async () => {
+    if (!isGpsAvailable()) {
+      setTrackingError('GPS not available on this device');
+      return;
+    }
+    setTrackingBusy(true);
+    setTrackingError(null);
+    try {
+      const status = await ensureGpsPermission();
+      if (status.location !== 'granted' && status.coarseLocation !== 'granted') {
+        setTrackingError('Location permission denied. Enable it in device Settings.');
+        return;
+      }
+      const pt = await getCurrentPosition();
+
+      // Refuse to start tracking when the user clearly isn't at the course.
+      // Skips the check when the course doesn't have lat/lng (can't verify).
+      // 2 km threshold matches the at-course chip in the header.
+      const cLat = courseQuery.data?.lat;
+      const cLng = courseQuery.data?.lng;
+      if (cLat != null && cLng != null) {
+        const distM = haversineMeters(
+          { lat: pt.lat, lng: pt.lng, accuracyM: 0, timestamp: 0 },
+          { lat: cLat, lng: cLng, accuracyM: 0, timestamp: 0 }
+        );
+        if (distM > 2000) {
+          const miles = (distM / 1609.344).toFixed(1);
+          setTrackingError(
+            `You're ${miles} mi from ${active?.courseName ?? 'the course'} — tracking won't start.`
+          );
+          // Keep the fresh fix in userLoc so the header chip reflects reality.
+          setUserLoc({ lat: pt.lat, lng: pt.lng });
+          return;
+        }
+      }
+
+      setUserLoc({ lat: pt.lat, lng: pt.lng });
+      setTracking({ lat: pt.lat, lng: pt.lng });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not get start location';
+      setTrackingError(
+        /denied|permission/i.test(msg)
+          ? 'Location permission denied. Enable it in device Settings.'
+          : msg
+      );
+    } finally {
+      setTrackingBusy(false);
+    }
+  };
+
+  const onStopTracking = async () => {
+    if (!tracking) return;
+    setTrackingBusy(true);
+    setTrackingError(null);
+    try {
+      const pt = await getCurrentPosition();
+      const distM = haversineMeters(
+        { ...tracking, accuracyM: 0, timestamp: 0 },
+        { lat: pt.lat, lng: pt.lng, accuracyM: 0, timestamp: 0 }
+      );
+      setPendingGps({
+        startLat: tracking.lat,
+        startLng: tracking.lng,
+        endLat: pt.lat,
+        endLng: pt.lng,
+        calculatedDistanceM: distM
+      });
+      setTracking(null);
+      setEditingShot(null);
+      setShotSheet(true);
+    } catch (err) {
+      setTrackingError(err instanceof Error ? err.message : 'Could not get end location');
+    } finally {
+      setTrackingBusy(false);
+    }
+  };
 
   if (!active) return <Navigate to="/round" replace />;
 
@@ -172,7 +312,12 @@ export function HoleTrackingPage() {
     lie,
     penaltyType,
     derivedShotResult,
-    notes
+    notes,
+    startLat,
+    startLng,
+    endLat,
+    endLng,
+    calculatedDistance
   }: {
     clubId: string | null;
     clubCategory: import('@/models').ClubCategory | null;
@@ -184,7 +329,16 @@ export function HoleTrackingPage() {
     penaltyType: PenaltyType | null;
     derivedShotResult: import('@/models').ShotResult;
     notes: string | null;
+    startLat: number | null;
+    startLng: number | null;
+    endLat: number | null;
+    endLng: number | null;
+    calculatedDistance: number | null;
   }) => {
+    // The pendingGps prop is read by AddShotSheet on open; clear it now so a
+    // subsequent manual Add Shot doesn't reuse stale GPS.
+    setPendingGps(null);
+
     if (editingShot) {
       // EDIT path — update the existing shot in place.
       updateShotLocal(hole.holeNumber, editingShot.tempId, {
@@ -196,7 +350,12 @@ export function HoleTrackingPage() {
         penaltyType,
         distance,
         distanceUnit,
-        notes
+        notes,
+        startLat,
+        startLng,
+        endLat,
+        endLng,
+        calculatedDistance
       });
       setShotSheet(false);
       setEditingShot(null);
@@ -212,7 +371,12 @@ export function HoleTrackingPage() {
             penalty_type: penaltyType,
             distance,
             distance_unit: distanceUnit,
-            notes
+            notes,
+            start_lat: startLat,
+            start_lng: startLng,
+            end_lat: endLat,
+            end_lng: endLng,
+            calculated_distance: calculatedDistance
           });
         } catch (err) {
           console.error('[shot] edit save failed', err);
@@ -236,7 +400,12 @@ export function HoleTrackingPage() {
       distance,
       distanceUnit,
       notes,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
+      startLat,
+      startLng,
+      endLat,
+      endLng,
+      calculatedDistance
     });
     setShotSheet(false);
 
@@ -276,12 +445,11 @@ export function HoleTrackingPage() {
         distance,
         distance_unit: distanceUnit,
         notes,
-        // V2 GPS — left null until the GPS flow ships
-        start_lat: null,
-        start_lng: null,
-        end_lat: null,
-        end_lng: null,
-        calculated_distance: null
+        start_lat: startLat,
+        start_lng: startLng,
+        end_lat: endLat,
+        end_lng: endLng,
+        calculated_distance: calculatedDistance
       });
       markShotSynced(hole.holeNumber, tempId, persisted.id);
     } catch (err) {
@@ -318,7 +486,14 @@ export function HoleTrackingPage() {
   };
 
   return (
-    <Box sx={{ minHeight: '100dvh', bgcolor: 'background.default' }}>
+    <Box
+      sx={{
+        height: '100dvh',
+        bgcolor: 'background.default',
+        overflow: 'hidden',
+        position: 'relative'
+      }}
+    >
       <Box
         sx={{
           position: 'sticky',
@@ -359,6 +534,31 @@ export function HoleTrackingPage() {
               noWrap
             >
               {active.courseName}
+              {atCourseStatus && (
+                <Box
+                  component="span"
+                  sx={{
+                    ml: 0.75,
+                    px: 0.6,
+                    py: 0.05,
+                    borderRadius: 0.75,
+                    fontSize: '0.62rem',
+                    fontWeight: 700,
+                    bgcolor: atCourseStatus.atCourse
+                      ? 'rgba(46,125,50,0.25)'
+                      : 'rgba(237,108,2,0.22)',
+                    color: atCourseStatus.atCourse ? 'success.light' : 'warning.light',
+                    border: 1,
+                    borderColor: atCourseStatus.atCourse
+                      ? 'rgba(46,125,50,0.6)'
+                      : 'rgba(237,108,2,0.55)'
+                  }}
+                >
+                  {atCourseStatus.atCourse
+                    ? '● AT COURSE'
+                    : `● ${(atCourseStatus.distM / 1609.344).toFixed(1)} MI AWAY`}
+                </Box>
+              )}
             </Typography>
             <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }} noWrap>
               {`Hole ${hole.holeNumber} · Par ${hole.par ?? '—'} · ${
@@ -399,7 +599,68 @@ export function HoleTrackingPage() {
           ballDistanceFromTeeM={ballDistanceFromTeeM}
           suggestedHandleDistanceM={suggestedHandleDistanceM}
           puttingMode={lastShotOnGreen}
+          bagClubs={bagClubs}
+          onShotLanded={(data) => {
+            setPendingGps({
+              startLat: data.start[1],
+              startLng: data.start[0],
+              endLat: data.end[1],
+              endLng: data.end[0],
+              calculatedDistanceM: data.calculatedDistanceM,
+              inferredLie: data.inferredLie,
+              inferredTargetResult: data.inferredTargetResult
+            });
+            setEditingShot(null);
+            setShotSheet(true);
+          }}
         />
+
+        {/* Full-hole yardage — fixed left panel. Replaces the on-map bubble
+            so it stays legible regardless of zoom / rotation. Hidden when no
+            yardage is known (e.g. unsynced course). */}
+        {displayYards != null && (
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 12,
+              left: 12,
+              zIndex: 3,
+              pointerEvents: 'none',
+              bgcolor: 'rgba(11,20,16,0.88)',
+              color: 'common.white',
+              border: 1.5,
+              borderColor: '#fbbf24',
+              borderRadius: 1.5,
+              px: 1.25,
+              py: 0.5,
+              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+              lineHeight: 1.1,
+              textAlign: 'center'
+            }}
+          >
+            <Typography
+              variant="caption"
+              sx={{
+                display: 'block',
+                fontSize: '0.6rem',
+                fontWeight: 700,
+                letterSpacing: 0.6,
+                color: '#fbbf24',
+                textTransform: 'uppercase'
+              }}
+            >
+              To Pin
+            </Typography>
+            <Typography
+              sx={{
+                fontSize: '1.1rem',
+                fontWeight: 800
+              }}
+            >
+              {displayYards} yds
+            </Typography>
+          </Box>
+        )}
 
         {/* Stat pills — top-right column. Score is the headline value (accent). */}
         <Stack
@@ -445,12 +706,56 @@ export function HoleTrackingPage() {
           </Button>
         )}
 
+        {/* Track GPS — only visible when GPS is enabled in Settings. Secondary
+            FAB to the left of Add Shot. Toggles start-capture / stop-capture;
+            on stop opens AddShotSheet pre-filled with the GPS distance. */}
+        {gpsEnabled && (
+          <Fab
+            color={tracking ? 'error' : 'default'}
+            aria-label={tracking ? 'stop tracking' : 'track shot with gps'}
+            onClick={tracking ? onStopTracking : onStartTracking}
+            disabled={trackingBusy}
+            size="medium"
+            sx={{
+              position: 'absolute',
+              bottom: 'calc(16px + env(safe-area-inset-bottom))',
+              right: 88,
+              zIndex: 4,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
+            }}
+          >
+            {tracking ? <StopCircleRoundedIcon /> : <MyLocationRoundedIcon />}
+          </Fab>
+        )}
+        {gpsEnabled && (tracking || trackingError) && (
+          <Box
+            sx={{
+              position: 'absolute',
+              bottom: 'calc(76px + env(safe-area-inset-bottom))',
+              right: 16,
+              zIndex: 4,
+              bgcolor: 'rgba(11,20,16,0.85)',
+              color: trackingError ? 'error.light' : 'common.white',
+              px: 1.25,
+              py: 0.5,
+              borderRadius: 1,
+              fontSize: '0.7rem',
+              fontWeight: 600,
+              maxWidth: 200,
+              textAlign: 'right'
+            }}
+          >
+            {trackingError ?? 'Tracking… tap stop at ball'}
+          </Box>
+        )}
+
         {/* Add Shot — circular FAB, bottom-right. Opens the AddShotSheet. */}
         <Fab
           color="primary"
           aria-label="add shot"
           onClick={() => {
             setEditingShot(null);
+            setPendingGps(null);
             setShotSheet(true);
           }}
           sx={{
@@ -511,16 +816,23 @@ export function HoleTrackingPage() {
                 targetResult: editingShot.targetResult,
                 lie: editingShot.lie,
                 penaltyType: editingShot.penaltyType,
-                notes: editingShot.notes
+                notes: editingShot.notes,
+                startLat: editingShot.startLat ?? null,
+                startLng: editingShot.startLng ?? null,
+                endLat: editingShot.endLat ?? null,
+                endLng: editingShot.endLng ?? null,
+                calculatedDistance: editingShot.calculatedDistance ?? null
               } satisfies ShotEditDraft)
             : null
         }
         holePar={hole.par}
         bagClubs={bagClubs}
         defaultClubId={defaultClubId}
+        defaultGps={pendingGps}
         onClose={() => {
           setShotSheet(false);
           setEditingShot(null);
+          setPendingGps(null);
         }}
         onSubmit={onSubmitShot}
       />

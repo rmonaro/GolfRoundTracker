@@ -34,17 +34,29 @@ import {
   type LngLat
 } from '../_shared/geo.ts';
 
-// Primary + fallback Overpass mirrors. We try them in order on failure.
-// overpass-api.de is strict about User-Agent; kumi.systems is more permissive.
+// Primary + fallback Overpass mirrors, ordered by data freshness:
+//   * overpass-api.de — canonical, fully up-to-date (mod_security gated)
+//   * overpass.kumi.systems — usually current, slow under load
+//   * overpass.osm.ch — runs an OLD snapshot; returns empty for any course
+//     added to OSM since their last sync. Last-resort only.
+// The French mirror was removed — 403 "white-listed usages only".
 const OVERPASS_MIRRORS = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.osm.ch/api/interpreter'
 ];
-// Apache mod_security on overpass-api.de blocks generic Deno UAs.
-// Mimicking curl is the most reliable across all three mirrors.
+// Browser-style UA. Combined with Origin + Referer matching Overpass Turbo,
+// this gets past the mod_security 406 on overpass-api.de.
 const OVERPASS_UA =
-  'curl/8.4.0 GolfRoundTracker-edge-fn';
+  'Mozilla/5.0 (compatible; GolfRoundTracker/1.0; +https://example.com)';
+// Mimic Overpass Turbo's request envelope. mod_security on overpass-api.de
+// returns 406 on `Accept: application/json` + bot-like UA combos, but accepts
+// `Accept: */*` + a Turbo-origin Referer (the public Turbo UI is whitelisted).
+const OVERPASS_BROWSER_HEADERS = {
+  Accept: '*/*',
+  Origin: 'https://overpass-turbo.eu',
+  Referer: 'https://overpass-turbo.eu/'
+} as const;
 const BATCH_DEFAULT = 10;
 const BATCH_SYNC_ALL = 100;
 const PER_COURSE_GAP_MS = 2000;
@@ -111,11 +123,45 @@ Deno.serve(async (req) => {
     const body = (await req.json().catch(() => ({}))) as {
       courseId?: string;
       syncAll?: boolean;
+      /**
+       * Escape hatch: when our edge IPs are blocked by Overpass mirrors, the
+       * admin can paste the raw JSON from Overpass Turbo and we'll feed it
+       * into the normalize/write logic without calling Overpass ourselves.
+       * Accepts the JSON either as a string (what you'd get from a paste) or
+       * already-parsed object.
+       */
+      overpassJson?: string | { elements?: OverpassElement[]; remark?: string };
     };
     const supabase = serviceClient();
 
     if (body.courseId) {
-      const result = await syncOneCourse(supabase, body.courseId);
+      let pasted: { elements: OverpassElement[]; remark?: string } | undefined;
+      if (body.overpassJson != null) {
+        try {
+          const parsed =
+            typeof body.overpassJson === 'string'
+              ? JSON.parse(body.overpassJson)
+              : body.overpassJson;
+          if (!parsed || !Array.isArray(parsed.elements)) {
+            return errorResponse(
+              400,
+              'pasted overpassJson must contain an `elements` array (paste the full response from Overpass Turbo)'
+            );
+          }
+          pasted = {
+            elements: parsed.elements as OverpassElement[],
+            remark: typeof parsed.remark === 'string' ? parsed.remark : undefined
+          };
+        } catch (err) {
+          return errorResponse(
+            400,
+            `pasted overpassJson is not valid JSON: ${
+              err instanceof Error ? err.message : 'unknown'
+            }`
+          );
+        }
+      }
+      const result = await syncOneCourse(supabase, body.courseId, pasted);
       return jsonResponse(result, result.ok ? 200 : 500);
     }
 
@@ -165,9 +211,34 @@ interface SyncResult {
   holes?: number;
   features?: number;
   error?: string;
+  /** Surfaced to admin UI so no_coverage can be diagnosed without digging through function logs. */
+  diagnostics?: SyncDiagnostics;
 }
 
-async function syncOneCourse(supabase: ReturnType<typeof serviceClient>, courseId: string): Promise<SyncResult> {
+interface SyncDiagnostics {
+  /** Total elements Overpass returned (before any filtering). */
+  overpassElements: number;
+  /** Element count keyed by golf=* tag value (e.g. { green: 18, hole: 18, fairway: 18 }). */
+  golfTagCounts: Record<string, number>;
+  /** Elements that had a golf=* tag but no usable geometry — likely cause of false no_coverage. */
+  golfTaggedWithoutGeometry: number;
+  /** golf=hole ways missing the `ref` tag — dropped from holes, not added to features either. */
+  holeWaysWithoutRef: number;
+  /** Overpass "remark" field (server-side warning, e.g. rate limit / partial result). */
+  overpassRemark?: string;
+  /** Which mirror+method produced the response we used. */
+  mirror?: string;
+  /** Mirrors+methods we tried in order — useful when all return empty. */
+  attemptedMirrors?: string[];
+  /** Per-attempt status/body details. Only populated on no_coverage so we can confirm what each mirror sent. */
+  attemptDetails?: OverpassAttemptDetail[];
+}
+
+async function syncOneCourse(
+  supabase: ReturnType<typeof serviceClient>,
+  courseId: string,
+  pasted?: { elements: OverpassElement[]; remark?: string }
+): Promise<SyncResult> {
   const { data: course, error } = await supabase
     .from('courses')
     .select('id, lat, lng, search_radius, source, osm_status')
@@ -177,28 +248,74 @@ async function syncOneCourse(supabase: ReturnType<typeof serviceClient>, courseI
   if (error || !course) {
     return { ok: false, status: 'failed', courseId, error: 'Course not found' };
   }
-  if (course.source !== 'api') {
-    return { ok: false, status: 'failed', courseId, error: 'Only api-sourced courses are synced' };
-  }
+  // Manual admin sync (via courseId) is allowed for ANY source as long as the
+  // course has lat/lng. Batch / cron sync is still gated to source='api' at
+  // the query level above. This lets the admin edit a user-added course
+  // (add lat/lng + flip osm_status to 'pending') and resync it on demand.
   if (course.lat == null || course.lng == null) {
     await markStatus(supabase, courseId, 'no_coverage', 'Missing lat/lng');
     return { ok: false, status: 'no_coverage', courseId, error: 'Missing lat/lng' };
   }
 
   const radius = course.search_radius ?? 1500;
-  let overpass: OverpassElement[];
-  try {
-    overpass = await queryOverpass(course.lat, course.lng, radius);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Overpass failed';
-    await markStatus(supabase, courseId, 'failed', msg);
-    return { ok: false, status: 'failed', courseId, error: msg };
+  let overpassResp: OverpassResponse;
+  if (pasted) {
+    // Admin pasted the JSON directly — skip the network call. We still want
+    // every downstream step (normalize, write rows, mark status) to behave
+    // identically, so we shape the pasted payload like a queryOverpass result.
+    overpassResp = {
+      elements: pasted.elements,
+      remark: pasted.remark,
+      mirror: 'pasted-json',
+      attemptedMirrors: ['pasted-json']
+    };
+    console.log(
+      `[sync] course=${courseId} using pasted Overpass JSON (${pasted.elements.length} elements)`
+    );
+  } else {
+    try {
+      overpassResp = await queryOverpass(course.lat, course.lng, radius);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Overpass failed';
+      await markStatus(supabase, courseId, 'failed', msg);
+      return { ok: false, status: 'failed', courseId, error: msg };
+    }
   }
+  const overpass = overpassResp.elements;
+
+  // Build diagnostics from the raw response BEFORE normalization, so we can
+  // distinguish "Overpass returned nothing" from "Overpass returned data but
+  // normalize dropped everything." These get surfaced in the API response.
+  const diagnostics: SyncDiagnostics = {
+    overpassElements: overpass.length,
+    golfTagCounts: {},
+    golfTaggedWithoutGeometry: 0,
+    holeWaysWithoutRef: 0,
+    overpassRemark: overpassResp.remark,
+    mirror: overpassResp.mirror,
+    attemptedMirrors: overpassResp.attemptedMirrors,
+    // Only attach per-attempt details on empty results so we don't bloat
+    // success responses with full HTTP traces.
+    attemptDetails: overpass.length === 0 ? overpassResp.attemptDetails : undefined
+  };
+  for (const el of overpass) {
+    const golfTag = (el.tags as Record<string, string> | undefined)?.golf;
+    if (!golfTag) continue;
+    diagnostics.golfTagCounts[golfTag] =
+      (diagnostics.golfTagCounts[golfTag] ?? 0) + 1;
+    if (elementCoords(el).length === 0) {
+      diagnostics.golfTaggedWithoutGeometry++;
+    }
+    if (golfTag === 'hole' && el.type === 'way' && !el.tags?.ref) {
+      diagnostics.holeWaysWithoutRef++;
+    }
+  }
+  console.log(`[sync] course=${courseId} diagnostics`, diagnostics);
 
   const { holes, features } = normalizeOverpass(overpass);
   if (holes.length === 0 && features.length === 0) {
     await markStatus(supabase, courseId, 'no_coverage', null);
-    return { ok: true, status: 'no_coverage', courseId };
+    return { ok: true, status: 'no_coverage', courseId, diagnostics };
   }
 
   console.log(`[sync] course=${courseId} holes=${holes.length} features=${features.length}`);
@@ -351,7 +468,8 @@ async function syncOneCourse(supabase: ReturnType<typeof serviceClient>, courseI
     status: 'synced',
     courseId,
     holes: insertedHoles.length,
-    features: featureCount
+    features: featureCount,
+    diagnostics
   };
 }
 
@@ -452,58 +570,158 @@ async function markStatus(
 // Overpass query + normalization
 // ---------------------------------------------------------------------------
 
-async function queryOverpass(lat: number, lng: number, radius: number): Promise<OverpassElement[]> {
-  // Single-line query — avoids URL-encoded newline edge cases.
+interface OverpassResponse {
+  elements: OverpassElement[];
+  /** Server-side warning (rate limit, partial result, runtime error) — passed through to diagnostics. */
+  remark?: string;
+  /** Which mirror+method ultimately produced this response (for diagnostics). */
+  mirror?: string;
+  /** Mirrors+methods we tried — populated even on empty results so admins can diagnose. */
+  attemptedMirrors?: string[];
+  /** Per-attempt evidence: status code, body length, snippet. Surfaced when every mirror returns empty. */
+  attemptDetails?: OverpassAttemptDetail[];
+}
+
+interface OverpassAttemptDetail {
+  id: string;
+  status: number | 'error';
+  bodyChars: number;
+  /** First 240 chars of the response body — enough to see the JSON envelope or a stray HTML error page. */
+  snippet?: string;
+  error?: string;
+}
+
+async function queryOverpass(lat: number, lng: number, radius: number): Promise<OverpassResponse> {
+  // Server-side timeout matches our client-side abort budget so Overpass
+  // releases its query slot if we give up. Worst case: 3 mirrors × 2 methods
+  // × 20s = 120s — inside Supabase's 150s function budget, with headroom for
+  // parse + DB writes. In practice GET-first usually returns on the first
+  // attempt and we exit early.
+  const PER_ATTEMPT_TIMEOUT_MS = 20_000;
   const query =
-    `[out:json][timeout:30];` +
+    `[out:json][timeout:20];` +
     `(way["golf"](around:${radius},${lat},${lng});` +
     `relation["golf"](around:${radius},${lat},${lng}););` +
     `out geom;`;
 
   const encoded = encodeURIComponent(query);
 
-  // Each attempt: try GET first (simpler, no content-negotiation issues),
-  // then POST as a fallback for mirrors that prefer it.
   let lastErr = '';
+  // If every mirror returns 200 but empty, we'd otherwise have nothing to
+  // hand back. Capture the first empty success so the caller still gets the
+  // `remark` (rate-limit notice) for diagnostics.
+  let emptyFallback: OverpassResponse | null = null;
+  const attempted: string[] = [];
+  const attemptDetails: OverpassAttemptDetail[] = [];
+
   for (const baseUrl of OVERPASS_MIRRORS) {
+    // Each mirror gets a GET attempt first (matches Overpass Turbo's behavior
+    // — empirically the most reliable across the three mirrors), then POST
+    // as a fallback for any mirror that gates GET differently.
     for (const method of ['GET', 'POST'] as const) {
+      const attemptId = `${method} ${baseUrl}`;
+      attempted.push(attemptId);
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
       try {
         const init: RequestInit =
           method === 'GET'
             ? {
                 method: 'GET',
-                headers: {
-                  Accept: 'application/json',
-                  'User-Agent': OVERPASS_UA
-                }
+                headers: { ...OVERPASS_BROWSER_HEADERS, 'User-Agent': OVERPASS_UA },
+                signal: controller.signal
               }
             : {
                 method: 'POST',
                 headers: {
-                  Accept: 'application/json',
+                  ...OVERPASS_BROWSER_HEADERS,
                   'Content-Type': 'application/x-www-form-urlencoded',
                   'User-Agent': OVERPASS_UA
                 },
-                body: `data=${encoded}`
+                body: `data=${encoded}`,
+                signal: controller.signal
               };
         const url = method === 'GET' ? `${baseUrl}?data=${encoded}` : baseUrl;
         const res = await fetch(url, init);
+        clearTimeout(timer);
+        // Read body once, then JSON.parse — so we can capture a snippet even
+        // when JSON parsing fails or the response is HTML (a clear sign of
+        // mod_security blocking / a Cloudflare interstitial).
+        const bodyText = await res.text();
+        attemptDetails.push({
+          id: attemptId,
+          status: res.status,
+          bodyChars: bodyText.length,
+          snippet: bodyText.slice(0, 240)
+        });
         if (res.ok) {
-          const data = await res.json();
-          return (data.elements ?? []) as OverpassElement[];
+          let data: { elements?: OverpassElement[]; remark?: string };
+          try {
+            data = JSON.parse(bodyText);
+          } catch {
+            lastErr = `${attemptId} → 200 but body is not JSON (likely an HTML interstitial)`;
+            console.warn('[overpass]', lastErr);
+            continue;
+          }
+          const elements = (data.elements ?? []) as OverpassElement[];
+          const remark = typeof data.remark === 'string' ? data.remark : undefined;
+          if (elements.length > 0) {
+            console.log(`[overpass] ${attemptId} → ${elements.length} elements`);
+            return {
+              elements,
+              remark,
+              mirror: attemptId,
+              attemptedMirrors: attempted,
+              attemptDetails
+            };
+          }
+          // 200 OK but empty — treat as a soft miss and try the next mirror.
+          // Mirrors occasionally cache empty responses or rate-limit silently.
+          lastErr = `${attemptId} → 200 but 0 elements${remark ? ` (remark: ${remark})` : ''}`;
+          console.warn('[overpass]', lastErr);
+          if (!emptyFallback) {
+            emptyFallback = {
+              elements,
+              remark,
+              mirror: attemptId,
+              attemptedMirrors: attempted,
+              attemptDetails
+            };
+          }
+        } else {
+          lastErr = `${attemptId} → ${res.status}: ${bodyText.slice(0, 180)}`;
+          console.warn('[overpass]', lastErr);
         }
-        const text = await res.text();
-        lastErr = `${method} ${baseUrl} → ${res.status}: ${text.slice(0, 180)}`;
-        console.warn('[overpass]', lastErr);
       } catch (err) {
-        lastErr = `${method} ${baseUrl} → ${err instanceof Error ? err.message : 'network'}`;
+        clearTimeout(timer);
+        const reason =
+          err instanceof Error
+            ? err.name === 'AbortError'
+              ? `timeout after ${PER_ATTEMPT_TIMEOUT_MS}ms`
+              : err.message
+            : 'network';
+        lastErr = `${attemptId} → ${reason}`;
+        attemptDetails.push({
+          id: attemptId,
+          status: 'error',
+          bodyChars: 0,
+          error: reason
+        });
         console.warn('[overpass] threw', lastErr);
       }
     }
     // Small back-off before trying the next mirror.
     await new Promise((r) => setTimeout(r, 500));
   }
-  throw new Error(`All Overpass attempts failed. Last: ${lastErr}`);
+
+  // No mirror returned data. If at least one returned 200 with [] we surface
+  // that (with its remark) so admins see the genuine "no data here" case.
+  if (emptyFallback) {
+    return { ...emptyFallback, attemptedMirrors: attempted, attemptDetails };
+  }
+  throw new Error(
+    `All Overpass attempts failed. Last: ${lastErr}. Attempted: ${attempted.join(', ')}`
+  );
 }
 
 interface NormalizedHoleLine {

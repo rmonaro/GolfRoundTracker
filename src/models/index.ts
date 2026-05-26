@@ -62,5 +62,7 @@ export interface BagClub {
   brand: string | null;
   model: string | null;
   loft: number | null;
+  /** User-entered typical carry distance in yards. Drives the aim-mode club recommendation. */
+  typicalDistanceYards: number | null;
   orderPosition: number;
 }

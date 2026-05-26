@@ -14,6 +14,7 @@ import {
   Typography
 } from '@mui/material';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import { metersToYards } from '@/services/gpsService';
 import type {
   BagClub,
   ClubCategory,
@@ -107,6 +108,12 @@ export interface ShotEditDraft {
   lie: Lie | null;
   penaltyType: PenaltyType | null;
   notes: string | null;
+  /** V2 GPS — included so editing a GPS-tracked shot preserves the original capture. */
+  startLat?: number | null;
+  startLng?: number | null;
+  endLat?: number | null;
+  endLng?: number | null;
+  calculatedDistance?: number | null;
 }
 
 interface AddShotSheetProps {
@@ -125,6 +132,30 @@ interface AddShotSheetProps {
    * so the user doesn't have to re-tap the putter tier every putt.
    */
   defaultClubId?: string | null;
+  /**
+   * Optional pre-captured GPS for a NEW shot. When set, the sheet seeds the
+   * distance input from `calculatedDistance` (converted to yards) and stashes
+   * start/end coords + calculated distance for the eventual save. Used by the
+   * on-course Track button — capture happens on the hole screen, the sheet
+   * just collects the rest of the shot info.
+   */
+  defaultGps?: {
+    startLat: number;
+    startLng: number;
+    endLat: number;
+    endLng: number;
+    calculatedDistanceM: number;
+    /**
+     * Optional pre-classified outcome from the map-tap flow. The HoleLayout
+     * map ray-casts the tap against course feature polygons (green/bunker/
+     * fairway/etc.) and the green-relative bearing, then ships the result
+     * here so the user opens the sheet with the right tier-2/lie already
+     * highlighted. Both can be null when the GPS came from Track-button
+     * capture (no map context).
+     */
+    inferredLie?: Lie | null;
+    inferredTargetResult?: TargetResult | null;
+  } | null;
   onClose: () => void;
   onSubmit: (payload: {
     clubId: string | null;
@@ -138,6 +169,12 @@ interface AddShotSheetProps {
     /** Legacy single-field shot_result derived from the above. */
     derivedShotResult: ShotResult;
     notes: string | null;
+    /** V2 GPS fields — null when the user didn't engage GPS capture. */
+    startLat: number | null;
+    startLng: number | null;
+    endLat: number | null;
+    endLng: number | null;
+    calculatedDistance: number | null;
   }) => void;
 }
 
@@ -188,6 +225,7 @@ export function AddShotSheet({
   holePar,
   bagClubs,
   defaultClubId,
+  defaultGps,
   onClose,
   onSubmit
 }: AddShotSheetProps) {
@@ -199,6 +237,14 @@ export function AddShotSheet({
   const [lie, setLie] = useState<Lie | null>(null);
   const [penaltyType, setPenaltyType] = useState<PenaltyType | null>(null);
   const [notes, setNotes] = useState<string>('');
+  // V2 GPS — start position captured when user taps "Start GPS"; end position
+  // captured automatically on submit if start is set. calculatedDistance is
+  // populated on submit too and surfaced alongside the manual entry.
+  const [startGps, setStartGps] = useState<{ lat: number; lng: number } | null>(null);
+  const [endGps, setEndGps] = useState<{ lat: number; lng: number } | null>(null);
+  const [calculatedDistance, setCalculatedDistance] = useState<number | null>(null);
+  const [gpsStatus, setGpsStatus] = useState<'idle' | 'capturing' | 'ready' | 'error'>('idle');
+  const [gpsError, setGpsError] = useState<string | null>(null);
 
   const selectedClub = bagClubs.find((c) => c.clubId === clubId) ?? null;
   const targetType = useMemo(
@@ -225,6 +271,21 @@ export function AddShotSheet({
       setLie(editing.lie);
       setPenaltyType(editing.penaltyType);
       setNotes(editing.notes ?? '');
+      // Pre-fill GPS from the edit draft so re-submission preserves the
+      // original capture (we don't re-capture on edit).
+      setStartGps(
+        editing.startLat != null && editing.startLng != null
+          ? { lat: editing.startLat, lng: editing.startLng }
+          : null
+      );
+      setEndGps(
+        editing.endLat != null && editing.endLng != null
+          ? { lat: editing.endLat, lng: editing.endLng }
+          : null
+      );
+      setCalculatedDistance(editing.calculatedDistance ?? null);
+      setGpsStatus(editing.startLat != null ? 'ready' : 'idle');
+      setGpsError(null);
     } else {
       // New shot. Apply optional defaultClubId (e.g. putter after on-green
       // shot) so the user opens straight to the relevant selectors.
@@ -233,12 +294,38 @@ export function AddShotSheet({
         : null;
       setClubId(defaultClub?.clubId ?? null);
       setTier1(defaultClub ? tier1ForCategory(defaultClub.category) : null);
-      setDistance('');
-      setUnit(defaultClub?.category === 'putter' ? 'feet' : 'yards');
-      setTargetResult(null);
-      setLie(null);
+      // Seed distance from the pre-captured GPS (in yards) when provided —
+      // user can still override.
+      if (defaultGps) {
+        const yds = Math.round(metersToYards(defaultGps.calculatedDistanceM));
+        setDistance(String(yds));
+        setUnit('yards');
+        setStartGps({ lat: defaultGps.startLat, lng: defaultGps.startLng });
+        setEndGps({ lat: defaultGps.endLat, lng: defaultGps.endLng });
+        setCalculatedDistance(defaultGps.calculatedDistanceM);
+        setGpsStatus('ready');
+      } else {
+        setDistance('');
+        setUnit(defaultClub?.category === 'putter' ? 'feet' : 'yards');
+        setStartGps(null);
+        setEndGps(null);
+        setCalculatedDistance(null);
+        setGpsStatus('idle');
+      }
+      // Seed from the map-tap classification when present. Putt mode is the
+      // exception: the putt UI uses a different TargetResult vocabulary (made/
+      // long/short/left/right with its own selector) and infers lie itself, so
+      // we leave both null and let the user pick.
+      const isPuttDefault = defaultClub?.category === 'putter';
+      setTargetResult(
+        !isPuttDefault && defaultGps?.inferredTargetResult
+          ? defaultGps.inferredTargetResult
+          : null
+      );
+      setLie(!isPuttDefault && defaultGps?.inferredLie ? defaultGps.inferredLie : null);
       setPenaltyType(null);
       setNotes('');
+      setGpsError(null);
     }
     // bagClubs reference can change as the bag hydrates; we intentionally only re-run
     // when `open` or `editing` flips. Including bagClubs would re-reset mid-edit.
@@ -290,7 +377,12 @@ export function AddShotSheet({
       lie,
       penaltyType,
       derivedShotResult,
-      notes: notes.trim() || null
+      notes: notes.trim() || null,
+      startLat: startGps?.lat ?? null,
+      startLng: startGps?.lng ?? null,
+      endLat: endGps?.lat ?? null,
+      endLng: endGps?.lng ?? null,
+      calculatedDistance
     });
   };
 
@@ -356,8 +448,14 @@ export function AddShotSheet({
 
         <Divider sx={{ mb: 2 }} />
 
-        {/* 2. DISTANCE + UNIT */}
+        {/* 2. DISTANCE + UNIT — GPS-captured distance shown inline when the
+            caller seeded one via `defaultGps` (i.e. the on-course Track flow). */}
         <SectionLabel>2. Distance</SectionLabel>
+        {calculatedDistance != null && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+            GPS: {Math.round(metersToYards(calculatedDistance))} yds — adjust below if needed
+          </Typography>
+        )}
         <Stack direction="row" spacing={1} alignItems="stretch" mb={!distanceValid ? 0.5 : 2}>
           <TextField
             value={distance}

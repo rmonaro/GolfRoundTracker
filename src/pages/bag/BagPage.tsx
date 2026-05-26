@@ -188,9 +188,23 @@ export function BagPage() {
                       }}
                     >
                       <Box sx={{ flex: 1, minWidth: 0 }}>
-                        <Typography variant="subtitle1" sx={{ fontWeight: 600 }} noWrap>
-                          {club.customName || club.name}
-                        </Typography>
+                        <Stack direction="row" alignItems="center" spacing={0.75}>
+                          <Typography variant="subtitle1" sx={{ fontWeight: 600 }} noWrap>
+                            {club.customName || club.name}
+                          </Typography>
+                          {club.typicalDistanceYards != null && (
+                            <Chip
+                              size="small"
+                              label={`${club.typicalDistanceYards} yds`}
+                              color="primary"
+                              variant="outlined"
+                              sx={{
+                                height: 22,
+                                '.MuiChip-label': { px: 0.75, fontSize: '0.72rem', fontWeight: 600 }
+                              }}
+                            />
+                          )}
+                        </Stack>
                         {subtitle && (
                           <Typography variant="caption" color="text.secondary" noWrap>
                             {subtitle}
@@ -239,7 +253,8 @@ export function BagPage() {
             category: values.category,
             brand: values.brand,
             model: values.model,
-            loft: values.loft
+            loft: values.loft,
+            typicalDistanceYards: values.typicalDistanceYards
           });
           setAddOpen(false);
         }}
@@ -265,6 +280,7 @@ export function BagPage() {
               brand: values.brand,
               model: values.model,
               loft: values.loft,
+              typicalDistanceYards: values.typicalDistanceYards,
               newClub: nameChanged || categoryChanged ? { name: newName, category: values.category } : undefined
             });
           }
@@ -388,7 +404,8 @@ function parseExistingClub(club: BagClub): ClubFormValues {
     loft,
     wedgeType,
     brand: club.brand,
-    model: club.model
+    model: club.model,
+    typicalDistanceYards: club.typicalDistanceYards
   };
 }
 
@@ -403,6 +420,7 @@ interface ClubFormValues {
   wedgeType: WedgeType | null;
   brand: string | null;
   model: string | null;
+  typicalDistanceYards: number | null;
 }
 
 interface ClubFormDialogProps {
@@ -421,6 +439,7 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
   const [loft, setLoft] = useState<string>('');
   const [wedgeType, setWedgeType] = useState<WedgeType | null>(null);
   const [model, setModel] = useState<string>('');
+  const [typicalDistance, setTypicalDistance] = useState<string>('');
 
   useEffect(() => {
     if (!open) return;
@@ -430,6 +449,9 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
       setLoft(initial.loft != null ? String(initial.loft) : '');
       setWedgeType(initial.wedgeType);
       setModel(initial.model ?? '');
+      setTypicalDistance(
+        initial.typicalDistanceYards != null ? String(initial.typicalDistanceYards) : ''
+      );
       if (initial.brand) {
         if ((CLUB_BRANDS as readonly string[]).includes(initial.brand)) {
           setBrandSelection(initial.brand);
@@ -450,6 +472,7 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
       setLoft('');
       setWedgeType(null);
       setModel('');
+      setTypicalDistance('');
     }
   }, [open, initial]);
 
@@ -484,6 +507,13 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
     wedgeType
   );
 
+  const typicalDistanceNum = (() => {
+    const t = typicalDistance.trim();
+    if (t === '') return null;
+    const n = Number(t);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  })();
+
   const submit = () => {
     onSubmit({
       category,
@@ -491,7 +521,8 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
       loft: isWedge && loftIsNumeric ? loftNumber : null,
       wedgeType: isWedge ? wedgeType : null,
       brand: resolvedBrand,
-      model: model.trim() || null
+      model: model.trim() || null,
+      typicalDistanceYards: typicalDistanceNum
     });
   };
 
@@ -629,6 +660,23 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
             onChange={(e) => setModel(e.target.value)}
             placeholder="e.g. Paradym, Stealth 2, T100"
           />
+
+          {/* 5. TYPICAL DISTANCE (optional) — drives club recommendation
+              in the hole-tracking aim mode. Skip for putters. */}
+          {category !== 'putter' && (
+            <TextField
+              label="Typical distance (optional)"
+              value={typicalDistance}
+              onChange={(e) => setTypicalDistance(e.target.value)}
+              placeholder="e.g. 245"
+              type="number"
+              inputProps={{ inputMode: 'numeric', step: 1, min: 0 }}
+              InputProps={{
+                endAdornment: <InputAdornment position="end">yds</InputAdornment>
+              }}
+              helperText="How far you typically hit this club. Used to suggest the right club while aiming."
+            />
+          )}
 
           {/* Live name preview */}
           <Box

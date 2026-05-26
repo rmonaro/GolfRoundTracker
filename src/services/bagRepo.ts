@@ -16,7 +16,7 @@ export const bagRepo = {
     const { data, error } = await supabase
       .from('user_bag')
       .select(
-        'id, user_id, club_id, custom_name, brand, model, loft, order_position, clubs:club_id(id, name, category)'
+        'id, user_id, club_id, custom_name, brand, model, loft, typical_distance_yards, order_position, clubs:club_id(id, name, category)'
       )
       .eq('user_id', userId)
       .order('order_position', { ascending: true });
@@ -31,6 +31,10 @@ export const bagRepo = {
         brand: row.brand ?? null,
         model: row.model ?? null,
         loft: row.loft == null ? null : Number(row.loft),
+        typicalDistanceYards:
+          row.typical_distance_yards == null
+            ? null
+            : Number(row.typical_distance_yards),
         orderPosition: row.order_position,
         name: club?.name ?? 'Club',
         category: (club?.category ?? 'iron') as ClubCategory
@@ -57,6 +61,7 @@ export const bagRepo = {
       brand?: string | null;
       model?: string | null;
       loft?: number | null;
+      typicalDistanceYards?: number | null;
     } = {}
   ): Promise<void> {
     const { error } = await supabase.from('user_bag').insert({
@@ -66,7 +71,8 @@ export const bagRepo = {
       custom_name: options.customName ?? null,
       brand: options.brand ?? null,
       model: options.model ?? null,
-      loft: options.loft ?? null
+      loft: options.loft ?? null,
+      typical_distance_yards: options.typicalDistanceYards ?? null
     });
     if (error) throw toAppError(error, 'Could not add club to bag');
   },
@@ -88,6 +94,7 @@ export const bagRepo = {
       brand?: string | null;
       model?: string | null;
       loft?: number | null;
+      typical_distance_yards?: number | null;
       order_position?: number;
       club_id?: string;
     }

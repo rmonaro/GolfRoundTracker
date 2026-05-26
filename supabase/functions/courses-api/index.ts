@@ -55,17 +55,21 @@ Deno.serve(async (req) => {
 
   try {
     const auth = await resolveAuth(req);
-    requireAdmin(auth);
 
     const body = await req.json().catch(() => ({}));
     const { action, ...args } = body as { action?: string; [k: string]: unknown };
 
+    // Per-action authorization. `search` and `import` are available to any
+    // authenticated user (so the Start Round picker can offer GolfCourseAPI
+    // lookups). `bulkImport` stays admin-only — it's the curated-library tool
+    // that walks the API key's quota much faster.
     switch (action) {
       case 'search':
         return await handleSearch(String(args.query ?? '').trim());
       case 'import':
         return await handleImport(String(args.courseApiId ?? ''), auth.userId);
       case 'bulkImport':
+        requireAdmin(auth);
         return await handleBulkImport(args.courseApiIds as string[], auth.userId);
       default:
         return errorResponse(400, `Unknown action: ${action}`);
@@ -132,10 +136,25 @@ async function fetchCourseDetail(courseApiId: string): Promise<GolfCourseDetail>
     const text = await res.text();
     throw new Error(`GolfCourseAPI detail ${res.status}: ${text}`);
   }
-  return await res.json();
+  // GolfCourseAPI returns `/courses/{id}` wrapped as `{ course: {...} }`. Some
+  // mirrors / older docs show the bare object — defensively handle either.
+  // Without this, name/id/location come out undefined and every upsert lands
+  // on the same `course_api_id="undefined"` row.
+  const json = await res.json();
+  return (json?.course ?? json) as GolfCourseDetail;
 }
 
 function mapDetailToCourseRow(detail: GolfCourseDetail, adminUserId: string) {
+  // Sanity check the unwrap — if we still don't have an id, the API contract
+  // changed (or the wrapper is nested deeper). Throw a clear error rather
+  // than upserting garbage that's hard to diagnose later.
+  if (detail.id == null) {
+    throw new Error(
+      `GolfCourseAPI detail response is missing \`id\`. Got keys: ${Object.keys(
+        detail ?? {}
+      ).join(', ')}`
+    );
+  }
   return {
     name: detail.course_name ?? 'Unknown course',
     club_name: detail.club_name ?? null,

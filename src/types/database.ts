@@ -60,6 +60,7 @@ export interface UserBagRow {
   brand: string | null;
   model: string | null;
   loft: number | null;
+  typical_distance_yards: number | null;
   order_position: number;
 }
 

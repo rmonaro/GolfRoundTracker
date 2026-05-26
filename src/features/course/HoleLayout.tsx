@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import type { HoleLayoutData } from '@/services/holesRepo';
-import type { CourseHole, LngLat } from '@/models';
+import type { BagClub, CourseHole, HoleFeature, Lie, LngLat, TargetResult } from '@/models';
 import {
   buildProjector,
   expandBoundsFromPoints,
@@ -46,6 +46,27 @@ interface HoleLayoutProps {
    * aim label from yards to feet since putt distances are typically <100 ft.
    */
   puttingMode?: boolean;
+  /**
+   * User's bag clubs. When present, the aim-mode drag label appends the
+   * recommended club (closest typicalDistanceYards to the current aim
+   * distance). Putters and clubs without a typical distance are skipped.
+   */
+  bagClubs?: BagClub[];
+  /**
+   * Tap-to-record callback. Fires when the user taps the map (not the aim
+   * handle). Receives the ball's current location (= aim line origin), the
+   * tap point, the haversine distance, and an inferred lie + direction-
+   * relative-to-green based on which OSM feature polygon the tap landed in.
+   * Use case: user took a shot, taps where the ball landed; parent opens
+   * AddShotSheet pre-filled.
+   */
+  onShotLanded?: (data: {
+    start: [number, number];
+    end: [number, number];
+    calculatedDistanceM: number;
+    inferredLie: Lie | null;
+    inferredTargetResult: TargetResult | null;
+  }) => void;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -102,6 +123,22 @@ function getStyle(type: string) {
 
 // -------------------- Geometry helpers --------------------
 
+/** Ray-casting point-in-polygon. Polygon is the outer ring as [lng, lat] points. */
+function pointInPolygon(point: [number, number], polygon: [number, number][]): boolean {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i][0];
+    const yi = polygon[i][1];
+    const xj = polygon[j][0];
+    const yj = polygon[j][1];
+    const intersect =
+      yi > point[1] !== yj > point[1] &&
+      point[0] < ((xj - xi) * (point[1] - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
 /** Compass bearing (degrees CW from north) from tee to green. Null if either is missing. */
 function teeToGreenBearing(hole: CourseHole): number | null {
   if (
@@ -137,6 +174,30 @@ function flattenCoords(coords: unknown, isLine: boolean): [number, number][] {
 }
 
 const YARDS_TO_METERS = 0.9144;
+
+/**
+ * Pick the club whose typical carry distance is closest to a target yardage.
+ * Skips putters (handled in putting mode) and clubs with no recorded distance.
+ * Returns null when no club qualifies — caller suppresses the recommendation.
+ */
+function recommendClub(
+  bagClubs: BagClub[] | undefined,
+  targetYards: number
+): BagClub | null {
+  if (!bagClubs || bagClubs.length === 0) return null;
+  let best: BagClub | null = null;
+  let bestDelta = Infinity;
+  for (const c of bagClubs) {
+    if (c.category === 'putter') continue;
+    if (c.typicalDistanceYards == null) continue;
+    const delta = Math.abs(c.typicalDistanceYards - targetYards);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      best = c;
+    }
+  }
+  return best;
+}
 /** Walkback markers — distance-to-pin reference points spaced from the green. */
 const YARDAGE_MARKERS = [100, 150, 200, 250] as const;
 
@@ -318,6 +379,83 @@ function pointAlongFromEndProjected(
   return null;
 }
 
+/**
+ * Classify a map tap against the hole's features:
+ *   - lie: type of the topmost polygon containing the point. Priority order is
+ *     green → bunker → water → water_hazard → fairway → tee → rough, defaulting
+ *     to 'rough' when no polygon matches (consistent with most golf-app conv-
+ *     entions — out-of-fairway with no hazard is treated as rough).
+ *   - targetResult: direction relative to the GREEN. We rotate the (tap - green)
+ *     vector by the negative tee→green bearing so "along the line of play" is
+ *     the y-axis and "across" is the x-axis. Then pick the dominant axis:
+ *       • |along| > |across|  →  long (past pin)  / short (before pin)
+ *       • |across| > |along|  →  right            / left
+ *     If the tap is on the green polygon, we treat it as 'hit' regardless of
+ *     position — the user can correct it in the shot sheet.
+ */
+function classifyTap(
+  tap: [number, number],
+  features: HoleFeature[],
+  bearing: number,
+  green: [number, number]
+): { lie: Lie | null; targetResult: TargetResult | null } {
+  // Walk features by priority so the topmost polygon wins.
+  const priority: Array<{ type: string; lie: Lie }> = [
+    { type: 'green', lie: 'green' },
+    { type: 'bunker', lie: 'bunker' },
+    { type: 'water_hazard', lie: 'penalty' },
+    { type: 'water', lie: 'penalty' },
+    { type: 'fairway', lie: 'fairway' },
+    { type: 'tee', lie: 'fairway' },
+    { type: 'rough', lie: 'rough' }
+  ];
+
+  let matchedLie: Lie | null = null;
+  for (const p of priority) {
+    for (const f of features) {
+      if (f.feature_type !== p.type || f.is_line) continue;
+      // Polygon coords are LngLat[][] (outer ring first). Test outer ring only;
+      // donut holes (e.g. a bunker carved into the fairway) are good enough for
+      // a tap classification — exact hazard nesting is rare in OSM data.
+      const rings = f.coords as [number, number][][];
+      const outer = Array.isArray(rings[0]) ? rings[0] : null;
+      if (!outer) continue;
+      if (pointInPolygon(tap, outer)) {
+        matchedLie = p.lie;
+        break;
+      }
+    }
+    if (matchedLie) break;
+  }
+  // Default to rough when nothing matched — better than leaving lie null.
+  const lie: Lie = matchedLie ?? 'rough';
+
+  // Direction relative to the green. Decompose (tap - green) onto the
+  // tee→green unit vector (along) and its right-perpendicular (across).
+  // cos-lat keeps the math-frame (east, north) Euclidean at golf scales.
+  // For compass bearing b (CW from north), the tee→green direction in math
+  // (east, north) coords is (sin b, cos b); its right-perpendicular (CW)
+  // is (cos b, -sin b). So:
+  //   along  = dx·sin b + dy·cos b   (positive = past pin, negative = short)
+  //   across = dx·cos b − dy·sin b   (positive = right of pin, negative = left)
+  const cosLat = Math.cos((green[1] * Math.PI) / 180);
+  const dx = (tap[0] - green[0]) * cosLat;
+  const dy = tap[1] - green[1];
+  const br = (bearing * Math.PI) / 180;
+  const along = dx * Math.sin(br) + dy * Math.cos(br);
+  const across = dx * Math.cos(br) - dy * Math.sin(br);
+
+  let targetResult: TargetResult | null;
+  if (lie === 'green') {
+    targetResult = 'hit';
+  } else if (Math.abs(along) > Math.abs(across)) {
+    targetResult = along > 0 ? 'long' : 'short';
+  } else {
+    targetResult = across > 0 ? 'right' : 'left';
+  }
+  return { lie, targetResult };
+}
+
 // -------------------- Component --------------------
 
 export function HoleLayout({
@@ -327,7 +465,9 @@ export function HoleLayout({
   aimMode = false,
   ballDistanceFromTeeM = 0,
   suggestedHandleDistanceM,
-  puttingMode = false
+  puttingMode = false,
+  bagClubs,
+  onShotLanded
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -372,7 +512,18 @@ export function HoleLayout({
         zoom: 16.5,
         bearing,
         pitch: 0,
-        interactive: false,
+        // `interactive: true` so map.on('click') fires for tap-to-record. All
+        // individual gestures disabled so the framing stays locked — user
+        // can't accidentally pan/zoom out of the hole view.
+        interactive: true,
+        dragPan: false,
+        scrollZoom: false,
+        boxZoom: false,
+        dragRotate: false,
+        keyboard: false,
+        doubleClickZoom: false,
+        touchZoomRotate: false,
+        touchPitch: false,
         attributionControl: false
       });
     } catch (err) {
@@ -453,8 +604,6 @@ export function HoleLayout({
       hole.green_lng,
       hole.green_lat
     ]);
-
-    const fullYardageLabel = formatDistance(hole.centerline_distance_m, 'yds');
 
     // Estimated ball position: walk the centerline from the tee by the sum of
     // prior shot distances. Falls back to the tee on first shot (0 distance).
@@ -603,30 +752,9 @@ export function HoleLayout({
         .setLngLat([hole.green_lng!, hole.green_lat!])
         .addTo(map);
 
-      // Primary yardage bubble — sits to the LEFT of the green marker. Uses
-      // `anchor: 'right'` so the bubble's right edge butts against the green
-      // point (with a small marginRight gap), making "left of the hole" mean
-      // exactly that regardless of map rotation. Hidden in aimMode (the
-      // user-driven distance label takes its place near the aim handle).
-      if (!aimMode && hole.centerline_distance_m != null) {
-        const fullEl = document.createElement('div');
-        fullEl.textContent = fullYardageLabel;
-        Object.assign(fullEl.style, {
-          background: 'rgba(11,20,16,0.88)',
-          color: '#ffffff',
-          padding: '4px 10px',
-          borderRadius: '12px',
-          font: '800 13px system-ui, sans-serif',
-          border: '1.5px solid #fbbf24',
-          marginRight: '14px',
-          whiteSpace: 'nowrap',
-          pointerEvents: 'none',
-          boxShadow: '0 2px 6px rgba(0,0,0,0.45)'
-        } as Partial<CSSStyleDeclaration>);
-        new mapboxgl.Marker({ element: fullEl, anchor: 'right' })
-          .setLngLat([hole.green_lng!, hole.green_lat!])
-          .addTo(map);
-      }
+      // Note: the full-hole yardage no longer renders on the map. The parent
+      // (HoleTrackingPage) shows it in a fixed left-side panel so it stays
+      // legible regardless of zoom / rotation.
 
       const holeLengthM = hole.centerline_distance_m;
 
@@ -687,14 +815,19 @@ export function HoleLayout({
 
         const handleEl = document.createElement('div');
         Object.assign(handleEl.style, {
-          width: '22px',
-          height: '22px',
+          width: '28px',
+          height: '28px',
           borderRadius: '50%',
           background: '#fbbf24',
           border: '2px solid #ffffff',
           boxShadow: '0 2px 7px rgba(0,0,0,0.6)',
           cursor: 'grab',
-          touchAction: 'none'
+          touchAction: 'none',
+          userSelect: 'none',
+          // Suppress iOS long-press callout / magnifier that otherwise eats drag gestures.
+          WebkitUserSelect: 'none',
+          WebkitTouchCallout: 'none',
+          WebkitTapHighlightColor: 'transparent'
         } as Partial<CSSStyleDeclaration>);
 
         const labelEl = document.createElement('div');
@@ -718,14 +851,23 @@ export function HoleLayout({
             // Putts are short — feet reads better than yards. 1 m = 3.28084 ft.
             labelEl.textContent = `${Math.round(dM * 3.28084)} ft ${originLabel}`;
           } else {
-            labelEl.textContent = `${Math.round(dM / YARDS_TO_METERS)} yds ${originLabel}`;
+            const yds = Math.round(dM / YARDS_TO_METERS);
+            const pick = recommendClub(bagClubs, yds);
+            const clubSuffix = pick
+              ? ` · ${pick.customName || pick.name}`
+              : '';
+            labelEl.textContent = `${yds} yds ${originLabel}${clubSuffix}`;
           }
         };
         updateLabel(initialAim);
 
+        // `draggable: false` — Mapbox's built-in drag uses pointer events that
+        // misfire under iOS WKWebView with `interactive: false`. We handle the
+        // drag ourselves with `setPointerCapture` so the touch stream stays
+        // bound to the handle even when the finger leaves it.
         const handleMarker = new mapboxgl.Marker({
           element: handleEl,
-          draggable: true,
+          draggable: false,
           anchor: 'center'
         })
           .setLngLat(initialAim)
@@ -738,9 +880,29 @@ export function HoleLayout({
           .setLngLat(initialAim)
           .addTo(map);
 
-        handleMarker.on('drag', () => {
-          const ll = handleMarker.getLngLat();
+        // Custom pointer-based drag. Works for mouse, pen, and touch via a
+        // single code path. `setPointerCapture` is the key bit on iOS — it
+        // routes subsequent move/up events to the handle regardless of which
+        // element is actually under the finger, so the canvas underneath
+        // can't steal the gesture.
+        let activePointerId: number | null = null;
+        const onPointerDown = (e: PointerEvent) => {
+          if (activePointerId !== null) return;
+          activePointerId = e.pointerId;
+          handleEl.setPointerCapture(e.pointerId);
+          handleEl.style.cursor = 'grabbing';
+          e.preventDefault();
+          e.stopPropagation();
+        };
+        const onPointerMove = (e: PointerEvent) => {
+          if (e.pointerId !== activePointerId) return;
+          e.preventDefault();
+          const rect = map.getContainer().getBoundingClientRect();
+          const px = e.clientX - rect.left;
+          const py = e.clientY - rect.top;
+          const ll = map.unproject([px, py]);
           const aimPt: [number, number] = [ll.lng, ll.lat];
+          handleMarker.setLngLat(aimPt);
           labelMarker.setLngLat(aimPt);
           updateLabel(aimPt);
           aimSource.setData({
@@ -748,7 +910,21 @@ export function HoleLayout({
             properties: {},
             geometry: { type: 'LineString', coordinates: [aimStartLL, aimPt] }
           });
-        });
+        };
+        const onPointerEnd = (e: PointerEvent) => {
+          if (e.pointerId !== activePointerId) return;
+          activePointerId = null;
+          handleEl.style.cursor = 'grab';
+          try {
+            handleEl.releasePointerCapture(e.pointerId);
+          } catch {
+            // Already released — ignore.
+          }
+        };
+        handleEl.addEventListener('pointerdown', onPointerDown);
+        handleEl.addEventListener('pointermove', onPointerMove);
+        handleEl.addEventListener('pointerup', onPointerEnd);
+        handleEl.addEventListener('pointercancel', onPointerEnd);
       } else if (holeLengthM != null) {
         // Walkback distance-to-pin markers along the centerline (100/150/200/250).
         // Only render markers shorter than the hole — a 380-yard hole skips 250.
@@ -802,6 +978,32 @@ export function HoleLayout({
 
     map.on('load', onLoad);
 
+    // Tap-to-record. Fires for clicks on empty map area. The aim handle
+    // captures its own pointer events upstream so it doesn't trigger this.
+    // DOM markers (tee pill, green flag) all have pointer-events: none, so
+    // taps on them pass through and still register here.
+    if (onShotLanded) {
+      const greenLL: [number, number] = [hole.green_lng!, hole.green_lat!];
+      const onMapClick = (e: mapboxgl.MapMouseEvent) => {
+        const end: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+        const distM = haversineMetersFE(aimStartLL, end);
+        const { lie, targetResult } = classifyTap(
+          end,
+          layout.features,
+          bearing,
+          greenLL
+        );
+        onShotLanded({
+          start: aimStartLL,
+          end,
+          calculatedDistanceM: distM,
+          inferredLie: lie,
+          inferredTargetResult: targetResult
+        });
+      };
+      map.on('click', onMapClick);
+    }
+
     // Critical: release the WebGL context. Capacitor / iOS WebView is strict
     // about concurrent contexts; a leaked map is the kind of bug that only
     // shows up after the user swipes through 10 holes.
@@ -815,7 +1017,9 @@ export function HoleLayout({
     aimMode,
     ballDistanceFromTeeM,
     suggestedHandleDistanceM,
-    puttingMode
+    puttingMode,
+    bagClubs,
+    onShotLanded
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

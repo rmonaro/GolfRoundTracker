@@ -29,6 +29,36 @@ export const adminCoursesRepo = {
     return (data ?? null) as Course | null;
   },
 
+  /**
+   * Update OSM-sync-relevant metadata on a course. Used by the admin Edit
+   * dialog to fill in lat/lng/search_radius on user-added courses (or fix
+   * incorrect coords on imported ones) so they can be synced.
+   */
+  async updateMetadata(
+    id: string,
+    fields: {
+      lat?: number | null;
+      lng?: number | null;
+      search_radius?: number | null;
+      club_name?: string | null;
+      country?: string | null;
+      osm_status?: string | null;
+      address?: string | null;
+      city?: string | null;
+      state?: string | null;
+      zip?: string | null;
+    }
+  ): Promise<Course> {
+    const { data, error } = await supabase
+      .from('courses')
+      .update(fields)
+      .eq('id', id)
+      .select('*')
+      .single();
+    if (error) throw toAppError(error, 'Could not update course');
+    return data as Course;
+  },
+
   async stats(): Promise<{
     apiCount: number;
     byStatus: Record<string, number>;

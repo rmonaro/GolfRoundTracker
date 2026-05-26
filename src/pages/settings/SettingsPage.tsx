@@ -34,6 +34,8 @@ export function SettingsPage() {
   const toggleTheme = useSettingsStore((s) => s.toggleTheme);
   const watchModeEnabled = useSettingsStore((s) => s.watchModeEnabled);
   const setWatchMode = useSettingsStore((s) => s.setWatchMode);
+  const gpsEnabled = useSettingsStore((s) => s.gpsEnabled);
+  const setGpsEnabled = useSettingsStore((s) => s.setGpsEnabled);
   const { data: isAdmin } = useIsAdmin();
 
   const [firstName, setFirstName] = useState(profile?.first_name ?? '');
@@ -163,6 +165,25 @@ export function SettingsPage() {
               >
                 Open Watch Preview
               </Button>
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <CardContent>
+            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+              GPS
+            </Typography>
+            <Stack mt={1} spacing={0.5}>
+              <FormControlLabel
+                control={<Switch checked={gpsEnabled} onChange={(e) => setGpsEnabled(e.target.checked)} />}
+                label="Enable GPS tracking"
+              />
+              <Typography variant="caption" color="text.secondary">
+                Powers the Track button on the hole screen and the at-course
+                indicator. Off by default — flip on to be prompted for location
+                next time you open a hole.
+              </Typography>
             </Stack>
           </CardContent>
         </Card>

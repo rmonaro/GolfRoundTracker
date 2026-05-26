@@ -7,3 +7,27 @@ dist-ssr
 .env.*.local
 .vite
 coverage
+
+# Capacitor — keep the ios/ and android/ project dirs in git, but skip their
+# build artifacts / IDE cache / generated lockfiles.
+# iOS
+ios/App/Pods
+ios/App/build
+ios/App/Podfile.lock
+ios/App/.derivedData
+ios/DerivedData
+ios/App/App.xcworkspace/xcuserdata
+ios/App/App.xcodeproj/xcuserdata
+ios/App/App.xcodeproj/project.xcworkspace/xcuserdata
+
+# Android
+android/.gradle
+android/.idea
+android/build
+android/app/build
+android/app/release
+android/captures
+android/local.properties
+android/keystore.properties
+*.keystore
+*.jks

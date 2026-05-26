@@ -2,6 +2,7 @@ import { Box, Card, CardContent, Chip, CircularProgress, Stack, Typography } fro
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import { useHoleLayout } from './useHoleLayout';
 import { HoleLayout } from './HoleLayout';
+import type { BagClub, Lie, TargetResult } from '@/models';
 
 interface HoleLayoutCardProps {
   courseId: string | null | undefined;
@@ -22,6 +23,16 @@ interface HoleLayoutCardProps {
   suggestedHandleDistanceM?: number;
   /** Last shot ended on the green — zoom map to the green polygon. */
   puttingMode?: boolean;
+  /** User's bag clubs — passed to aim mode for the club recommendation. */
+  bagClubs?: BagClub[];
+  /** Tap-to-record callback. See HoleLayoutProps.onShotLanded. */
+  onShotLanded?: (data: {
+    start: [number, number];
+    end: [number, number];
+    calculatedDistanceM: number;
+    inferredLie: Lie | null;
+    inferredTargetResult: TargetResult | null;
+  }) => void;
 }
 
 export function HoleLayoutCard({
@@ -33,7 +44,9 @@ export function HoleLayoutCard({
   aimMode = false,
   ballDistanceFromTeeM = 0,
   suggestedHandleDistanceM,
-  puttingMode = false
+  puttingMode = false,
+  bagClubs,
+  onShotLanded
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -61,6 +74,8 @@ export function HoleLayoutCard({
             ballDistanceFromTeeM={ballDistanceFromTeeM}
             suggestedHandleDistanceM={suggestedHandleDistanceM}
             puttingMode={puttingMode}
+            bagClubs={bagClubs}
+            onShotLanded={onShotLanded}
           />
         </Box>
         {(par != null || yardage != null) && (

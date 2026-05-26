@@ -15,10 +15,14 @@ import {
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
 import VerifiedRoundedIcon from '@mui/icons-material/VerifiedRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
+import TravelExploreRoundedIcon from '@mui/icons-material/TravelExploreRounded';
 import { useNavigate } from 'react-router-dom';
+import { useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { ToggleGroup } from '@/components/ui/ToggleGroup';
 import { useCourses, useStartRound } from '@/features/round/useStartRound';
+import { useSearchCourses, useImportCourse } from '@/admin/hooks/useCoursesApi';
+import { useAuthStore } from '@/stores/authStore';
 import { toAppError } from '@/services/errors';
 import type { Course } from '@/models';
 
@@ -285,6 +289,23 @@ function CoursePicker({
   onSearchChange,
   onAddManually
 }: CoursePickerProps) {
+  const userId = useAuthStore((s) => s.session?.user.id);
+  const queryClient = useQueryClient();
+  const searchOnline = useSearchCourses();
+  const importCourse = useImportCourse();
+  // Track which API id is currently being imported so we can disable that one
+  // row and leave the others tappable. Cleared on success/error.
+  const [importingId, setImportingId] = useState<string | null>(null);
+
+  // Map local courses by course_api_id for instant "already in library" checks
+  // after a search response (the API result also reports `alreadyImported`
+  // server-side, but our local list is the source of truth for selection).
+  const courseByApiId = useMemo(() => {
+    const m = new Map<string, Course>();
+    for (const c of courses) if (c.course_api_id) m.set(c.course_api_id, c);
+    return m;
+  }, [courses]);
+
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     if (!q) return courses;
@@ -296,6 +317,31 @@ function CoursePicker({
       );
     });
   }, [courses, search]);
+
+  const onSearchOnline = () => {
+    const q = search.trim();
+    if (!q) return;
+    searchOnline.mutate(q);
+  };
+
+  const onUseApiResult = (courseApiId: string) => {
+    // If already imported, just select the local row — no need to round-trip.
+    const existing = courseByApiId.get(courseApiId);
+    if (existing) {
+      onSelect(existing.id);
+      return;
+    }
+    setImportingId(courseApiId);
+    importCourse.mutate(courseApiId, {
+      onSuccess: async (res) => {
+        // Refresh the user's course list, then select the newly imported row.
+        await queryClient.invalidateQueries({ queryKey: ['courses', userId] });
+        onSelect(res.course.id);
+        setImportingId(null);
+      },
+      onError: () => setImportingId(null)
+    });
+  };
 
   return (
     <Stack spacing={1.5} mt={2}>
@@ -398,6 +444,122 @@ function CoursePicker({
             </Button>
           )}
         </Stack>
+      )}
+
+      {/* Online search via GolfCourseAPI. Explicit button rather than typing-
+          triggered to avoid hammering the API key. Shown whenever there's a
+          search query, regardless of whether the local list found matches. */}
+      {search.trim() && (
+        <Box sx={{ pt: 1 }}>
+          <Button
+            variant="outlined"
+            size="small"
+            startIcon={<TravelExploreRoundedIcon />}
+            onClick={onSearchOnline}
+            disabled={searchOnline.isPending}
+            sx={{ minHeight: 40 }}
+          >
+            {searchOnline.isPending
+              ? 'Searching online…'
+              : `Search GolfCourseAPI for "${search.trim()}"`}
+          </Button>
+          {searchOnline.error && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              {(searchOnline.error as Error).message}
+            </Alert>
+          )}
+          {importCourse.error && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              {(importCourse.error as Error).message}
+            </Alert>
+          )}
+          {searchOnline.data && searchOnline.data.results.length === 0 && (
+            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+              No results from GolfCourseAPI.
+            </Typography>
+          )}
+          {searchOnline.data && searchOnline.data.results.length > 0 && (
+            <Stack spacing={1} sx={{ mt: 1 }}>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
+              >
+                GolfCourseAPI results
+              </Typography>
+              {searchOnline.data.results.map((r) => {
+                const localExisting = courseByApiId.get(r.courseApiId);
+                const alreadyHere = !!localExisting || r.alreadyImported;
+                const isImporting = importingId === r.courseApiId;
+                const subtitle = [r.clubName, [r.city, r.state].filter(Boolean).join(', ')]
+                  .filter(Boolean)
+                  .join(' · ');
+                return (
+                  <Card
+                    key={r.courseApiId}
+                    elevation={0}
+                    sx={{
+                      bgcolor: 'background.default',
+                      border: 1,
+                      borderColor: 'divider'
+                    }}
+                  >
+                    <CardContent sx={{ py: 1.25, '&:last-child': { pb: 1.25 } }}>
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        spacing={1}
+                        sx={{ minWidth: 0 }}
+                      >
+                        <Box sx={{ flex: 1, minWidth: 0 }}>
+                          <Stack direction="row" alignItems="center" spacing={0.75}>
+                            <Typography variant="body1" sx={{ fontWeight: 500 }} noWrap>
+                              {r.name}
+                            </Typography>
+                            <Chip
+                              size="small"
+                              color="primary"
+                              variant="outlined"
+                              icon={<VerifiedRoundedIcon sx={{ fontSize: 14 }} />}
+                              label="API"
+                              sx={{
+                                height: 20,
+                                '.MuiChip-label': { px: 0.75, fontSize: '0.7rem' }
+                              }}
+                            />
+                          </Stack>
+                          {subtitle && (
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              noWrap
+                              display="block"
+                            >
+                              {subtitle}
+                            </Typography>
+                          )}
+                        </Box>
+                        <Button
+                          variant={alreadyHere ? 'outlined' : 'contained'}
+                          size="small"
+                          disabled={isImporting}
+                          onClick={() => onUseApiResult(r.courseApiId)}
+                          sx={{ minHeight: 40, flexShrink: 0 }}
+                        >
+                          {isImporting
+                            ? 'Adding…'
+                            : alreadyHere
+                              ? 'Select'
+                              : 'Use'}
+                        </Button>
+                      </Stack>
+                    </CardContent>
+                  </Card>
+                );
+              })}
+            </Stack>
+          )}
+        </Box>
       )}
     </Stack>
   );

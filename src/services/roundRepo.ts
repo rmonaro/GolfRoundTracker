@@ -31,6 +31,16 @@ export const roundRepo = {
     return data;
   },
 
+  /**
+   * Delete a round. RLS allows only the owner (rounds_owner_rw policy).
+   * The schema cascades to round_holes and shots, so a single delete here
+   * cleans up the entire round graph — no need to remove children first.
+   */
+  async deleteRound(roundId: string): Promise<void> {
+    const { error } = await supabase.from('rounds').delete().eq('id', roundId);
+    if (error) throw toAppError(error, 'Could not delete round');
+  },
+
   async listForUser(userId: string): Promise<Round[]> {
     const { data, error } = await supabase
       .from('rounds')
@@ -125,6 +135,11 @@ export const roundRepo = {
       distance?: number | null;
       distance_unit?: DistanceUnit | null;
       notes?: string | null;
+      start_lat?: number | null;
+      start_lng?: number | null;
+      end_lat?: number | null;
+      end_lng?: number | null;
+      calculated_distance?: number | null;
     }
   ): Promise<Shot> {
     const { data, error } = await supabase
