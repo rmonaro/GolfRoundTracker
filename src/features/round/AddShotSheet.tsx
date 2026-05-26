@@ -118,6 +118,13 @@ interface AddShotSheetProps {
   /** Par for the hole being played — drives target selector mode for the tee shot. */
   holePar: number;
   bagClubs: BagClub[];
+  /**
+   * Optional pre-selected club for a NEW shot (ignored in edit mode). The
+   * sheet sets clubId + tier1 accordingly when it opens. Use case: after the
+   * previous shot landed on the green, HoleTrackingPage passes the putter id
+   * so the user doesn't have to re-tap the putter tier every putt.
+   */
+  defaultClubId?: string | null;
   onClose: () => void;
   onSubmit: (payload: {
     clubId: string | null;
@@ -180,6 +187,7 @@ export function AddShotSheet({
   editing,
   holePar,
   bagClubs,
+  defaultClubId,
   onClose,
   onSubmit
 }: AddShotSheetProps) {
@@ -218,10 +226,15 @@ export function AddShotSheet({
       setPenaltyType(editing.penaltyType);
       setNotes(editing.notes ?? '');
     } else {
-      setClubId(null);
-      setTier1(null);
+      // New shot. Apply optional defaultClubId (e.g. putter after on-green
+      // shot) so the user opens straight to the relevant selectors.
+      const defaultClub = defaultClubId
+        ? bagClubs.find((c) => c.clubId === defaultClubId) ?? null
+        : null;
+      setClubId(defaultClub?.clubId ?? null);
+      setTier1(defaultClub ? tier1ForCategory(defaultClub.category) : null);
       setDistance('');
-      setUnit('yards');
+      setUnit(defaultClub?.category === 'putter' ? 'feet' : 'yards');
       setTargetResult(null);
       setLie(null);
       setPenaltyType(null);

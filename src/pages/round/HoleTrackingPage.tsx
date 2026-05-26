@@ -10,6 +10,7 @@ import {
   DialogContent,
   DialogTitle,
   Drawer,
+  Fab,
   IconButton,
   InputAdornment,
   Stack,
@@ -77,6 +78,38 @@ export function HoleTrackingPage() {
   const gir = strokes > 0 && (strokes - putts) <= Math.max(1, hole.par - 2);
 
   const holeScore = strokes + penaltyStrokes;
+
+  // Cumulative distance traveled along the playing line. Used by HoleLayout's
+  // aim mode to project the ball's current position along the centerline so
+  // the aim line for shot N+1 originates from where the ball actually is.
+  // Putts (distanceUnit = 'feet') are kept in feet→yards form for consistency.
+  const ballDistanceFromTeeM = hole.shots.reduce((acc, s) => {
+    if (s.distance == null) return acc;
+    const yds = s.distanceUnit === 'feet' ? s.distance / 3 : s.distance;
+    return acc + yds * 0.9144;
+  }, 0);
+
+  // Smart aim-handle hint: on 3rd+ shots, when the ball isn't on the green,
+  // seed the handle at "ball position + previous shot distance" along the
+  // centerline. Better starting point than the pin for short approach work.
+  const lastShot = hole.shots[hole.shots.length - 1];
+  const lastShotDistanceM =
+    lastShot?.distance != null
+      ? (lastShot.distanceUnit === 'feet' ? lastShot.distance / 3 : lastShot.distance) *
+        0.9144
+      : 0;
+  const lastShotOnGreen = lastShot?.lie === 'green';
+  const suggestedHandleDistanceM =
+    hole.shots.length >= 2 && !lastShotOnGreen && lastShotDistanceM > 0
+      ? ballDistanceFromTeeM + lastShotDistanceM
+      : undefined;
+
+  // When the previous shot ended on the green, pre-select the user's putter
+  // for the next shot so they don't have to re-tap the putter tier every
+  // putt. Uses the first putter in the bag (most users have only one).
+  const defaultClubId = lastShotOnGreen
+    ? bagClubs.find((c) => c.category === 'putter')?.clubId ?? null
+    : null;
 
   // Yardage display rules (header chip + HoleLayoutCard chips):
   //   1. Prefer the user-entered hole.yardage (explicit override via HoleDetailsDialog)
@@ -362,7 +395,10 @@ export function HoleTrackingPage() {
           par={hole.par}
           yardage={displayYards}
           compact
-          aimMode={hole.shots.length === 0}
+          aimMode
+          ballDistanceFromTeeM={ballDistanceFromTeeM}
+          suggestedHandleDistanceM={suggestedHandleDistanceM}
+          puttingMode={lastShotOnGreen}
         />
 
         {/* Stat pills — top-right column. Score is the headline value (accent). */}
@@ -409,12 +445,10 @@ export function HoleTrackingPage() {
           </Button>
         )}
 
-        {/* Add Shot — bottom-right. Opens the AddShotSheet for a new shot. */}
-        <Button
-          variant="contained"
-          size="large"
+        {/* Add Shot — circular FAB, bottom-right. Opens the AddShotSheet. */}
+        <Fab
           color="primary"
-          startIcon={<AddRoundedIcon />}
+          aria-label="add shot"
           onClick={() => {
             setEditingShot(null);
             setShotSheet(true);
@@ -424,13 +458,11 @@ export function HoleTrackingPage() {
             bottom: 'calc(16px + env(safe-area-inset-bottom))',
             right: 16,
             zIndex: 4,
-            minHeight: 56,
-            fontWeight: 700,
             boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
           }}
         >
-          Add Shot
-        </Button>
+          <AddRoundedIcon />
+        </Fab>
       </Box>
 
       {/* Shots tracker drawer — opened by the View Shots button on the map. */}
@@ -485,6 +517,7 @@ export function HoleTrackingPage() {
         }
         holePar={hole.par}
         bagClubs={bagClubs}
+        defaultClubId={defaultClubId}
         onClose={() => {
           setShotSheet(false);
           setEditingShot(null);

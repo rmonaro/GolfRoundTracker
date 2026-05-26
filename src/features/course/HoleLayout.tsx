@@ -17,13 +17,35 @@ interface HoleLayoutProps {
   compact?: boolean;
   className?: string;
   /**
-   * Tee-shot planning mode. When true, the walkback distance-to-pin markers
-   * (100/150/200/250) are hidden and replaced with a single draggable handle
-   * on the centerline that displays the distance from the tee at the dragged
-   * point. Intended for the first shot of a hole (when there's no ball-on-
-   * course distance yet). Mapbox-only; SVG fallback keeps walkbacks.
+   * Aim picker mode. When true, walkback distance-to-pin markers are hidden
+   * and replaced with a draggable handle. A straight amber "aim line" runs
+   * from the current ball position to the handle and updates live. The label
+   * shows Haversine distance from ball to handle. Mapbox-only — SVG keeps the
+   * static layout (no drag interaction).
    */
   aimMode?: boolean;
+  /**
+   * Sum of all prior shot distances (in meters) for this hole. Used in aim
+   * mode to project the ball's current position along the centerline so the
+   * aim line + dashed reference line originate from where the ball is, not
+   * the tee. 0 / undefined → ball at tee (first shot).
+   */
+  ballDistanceFromTeeM?: number;
+  /**
+   * Hint for where to initially place the draggable aim handle, expressed as
+   * distance from the tee along the centerline (meters). Used on 3rd+ shots
+   * when the ball isn't on the green yet, to seed the handle at "ball +
+   * previous shot distance" so the user has a sensible starting point instead
+   * of the handle defaulting to the pin (which may be too far for a short
+   * approach / wedge). Undefined → handle starts at the pin (default).
+   */
+  suggestedHandleDistanceM?: number;
+  /**
+   * Putting mode — the previous shot ended on the green. Overrides fitBounds
+   * to frame only the green polygon (much tighter zoom), and switches the
+   * aim label from yards to feet since putt distances are typically <100 ft.
+   */
+  puttingMode?: boolean;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -247,6 +269,33 @@ function distanceAlongPolyline(
   return total + segLen * t;
 }
 
+/**
+ * Walk a tee→green polyline FROM THE START (tee end) by `distanceMeters`,
+ * returning the interpolated coord. Clamps to the last coord when the
+ * distance exceeds the polyline length. Used to estimate where the ball is
+ * after N shots, by walking the playing line by the sum of prior shot
+ * distances.
+ */
+function pointAlongFromStart(
+  coords: [number, number][],
+  distanceMeters: number
+): [number, number] | null {
+  if (coords.length < 2) return null;
+  if (distanceMeters <= 0) return coords[0];
+  let remaining = distanceMeters;
+  for (let i = 0; i < coords.length - 1; i++) {
+    const a = coords[i];
+    const b = coords[i + 1];
+    const segLen = haversineMetersFE(a, b);
+    if (segLen >= remaining) {
+      const t = remaining / segLen;
+      return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+    remaining -= segLen;
+  }
+  return coords[coords.length - 1];
+}
+
 /** Projected-space variant — walks an [x, y] polyline backward from its last point. */
 function pointAlongFromEndProjected(
   points: Array<[number, number]>,
@@ -275,7 +324,10 @@ export function HoleLayout({
   layout,
   compact = false,
   className,
-  aimMode = false
+  aimMode = false,
+  ballDistanceFromTeeM = 0,
+  suggestedHandleDistanceM,
+  puttingMode = false
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -347,6 +399,14 @@ export function HoleLayout({
     );
     bounds.extend([hole.green_lng, hole.green_lat]);
 
+    // In putting mode, replace the bounds with the green polygon's bbox so
+    // the camera zooms in tight on just the green. Falls back to a small
+    // bbox around the green coord if no polygon was tagged for this hole.
+    const puttingBounds = new mapboxgl.LngLatBounds(
+      [hole.green_lng, hole.green_lat],
+      [hole.green_lng, hole.green_lat]
+    );
+
     for (const f of layout.features) {
       const geom = coordsToGeometry(f.coords, f.is_line);
       if (!geom) continue;
@@ -359,6 +419,22 @@ export function HoleLayout({
       const arr = bucket.get(f.feature_type) ?? [];
       arr.push(feat);
       bucket.set(f.feature_type, arr);
+
+      if (f.feature_type === 'green') {
+        for (const pt of flattenCoords(f.coords, f.is_line)) {
+          puttingBounds.extend(pt);
+        }
+      }
+    }
+
+    // If no green polygon was tagged, fall back to ±15m around the green coord
+    // (a typical green is 15-25m across; this lets fitBounds settle on a
+    // sensible zoom even without polygon data).
+    if (puttingBounds.getNorth() === puttingBounds.getSouth()) {
+      const dLat = 15 / 111000;
+      const dLng = 15 / (111000 * Math.cos((hole.green_lat * Math.PI) / 180));
+      puttingBounds.extend([hole.green_lng - dLng, hole.green_lat - dLat]);
+      puttingBounds.extend([hole.green_lng + dLng, hole.green_lat + dLat]);
     }
 
     // Centerline coordinates: prefer the cached OSM dogleg, fall back to a
@@ -379,6 +455,17 @@ export function HoleLayout({
     ]);
 
     const fullYardageLabel = formatDistance(hole.centerline_distance_m, 'yds');
+
+    // Estimated ball position: walk the centerline from the tee by the sum of
+    // prior shot distances. Falls back to the tee on first shot (0 distance).
+    // Used as the origin for both the dashed reference line and the aim line.
+    const aimStartLL: [number, number] =
+      ballDistanceFromTeeM > 0
+        ? pointAlongFromStart(centerlineCoords, ballDistanceFromTeeM) ?? [
+            hole.tee_lng,
+            hole.tee_lat
+          ]
+        : [hole.tee_lng, hole.tee_lat];
 
     const onLoad = () => {
       // Force a resize on load: if the container measured 0×0 at map construction
@@ -438,7 +525,9 @@ export function HoleLayout({
         }
       }
 
-      // Straight reference line — "as the crow flies".
+      // Straight reference line — "as the crow flies" from ball to pin. On the
+      // first shot the ball is at the tee, so this is the classic tee→green
+      // reference; on later shots it shifts to ball→green.
       map.addSource('straight-line', {
         type: 'geojson',
         data: {
@@ -446,10 +535,7 @@ export function HoleLayout({
           properties: {},
           geometry: {
             type: 'LineString',
-            coordinates: [
-              [hole.tee_lng!, hole.tee_lat!],
-              [hole.green_lng!, hole.green_lat!]
-            ]
+            coordinates: [aimStartLL, [hole.green_lng!, hole.green_lat!]]
           }
         }
       });
@@ -465,26 +551,28 @@ export function HoleLayout({
         }
       });
 
-      // Dogleg centerline — "playing line" (primary). No inline label now;
-      // distances are surfaced via the bubble-marker block below.
-      map.addSource('centerline', {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: { type: 'LineString', coordinates: centerlineCoords }
-        }
-      });
-      map.addLayer({
-        id: 'centerline',
-        type: 'line',
-        source: 'centerline',
-        paint: {
-          'line-color': CENTERLINE_COLOR,
-          'line-width': compact ? 2 : 2.5,
-          'line-opacity': 0.9
-        }
-      });
+      // Dogleg centerline — "playing line" (primary). Hidden in aimMode so
+      // the user-controlled aim line below doesn't fight it visually.
+      if (!aimMode) {
+        map.addSource('centerline', {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            properties: {},
+            geometry: { type: 'LineString', coordinates: centerlineCoords }
+          }
+        });
+        map.addLayer({
+          id: 'centerline',
+          type: 'line',
+          source: 'centerline',
+          paint: {
+            'line-color': CENTERLINE_COLOR,
+            'line-width': compact ? 2 : 2.5,
+            'line-opacity': 0.9
+          }
+        });
+      }
 
       // DOM markers — always above the canvas since they're absolutely-positioned
       // siblings. Mapbox keeps them axis-aligned to the viewport (no rotate-with-map).
@@ -518,8 +606,9 @@ export function HoleLayout({
       // Primary yardage bubble — sits to the LEFT of the green marker. Uses
       // `anchor: 'right'` so the bubble's right edge butts against the green
       // point (with a small marginRight gap), making "left of the hole" mean
-      // exactly that regardless of map rotation.
-      if (hole.centerline_distance_m != null) {
+      // exactly that regardless of map rotation. Hidden in aimMode (the
+      // user-driven distance label takes its place near the aim handle).
+      if (!aimMode && hole.centerline_distance_m != null) {
         const fullEl = document.createElement('div');
         fullEl.textContent = fullYardageLabel;
         Object.assign(fullEl.style, {
@@ -541,24 +630,69 @@ export function HoleLayout({
 
       const holeLengthM = hole.centerline_distance_m;
 
-      if (aimMode && holeLengthM != null) {
-        // Tee-shot aim picker. A draggable handle on the centerline; a label
-        // marker below it shows the snapped distance from the tee in yards.
-        // Mapbox's `draggable: true` lets the marker move freely with the
-        // pointer; we snap it back onto the centerline in the drag handler.
-        const initial = pointAlongFromEnd(centerlineCoords, holeLengthM / 2) ?? [
-          hole.green_lng!,
-          hole.green_lat!
-        ];
+      if (aimMode && !puttingMode) {
+        // Aim picker. The handle is UNCONSTRAINED — drag anywhere on the map.
+        // Origin is the estimated ball position (aimStartLL): the tee on shot
+        // 1, walked along the centerline by the sum of prior shot distances
+        // on later shots. Handle starts at the pin so the default state for
+        // every shot is "ball → pin" with the full remaining distance shown.
+        const pinLL: [number, number] = [hole.green_lng!, hole.green_lat!];
+        // Default initial aim = pin (full remaining distance). For 3rd+ shots
+        // not yet on the green, the caller passes `suggestedHandleDistanceM`
+        // so the handle defaults to "ball + previous shot distance" along the
+        // centerline — a smarter starting point for short approaches.
+        const initialAim: [number, number] =
+          suggestedHandleDistanceM != null
+            ? pointAlongFromStart(centerlineCoords, suggestedHandleDistanceM) ?? pinLL
+            : pinLL;
+
+        // Mutable aim line — origin updates only on remount (ballDistanceFromTeeM
+        // is in the useEffect deps), so we only need to mutate the end point.
+        map.addSource('aim-line', {
+          type: 'geojson',
+          data: {
+            type: 'Feature',
+            properties: {},
+            geometry: { type: 'LineString', coordinates: [aimStartLL, initialAim] }
+          }
+        });
+        map.addLayer({
+          id: 'aim-line',
+          type: 'line',
+          source: 'aim-line',
+          paint: {
+            'line-color': CENTERLINE_COLOR,
+            'line-width': compact ? 2 : 2.5,
+            'line-opacity': 0.95
+          }
+        });
+        const aimSource = map.getSource('aim-line') as mapboxgl.GeoJSONSource;
+
+        // Ball indicator — only renders when the ball has moved off the tee.
+        if (ballDistanceFromTeeM > 0) {
+          const ballEl = document.createElement('div');
+          Object.assign(ballEl.style, {
+            width: '14px',
+            height: '14px',
+            borderRadius: '50%',
+            background: '#ffffff',
+            border: '2px solid #0b1410',
+            boxShadow: '0 2px 5px rgba(0,0,0,0.55)',
+            pointerEvents: 'none'
+          } as Partial<CSSStyleDeclaration>);
+          new mapboxgl.Marker({ element: ballEl, anchor: 'center' })
+            .setLngLat(aimStartLL)
+            .addTo(map);
+        }
 
         const handleEl = document.createElement('div');
         Object.assign(handleEl.style, {
-          width: '20px',
-          height: '20px',
+          width: '22px',
+          height: '22px',
           borderRadius: '50%',
           background: '#fbbf24',
           border: '2px solid #ffffff',
-          boxShadow: '0 2px 6px rgba(0,0,0,0.55)',
+          boxShadow: '0 2px 7px rgba(0,0,0,0.6)',
           cursor: 'grab',
           touchAction: 'none'
         } as Partial<CSSStyleDeclaration>);
@@ -577,41 +711,43 @@ export function HoleLayout({
           boxShadow: '0 2px 6px rgba(0,0,0,0.45)'
         } as Partial<CSSStyleDeclaration>);
 
-        const updateLabelAtSnap = (snapSegIdx: number, snapT: number) => {
-          const dM = distanceAlongPolyline(centerlineCoords, snapSegIdx, snapT);
-          labelEl.textContent = `${Math.round(dM * (1 / YARDS_TO_METERS))} yds from tee`;
+        const originLabel = ballDistanceFromTeeM > 0 ? 'from ball' : 'from tee';
+        const updateLabel = (aimPt: [number, number]) => {
+          const dM = haversineMetersFE(aimStartLL, aimPt);
+          if (puttingMode) {
+            // Putts are short — feet reads better than yards. 1 m = 3.28084 ft.
+            labelEl.textContent = `${Math.round(dM * 3.28084)} ft ${originLabel}`;
+          } else {
+            labelEl.textContent = `${Math.round(dM / YARDS_TO_METERS)} yds ${originLabel}`;
+          }
         };
-
-        // Initial label: derive segment + t from the initial snap.
-        const initSnap = nearestPointOnPolyline(initial, centerlineCoords);
-        if (initSnap) {
-          updateLabelAtSnap(initSnap.segmentIndex, initSnap.t);
-        } else {
-          labelEl.textContent = '— yds from tee';
-        }
+        updateLabel(initialAim);
 
         const handleMarker = new mapboxgl.Marker({
           element: handleEl,
           draggable: true,
           anchor: 'center'
         })
-          .setLngLat(initial)
+          .setLngLat(initialAim)
           .addTo(map);
 
         const labelMarker = new mapboxgl.Marker({
           element: labelEl,
           anchor: 'top'
         })
-          .setLngLat(initial)
+          .setLngLat(initialAim)
           .addTo(map);
 
         handleMarker.on('drag', () => {
           const ll = handleMarker.getLngLat();
-          const snap = nearestPointOnPolyline([ll.lng, ll.lat], centerlineCoords);
-          if (!snap) return;
-          handleMarker.setLngLat(snap.point);
-          labelMarker.setLngLat(snap.point);
-          updateLabelAtSnap(snap.segmentIndex, snap.t);
+          const aimPt: [number, number] = [ll.lng, ll.lat];
+          labelMarker.setLngLat(aimPt);
+          updateLabel(aimPt);
+          aimSource.setData({
+            type: 'Feature',
+            properties: {},
+            geometry: { type: 'LineString', coordinates: [aimStartLL, aimPt] }
+          });
         });
       } else if (holeLengthM != null) {
         // Walkback distance-to-pin markers along the centerline (100/150/200/250).
@@ -646,10 +782,16 @@ export function HoleLayout({
       // the tee→green direction stays pointing up after the camera moves.
       // `maxZoom` allows tight framing on short holes (par 3s).
       try {
-        map.fitBounds(bounds, {
-          padding: { top: 40, bottom: 100, left: 24, right: 110 },
-          maxZoom: 18.5,
-          bearing,
+        map.fitBounds(puttingMode ? puttingBounds : bounds, {
+          // Putting mode: heavy bottom padding lifts the green ~300px off the
+          // bottom of the viewport so it sits in the upper portion of the map.
+          // Top/left/right stay minimal so the polygon fills its allotted area.
+          padding: puttingMode
+            ? { top: 10, bottom: 300, left: 10, right: 10 }
+            : { top: 24, bottom: 70, left: 16, right: 90 },
+          maxZoom: puttingMode ? 22 : 19,
+          // Putting drops the tee→green bearing back to 0 (north up).
+          bearing: puttingMode ? 0 : bearing,
           animate: false
         });
       } catch {
@@ -666,7 +808,15 @@ export function HoleLayout({
     return () => {
       map.remove();
     };
-  }, [useMapbox, layout, compact, aimMode]);
+  }, [
+    useMapbox,
+    layout,
+    compact,
+    aimMode,
+    ballDistanceFromTeeM,
+    suggestedHandleDistanceM,
+    puttingMode
+  ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with
   // a 0×0 canvas at construction time. Matches HoleLayoutCard's wrapper.

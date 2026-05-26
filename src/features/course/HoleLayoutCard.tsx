@@ -16,6 +16,12 @@ interface HoleLayoutCardProps {
    * distance-from-tee handle on the centerline. See HoleLayout for details.
    */
   aimMode?: boolean;
+  /** Sum of prior shot distances in meters; passed to HoleLayout for ball position. */
+  ballDistanceFromTeeM?: number;
+  /** Optional initial-handle hint for aim mode (meters from tee along centerline). */
+  suggestedHandleDistanceM?: number;
+  /** Last shot ended on the green — zoom map to the green polygon. */
+  puttingMode?: boolean;
 }
 
 export function HoleLayoutCard({
@@ -24,7 +30,10 @@ export function HoleLayoutCard({
   par,
   yardage,
   compact = false,
-  aimMode = false
+  aimMode = false,
+  ballDistanceFromTeeM = 0,
+  suggestedHandleDistanceM,
+  puttingMode = false
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -45,7 +54,14 @@ export function HoleLayoutCard({
         }}
       >
         <Box sx={{ flex: 1, minHeight: compact ? 160 : 240 }}>
-          <HoleLayout layout={data} compact={compact} aimMode={aimMode} />
+          <HoleLayout
+            layout={data}
+            compact={compact}
+            aimMode={aimMode}
+            ballDistanceFromTeeM={ballDistanceFromTeeM}
+            suggestedHandleDistanceM={suggestedHandleDistanceM}
+            puttingMode={puttingMode}
+          />
         </Box>
         {(par != null || yardage != null) && (
           <Stack
