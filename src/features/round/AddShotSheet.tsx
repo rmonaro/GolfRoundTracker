@@ -430,25 +430,47 @@ export function AddShotSheet({
 
         <Divider sx={{ my: 2 }} />
 
-        {/* 4. LIE (where it ended up) */}
-        <SectionLabel>4. Lie (optional)</SectionLabel>
-        <Box sx={{ mb: 2 }}>
-          <LieSelector value={lie} onChange={setLie} />
-        </Box>
+        {/* 4. LIE — hidden for putts by default (you're on the green). Reappears
+            when the putt overshoots ("Long"), with `green` swapped for `fringe`
+            since the ball ended up off the back of the green. */}
+        {(targetType !== 'putt' || targetResult === 'long') && (
+          <>
+            <SectionLabel>4. Lie (optional)</SectionLabel>
+            <Box sx={{ mb: 2 }}>
+              <LieSelector
+                value={lie}
+                onChange={setLie}
+                options={
+                  targetType === 'putt' && targetResult === 'long'
+                    ? (['fairway', 'rough', 'bunker', 'fringe', 'penalty'] as const)
+                    : undefined
+                }
+              />
+            </Box>
+            <Divider sx={{ mb: 2 }} />
+          </>
+        )}
 
-        <Divider sx={{ mb: 2 }} />
-
-        {/* 5. PENALTY (optional) */}
-        <SectionLabel>5. Penalty (optional)</SectionLabel>
-        <Box sx={{ mb: 1 }}>
-          <PenaltySelector value={penaltyType} onChange={setPenaltyType} />
-        </Box>
-        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-          OB, Water, Lost Ball, Unplayable, and Wrong Ball each add 1 stroke to the hole.
-          Bunker is a tag only.
-        </Typography>
-
-        <Divider sx={{ mb: 2 }} />
+        {/* 5. PENALTY — hidden for putts entirely. Penalties on the green don't
+            make sense in V1's data model (no greenside OB/water tracking from
+            here). */}
+        {targetType !== 'putt' && (
+          <>
+            <SectionLabel>5. Penalty (optional)</SectionLabel>
+            <Box sx={{ mb: 1 }}>
+              <PenaltySelector value={penaltyType} onChange={setPenaltyType} />
+            </Box>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ display: 'block', mb: 2 }}
+            >
+              OB, Water, Lost Ball, Unplayable, and Wrong Ball each add 1 stroke to the
+              hole. Bunker is a tag only.
+            </Typography>
+            <Divider sx={{ mb: 2 }} />
+          </>
+        )}
 
         {/* 6. NOTES */}
         <SectionLabel>6. Notes (optional)</SectionLabel>

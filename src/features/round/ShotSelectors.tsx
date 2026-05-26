@@ -358,6 +358,12 @@ export function FairwaySelector({ value, onChange }: FairwaySelectorProps) {
 interface LieSelectorProps {
   value: Lie | null;
   onChange: (value: Lie | null) => void;
+  /**
+   * Override which Lie options render. Useful for context-specific lists —
+   * e.g. for an overshot putt, callers pass ['fairway', 'rough', 'bunker',
+   * 'fringe', 'penalty'] (green replaced with fringe). Defaults to LIE_DISPLAY.
+   */
+  options?: readonly Lie[];
 }
 
 const LIE_LABEL: Record<Lie, string> = {
@@ -365,23 +371,25 @@ const LIE_LABEL: Record<Lie, string> = {
   rough: 'Rough',
   fairway: 'Fairway',
   green: 'Green',
-  penalty: 'Penalty'
+  penalty: 'Penalty',
+  fringe: 'Fringe'
 };
 
 // Display order — user-spec'd list, ordered by frequency on course.
 const LIE_DISPLAY: readonly Lie[] = ['fairway', 'rough', 'bunker', 'green', 'penalty'];
 
-export function LieSelector({ value, onChange }: LieSelectorProps) {
+export function LieSelector({ value, onChange, options }: LieSelectorProps) {
+  const displayed = options ?? LIE_DISPLAY;
   void LIE_OPTIONS; // re-exported for callers; consumed by the type system
   return (
     <Box
       sx={{
         display: 'grid',
-        gridTemplateColumns: 'repeat(5, 1fr)',
+        gridTemplateColumns: `repeat(${displayed.length}, 1fr)`,
         gap: 0.5
       }}
     >
-      {LIE_DISPLAY.map((lie) => {
+      {displayed.map((lie) => {
         const active = value === lie;
         return (
           <Box

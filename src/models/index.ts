@@ -40,7 +40,7 @@ export const SHOT_RESULT_OPTIONS = [
 ] as const;
 export const CLUB_CATEGORY_OPTIONS = ['driver', 'wood', 'hybrid', 'iron', 'wedge', 'putter'] as const;
 export const DISTANCE_UNIT_OPTIONS = ['yards', 'feet'] as const;
-export const LIE_OPTIONS = ['fairway', 'rough', 'bunker', 'green', 'penalty'] as const;
+export const LIE_OPTIONS = ['fairway', 'rough', 'bunker', 'green', 'penalty', 'fringe'] as const;
 export const PENALTY_TYPE_OPTIONS = [
   'ob',
   'water',

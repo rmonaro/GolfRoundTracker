@@ -261,7 +261,7 @@ alter table public.shots add column if not exists target_type text
 alter table public.shots add column if not exists target_result text
   check (target_result in ('hit', 'left', 'right', 'short', 'long', 'made', 'missed'));
 alter table public.shots add column if not exists lie text
-  check (lie in ('fairway', 'rough', 'bunker', 'green', 'penalty'));
+  check (lie in ('fairway', 'rough', 'bunker', 'green', 'penalty', 'fringe'));
 
 -- Per-shot penalty type (migration 006)
 alter table public.shots add column if not exists penalty_type text

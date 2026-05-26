@@ -8,7 +8,7 @@ export type DistanceUnit = 'yards' | 'feet';
 
 export type TargetType = 'green' | 'fairway' | 'putt';
 export type TargetResult = 'hit' | 'left' | 'right' | 'short' | 'long' | 'made' | 'missed';
-export type Lie = 'fairway' | 'rough' | 'bunker' | 'green' | 'penalty';
+export type Lie = 'fairway' | 'rough' | 'bunker' | 'green' | 'penalty' | 'fringe';
 export type PenaltyType =
   | 'ob'
   | 'water'
