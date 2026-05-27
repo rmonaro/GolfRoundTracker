@@ -75,6 +75,16 @@ interface HoleLayoutProps {
    * committing the shot.
    */
   landingPoint?: [number, number] | null;
+  /**
+   * Recorded shot end positions for this hole, in chronological order
+   * ([lng, lat] pairs). Each renders as a numbered amber dot so the player
+   * can see exactly where their previous shots landed. When non-empty, the
+   * LAST point also becomes the aim-line origin — i.e. the next shot is
+   * planned from where the previous one actually ended, not from a centerline
+   * walk by total distance. Shots without GPS coords are filtered out by the
+   * caller before passing here.
+   */
+  shotEndPoints?: Array<[number, number]>;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -475,7 +485,8 @@ export function HoleLayout({
   puttingMode = false,
   bagClubs,
   onShotLanded,
-  landingPoint = null
+  landingPoint = null,
+  shotEndPoints = []
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -613,11 +624,20 @@ export function HoleLayout({
       hole.green_lat
     ]);
 
-    // Estimated ball position: walk the centerline from the tee by the sum of
-    // prior shot distances. Falls back to the tee on first shot (0 distance).
-    // Used as the origin for both the dashed reference line and the aim line.
-    const aimStartLL: [number, number] =
-      ballDistanceFromTeeM > 0
+    // Ball position for the next shot. Three-tier precedence:
+    //   1. Last recorded shot's actual end position (when shotEndPoints is
+    //      non-empty) — this is the most accurate: GPS / map-tapped where the
+    //      ball really landed.
+    //   2. Centerline walk by sum of prior shot distances — used when we know
+    //      shot distances but not positions (e.g. legacy data, manual entry).
+    //   3. Tee box — first shot.
+    // Drives both the aim line origin AND the suggested-club distance shown
+    // in the left "TO PIN" panel via the parent.
+    const lastShotPoint =
+      shotEndPoints.length > 0 ? shotEndPoints[shotEndPoints.length - 1] : null;
+    const aimStartLL: [number, number] = lastShotPoint
+      ? lastShotPoint
+      : ballDistanceFromTeeM > 0
         ? pointAlongFromStart(centerlineCoords, ballDistanceFromTeeM) ?? [
             hole.tee_lng,
             hole.tee_lat
@@ -1028,15 +1048,23 @@ export function HoleLayout({
       // `maxZoom` allows tight framing on short holes (par 3s).
       try {
         map.fitBounds(puttingMode ? puttingBounds : bounds, {
-          // Putting mode: heavy bottom padding lifts the green ~300px off the
-          // bottom of the viewport so it sits in the upper portion of the map.
-          // Top/left/right stay minimal so the polygon fills its allotted area.
+          // Putting mode: small symmetric padding centers the green both
+          // horizontally and vertically and lets it fill the viewport for a
+          // close-up read of the surface. Normal mode keeps asymmetric padding
+          // so the hole anchors near the top (rangefinder framing) with the
+          // stats column clear on the right.
           padding: puttingMode
-            ? { top: 10, bottom: 300, left: 10, right: 10 }
+            ? { top: 16, bottom: 16, left: 16, right: 16 }
             : { top: 24, bottom: 70, left: 16, right: 90 },
-          maxZoom: puttingMode ? 22 : 19,
-          // Putting drops the tee→green bearing back to 0 (north up).
-          bearing: puttingMode ? 0 : bearing,
+          // Bump putting maxZoom up to 23 (Mapbox cap is 24) so even a small
+          // green still fills the screen — the symmetric padding above gives
+          // fitBounds room to push the zoom higher.
+          maxZoom: puttingMode ? 23 : 19,
+          // Both modes use the tee→green compass bearing so the tee box stays
+          // anchored at the bottom of the screen and the green sits above it
+          // — consistent orientation whether you're standing on the tee or
+          // lining up a putt.
+          bearing,
           animate: false
         });
         // Pull the camera back ~10% in normal mode so the hole sits inside the
@@ -1053,6 +1081,36 @@ export function HoleLayout({
     };
 
     map.on('load', onLoad);
+
+    // Recorded-shot markers — small numbered amber disks at each prior shot's
+    // end position. The last marker visually sits under the aim handle (which
+    // originates from this point), so dropping it slightly behind the handle
+    // via z-order isn't necessary — both are 14-18px sized and at the same
+    // location. The shotEndPoints array is in chronological order, so index +
+    // 1 is the shot number.
+    for (let i = 0; i < shotEndPoints.length; i++) {
+      const pt = shotEndPoints[i];
+      const dot = document.createElement('div');
+      Object.assign(dot.style, {
+        width: '20px',
+        height: '20px',
+        borderRadius: '50%',
+        background: '#fbbf24',
+        border: '2px solid #ffffff',
+        boxShadow: '0 2px 5px rgba(0,0,0,0.55)',
+        color: '#0b1410',
+        font: '800 11px system-ui, sans-serif',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        pointerEvents: 'none',
+        lineHeight: '1'
+      } as Partial<CSSStyleDeclaration>);
+      dot.textContent = String(i + 1);
+      new mapboxgl.Marker({ element: dot, anchor: 'center' })
+        .setLngLat(pt)
+        .addTo(map);
+    }
 
     // Pending landing-point marker — a white-ringed red disk dropped where
     // the user last tapped. The parent owns the position (set in
@@ -1125,7 +1183,8 @@ export function HoleLayout({
     puttingMode,
     bagClubs,
     onShotLanded,
-    landingPoint
+    landingPoint,
+    shotEndPoints
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

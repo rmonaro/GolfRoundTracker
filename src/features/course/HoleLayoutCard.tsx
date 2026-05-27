@@ -35,6 +35,8 @@ interface HoleLayoutCardProps {
   }) => void;
   /** Pending landing point marker. See HoleLayoutProps.landingPoint. */
   landingPoint?: [number, number] | null;
+  /** Recorded-shot end positions. See HoleLayoutProps.shotEndPoints. */
+  shotEndPoints?: Array<[number, number]>;
 }
 
 export function HoleLayoutCard({
@@ -47,7 +49,8 @@ export function HoleLayoutCard({
   puttingMode = false,
   bagClubs,
   onShotLanded,
-  landingPoint = null
+  landingPoint = null,
+  shotEndPoints = []
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -80,6 +83,7 @@ export function HoleLayoutCard({
             bagClubs={bagClubs}
             onShotLanded={onShotLanded}
             landingPoint={landingPoint}
+            shotEndPoints={shotEndPoints}
           />
         </Box>
       </Card>

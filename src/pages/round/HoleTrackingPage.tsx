@@ -244,6 +244,14 @@ export function HoleTrackingPage() {
     return acc + yds * 0.9144;
   }, 0);
 
+  // Recorded shot end positions (in chronological order) for rendering the
+  // numbered amber dots on the map. Shots without GPS coords are dropped so
+  // we don't render markers at [null, null]. The LAST one also becomes the
+  // aim-line origin in HoleLayout, overriding the centerline walk.
+  const shotEndPoints: Array<[number, number]> = hole.shots
+    .filter((s) => s.endLat != null && s.endLng != null)
+    .map((s) => [s.endLng as number, s.endLat as number]);
+
   // Smart aim-handle hint: on 3rd+ shots, when the ball isn't on the green,
   // seed the handle at "ball position + previous shot distance" along the
   // centerline. Better starting point than the pin for short approach work.
@@ -651,6 +659,7 @@ export function HoleTrackingPage() {
           landingPoint={
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
+          shotEndPoints={shotEndPoints}
           onShotLanded={(data) => {
             // Just stash the landing point — DON'T open the shot UI yet. The
             // user gets a chance to move the marker by tapping elsewhere on
