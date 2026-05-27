@@ -396,6 +396,11 @@ export function HoleTrackingPage() {
   //   3. Fallback: yards-to-pin × 3 (rough, when no GPS available)
   const lastShotMadePutt =
     lastShotWasPutt && lastShot?.targetResult === 'made';
+  // Hole-out signal — once the last shot is a made putt the hole is done,
+  // and we lock down the tap-to-record + Add Shot affordances so the user
+  // can't accidentally add a phantom shot after the ball is in the cup.
+  // They can still navigate to the next/prev hole via the header arrows.
+  const holeComplete = lastShotMadePutt;
   const remainingFeet = lastShotOnGreen
     ? lastShotMadePutt
       ? 0
@@ -754,20 +759,24 @@ export function HoleTrackingPage() {
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
           shotEndPoints={shotEndPoints}
-          onShotLanded={(data) => {
-            // Just stash the landing point — DON'T open the shot UI yet. The
-            // user gets a chance to move the marker by tapping elsewhere on
-            // the map, then commits via the "Record Shot" button.
-            setPendingGps({
-              startLat: data.start[1],
-              startLng: data.start[0],
-              endLat: data.end[1],
-              endLng: data.end[0],
-              calculatedDistanceM: data.calculatedDistanceM,
-              inferredLie: data.inferredLie,
-              inferredTargetResult: data.inferredTargetResult
-            });
-          }}
+          onShotLanded={
+            holeComplete
+              ? undefined
+              : (data) => {
+                  // Just stash the landing point — DON'T open the shot UI yet.
+                  // The user gets a chance to move the marker by tapping
+                  // elsewhere on the map, then commits via "Record Shot".
+                  setPendingGps({
+                    startLat: data.start[1],
+                    startLng: data.start[0],
+                    endLat: data.end[1],
+                    endLng: data.end[0],
+                    calculatedDistanceM: data.calculatedDistanceM,
+                    inferredLie: data.inferredLie,
+                    inferredTargetResult: data.inferredTargetResult
+                  });
+                }
+          }
         />
 
         {/* Remaining yardage — fixed left panel. Replaces the on-map bubble so
@@ -951,25 +960,55 @@ export function HoleTrackingPage() {
           </Box>
         )}
 
-        {/* Add Shot — circular FAB, bottom-right. Opens the AddShotSheet. */}
-        <Fab
-          color="primary"
-          aria-label="add shot"
-          onClick={() => {
-            setEditingShot(null);
-            setPendingGps(null);
-            setShotSheet(true);
-          }}
-          sx={{
-            position: 'absolute',
-            bottom: 'calc(16px + env(safe-area-inset-bottom))',
-            right: 16,
-            zIndex: 4,
-            boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
-          }}
-        >
-          <AddRoundedIcon />
-        </Fab>
+        {/* Add Shot — circular FAB, bottom-right. Hidden once the hole is
+            complete (a made putt) so the user can't accidentally add a phantom
+            shot. Use the header arrows to move on to the next hole. */}
+        {!holeComplete && (
+          <Fab
+            color="primary"
+            aria-label="add shot"
+            onClick={() => {
+              setEditingShot(null);
+              setPendingGps(null);
+              setShotSheet(true);
+            }}
+            sx={{
+              position: 'absolute',
+              bottom: 'calc(16px + env(safe-area-inset-bottom))',
+              right: 16,
+              zIndex: 4,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
+            }}
+          >
+            <AddRoundedIcon />
+          </Fab>
+        )}
+
+        {/* Hole-complete banner — replaces the Add Shot FAB / Confirm bar once
+            a putt is made. Pure status; no actions inside the map area. */}
+        {holeComplete && (
+          <Box
+            sx={{
+              position: 'absolute',
+              bottom: 'calc(16px + env(safe-area-inset-bottom))',
+              right: 16,
+              zIndex: 4,
+              px: 1.5,
+              py: 0.75,
+              bgcolor: 'rgba(46,125,50,0.9)',
+              color: 'common.white',
+              borderRadius: 1.5,
+              border: 1.5,
+              borderColor: 'rgba(165,214,167,0.55)',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+              fontWeight: 800,
+              fontSize: '0.85rem',
+              letterSpacing: 0.4
+            }}
+          >
+            HOLE COMPLETE
+          </Box>
+        )}
 
         {/* Pending landing-point confirm bar. Appears above the FABs when the
             user has tapped a spot but not yet committed. Tap the map again to
