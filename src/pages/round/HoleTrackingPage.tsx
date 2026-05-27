@@ -334,6 +334,22 @@ export function HoleTrackingPage() {
     setSelectedClubTier1(null);
   }, [hole.holeNumber]);
 
+  // Auto-select the putter the moment the last recorded shot's lie is green.
+  // Keyed off shot count + the last shot's lie so it fires once when a shot
+  // lands on the green (vs. running on every render). User can still override
+  // by tapping a different club in the main-screen picker.
+  const lastShotLie = lastShot?.lie ?? null;
+  useEffect(() => {
+    if (lastShotLie !== 'green') return;
+    const putterId = bagClubs.find((c) => c.category === 'putter')?.clubId ?? null;
+    if (!putterId) return;
+    setSelectedClubId(putterId);
+    setSelectedClubTier1('putter');
+    // bagClubs is stable across a session (Zustand store), so excluding it
+    // from deps avoids an extra fire on initial mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hole.shots.length, lastShotLie]);
+
   // Yardage display rules (header chip + HoleLayoutCard chips):
   //   1. Prefer the user-entered hole.yardage (explicit override via HoleDetailsDialog)
   //   2. Fall back to the OSM centerline_distance_m from the cached layout row,
