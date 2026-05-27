@@ -261,16 +261,43 @@ export function HoleTrackingPage() {
       ? (lastShot.distanceUnit === 'feet' ? lastShot.distance / 3 : lastShot.distance) *
         0.9144
       : 0;
-  // The player is "on the green" when any of these are true:
+
+  // Layout query first so the on-the-green check below can use the green's
+  // canonical coords to test how close the last shot landed. TanStack Query
+  // dedupes this call with HoleLayoutCard's own fetch.
+  const layoutQuery = useHoleLayout(active.courseId, hole.holeNumber);
+
+  // Did the last shot land within ~30 yards (≈27 m) of the green? This covers
+  // "around the green" — a chip-shot landing zone where the next stroke is
+  // almost certainly a putt or a chip, and the player wants the close-up
+  // green view rather than the wide tee→green framing.
+  const greenLat = layoutQuery.data?.hole.green_lat ?? null;
+  const greenLng = layoutQuery.data?.hole.green_lng ?? null;
+  const AROUND_GREEN_THRESHOLD_M = 27;
+  let lastShotEndDistFromGreenM: number | null = null;
+  if (
+    lastShot?.endLat != null &&
+    lastShot?.endLng != null &&
+    greenLat != null &&
+    greenLng != null
+  ) {
+    lastShotEndDistFromGreenM = haversineMeters(
+      { lat: lastShot.endLat, lng: lastShot.endLng, accuracyM: 0, timestamp: 0 },
+      { lat: greenLat, lng: greenLng, accuracyM: 0, timestamp: 0 }
+    );
+  }
+  const lastShotAroundGreen =
+    lastShotEndDistFromGreenM != null &&
+    lastShotEndDistFromGreenM <= AROUND_GREEN_THRESHOLD_M;
+
+  // The player is "on the green" (i.e. should see the zoomed-green view, no
+  // aim target, putter auto-selected) when any of these are true:
   //   • the last recorded shot's lie is green (e.g. approach stuck the green)
-  //   • the last recorded shot was a putt (clubCategory === 'putter') — even
-  //     a missed putt leaves the ball on the green, so the next shot is
-  //     another putt
+  //   • the last recorded shot was a putt (even a miss → still on the green)
   //   • the user manually picked a putter on the main-screen club selector
-  //     (handles the case where lie tracking didn't capture green, but the
-  //     player obviously is there)
-  // Any of these triggers puttingMode (green-centered zoom, no aim target)
-  // and forces the putter as the default club for the next shot.
+  //   • the last shot's GPS end position is within ~30 yds of the pin
+  //     (catches "near miss" / chip-shot situations where the player is
+  //     effectively around the green even if the lie wasn't tagged)
   const lastShotClub = lastShot
     ? bagClubs.find((c) => c.clubId === lastShot.clubId) ?? null
     : null;
@@ -280,7 +307,10 @@ export function HoleTrackingPage() {
     : null;
   const userPickedPutter = selectedClubObj?.category === 'putter';
   const lastShotOnGreen =
-    lastShot?.lie === 'green' || lastShotWasPutt || userPickedPutter;
+    lastShot?.lie === 'green' ||
+    lastShotWasPutt ||
+    userPickedPutter ||
+    lastShotAroundGreen;
   const suggestedHandleDistanceM =
     hole.shots.length >= 2 && !lastShotOnGreen && lastShotDistanceM > 0
       ? ballDistanceFromTeeM + lastShotDistanceM
@@ -309,8 +339,6 @@ export function HoleTrackingPage() {
   //   2. Fall back to the OSM centerline_distance_m from the cached layout row,
   //      converted to yards. This is the same value the amber-line label shows.
   //   3. Otherwise null — chips show "—" / "0 yds" depending on consumer.
-  // TanStack Query dedupes this call with HoleLayoutCard's own fetch.
-  const layoutQuery = useHoleLayout(active.courseId, hole.holeNumber);
   const osmYards = layoutQuery.data?.hole.centerline_distance_m != null
     ? Math.round(metersToYards(layoutQuery.data.hole.centerline_distance_m))
     : null;
@@ -330,6 +358,21 @@ export function HoleTrackingPage() {
   const ballDistanceYds = ballDistanceFromTeeM / 0.9144;
   const remainingYards =
     displayYards != null ? Math.max(0, Math.round(displayYards - ballDistanceYds)) : null;
+
+  // Putting distance: when the player is on/around the green the yards reading
+  // is too coarse (a 30-yd reading covers everything from a long putt to a
+  // tap-in). Switch the TO PIN panel to feet, computed from the most precise
+  // source available:
+  //   1. Last shot's GPS end position → green coord (haversine, then m → ft)
+  //   2. Fallback: yards-to-pin × 3 (rough, when no GPS available)
+  const remainingFeet = lastShotOnGreen
+    ? lastShotEndDistFromGreenM != null
+      ? Math.round(lastShotEndDistFromGreenM * 3.28084)
+      : remainingYards != null
+        ? remainingYards * 3
+        : null
+    : null;
+
   // Putters are filtered out of the recommendation — the panel hides the
   // suggestion entirely once the ball is on the green (lastShotOnGreen).
   const suggestedClub =
@@ -699,7 +742,7 @@ export function HoleTrackingPage() {
             suggested club for that distance (skipped on the green and when no
             club in the bag has a recorded typical distance). Hidden entirely
             when no yardage is known (e.g. unsynced course). */}
-        {remainingYards != null && (
+        {(remainingYards != null || remainingFeet != null) && (
           <Box
             sx={{
               position: 'absolute',
@@ -739,7 +782,9 @@ export function HoleTrackingPage() {
                 fontWeight: 800
               }}
             >
-              {remainingYards} yds
+              {lastShotOnGreen && remainingFeet != null
+                ? `${remainingFeet} ft`
+                : `${remainingYards} yds`}
             </Typography>
             {suggestedClub && (
               <Typography
