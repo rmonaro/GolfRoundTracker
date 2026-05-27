@@ -85,6 +85,13 @@ interface HoleLayoutProps {
    * caller before passing here.
    */
   shotEndPoints?: Array<[number, number]>;
+  /**
+   * Suppress the aim UI (handle, line, distance label) WITHOUT falling back
+   * to the walkback markers. Used while the player has a pending landing
+   * point on screen — they're reviewing the tap, not planning a new aim,
+   * so we keep the map clean until they commit or cancel.
+   */
+  hideAim?: boolean;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -486,7 +493,8 @@ export function HoleLayout({
   bagClubs,
   onShotLanded,
   landingPoint = null,
-  shotEndPoints = []
+  shotEndPoints = [],
+  hideAim = false
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -568,6 +576,13 @@ export function HoleLayout({
       [hole.tee_lng, hole.tee_lat]
     );
     bounds.extend([hole.green_lng, hole.green_lat]);
+    // Extend bounds by every recorded shot end position so the wide view (used
+    // after the hole is complete — see puttingMode gating in HoleTrackingPage)
+    // is guaranteed to frame every dot. Shots between tee and green are a
+    // no-op; errant shots widen the bbox just enough to stay in view.
+    for (const pt of shotEndPoints) {
+      bounds.extend(pt);
+    }
 
     for (const f of layout.features) {
       const geom = coordsToGeometry(f.coords, f.is_line);
@@ -755,7 +770,14 @@ export function HoleLayout({
 
       const holeLengthM = hole.centerline_distance_m;
 
-      if (aimMode && !puttingMode) {
+      // `hideAim` short-circuits BOTH branches — no aim UI AND no walkback
+      // markers. Used while the player has a pending landing point pin up:
+      // they're reviewing the tap, not planning a new aim.
+      if (hideAim) {
+        // Intentionally empty — skip both the aim mode block and the
+        // walkback markers below. The recorded-shot dots + landing-point
+        // pin (rendered earlier) are all that should show.
+      } else if (aimMode && !puttingMode) {
         // Aim picker. The handle is UNCONSTRAINED — drag anywhere on the map.
         // Origin is the estimated ball position (aimStartLL): the tee on shot
         // 1, walked along the centerline by the sum of prior shot distances
@@ -1176,7 +1198,8 @@ export function HoleLayout({
     bagClubs,
     onShotLanded,
     landingPoint,
-    shotEndPoints
+    shotEndPoints,
+    hideAim
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

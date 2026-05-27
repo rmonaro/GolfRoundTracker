@@ -346,13 +346,25 @@ export function HoleTrackingPage() {
     setSelectedClubTier1(null);
   }, [hole.holeNumber]);
 
-  // Auto-select the putter the moment the last recorded shot's lie is green.
-  // Keyed off shot count + the last shot's lie so it fires once when a shot
-  // lands on the green (vs. running on every render). User can still override
-  // by tapping a different club in the main-screen picker.
+  // Auto-select the putter whenever the last recorded shot signals the ball
+  // is on the green. Three signals — any one is enough:
+  //   • lie === 'green'                                (explicit)
+  //   • targetType === 'green' && targetResult === 'hit' (approach stuck it)
+  //   • targetType === 'putt'                           (a putt was taken;
+  //                                                       next shot is another
+  //                                                       putt, made or missed)
+  // Keyed off shot count + the relevant per-shot fields so it fires once per
+  // arrival on the green. User can still override by tapping a different
+  // club in the main-screen picker.
   const lastShotLie = lastShot?.lie ?? null;
+  const lastShotTargetType = lastShot?.targetType ?? null;
+  const lastShotTargetResult = lastShot?.targetResult ?? null;
   useEffect(() => {
-    if (lastShotLie !== 'green') return;
+    const onGreenSignal =
+      lastShotLie === 'green' ||
+      (lastShotTargetType === 'green' && lastShotTargetResult === 'hit') ||
+      lastShotTargetType === 'putt';
+    if (!onGreenSignal) return;
     const putterId = bagClubs.find((c) => c.category === 'putter')?.clubId ?? null;
     if (!putterId) return;
     setSelectedClubId(putterId);
@@ -360,7 +372,7 @@ export function HoleTrackingPage() {
     // bagClubs is stable across a session (Zustand store), so excluding it
     // from deps avoids an extra fire on initial mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hole.shots.length, lastShotLie]);
+  }, [hole.shots.length, lastShotLie, lastShotTargetType, lastShotTargetResult]);
 
   // Yardage display rules (header chip + HoleLayoutCard chips):
   //   1. Prefer the user-entered hole.yardage (explicit override via HoleDetailsDialog)
@@ -753,12 +765,16 @@ export function HoleTrackingPage() {
           aimMode
           ballDistanceFromTeeM={ballDistanceFromTeeM}
           suggestedHandleDistanceM={suggestedHandleDistanceM}
-          puttingMode={lastShotOnGreen}
+          puttingMode={lastShotOnGreen && !holeComplete}
           bagClubs={bagClubs}
           landingPoint={
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
           shotEndPoints={shotEndPoints}
+          // Hide the aim UI while reviewing a tap (pendingGps) AND after the
+          // hole is complete — both states mean "no more shots to plan from
+          // here", so the handle / line / distance pill would be misleading.
+          hideAim={!!pendingGps || holeComplete}
           onShotLanded={
             holeComplete
               ? undefined

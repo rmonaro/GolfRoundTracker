@@ -37,6 +37,8 @@ interface HoleLayoutCardProps {
   landingPoint?: [number, number] | null;
   /** Recorded-shot end positions. See HoleLayoutProps.shotEndPoints. */
   shotEndPoints?: Array<[number, number]>;
+  /** Suppress aim handle / line while a landing-point pin is active. */
+  hideAim?: boolean;
 }
 
 export function HoleLayoutCard({
@@ -50,7 +52,8 @@ export function HoleLayoutCard({
   bagClubs,
   onShotLanded,
   landingPoint = null,
-  shotEndPoints = []
+  shotEndPoints = [],
+  hideAim = false
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -84,6 +87,7 @@ export function HoleLayoutCard({
             onShotLanded={onShotLanded}
             landingPoint={landingPoint}
             shotEndPoints={shotEndPoints}
+            hideAim={hideAim}
           />
         </Box>
       </Card>
