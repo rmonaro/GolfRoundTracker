@@ -52,6 +52,7 @@ import { useHoleLayout } from '@/features/course/useHoleLayout';
 import { metersToYards } from '@/features/course/distance';
 import { recommendClub } from '@/features/course/HoleLayout';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
+import { scoreVsPar } from '@/utils/format';
 import { roundRepo } from '@/services/roundRepo';
 import { courseRepo } from '@/services/courseRepo';
 import { useQuery } from '@tanstack/react-query';
@@ -234,6 +235,17 @@ export function HoleTrackingPage() {
 
   const holeScore = strokes + penaltyStrokes;
 
+  // Round-wide totals for the Score pill in the map overlay. Pulls strokes +
+  // penalties across every hole played so far. Par sums only holes with at
+  // least one recorded shot — so an unplayed hole 18 doesn't drag the diff
+  // toward "huge under par" early in the round. `scoreVsPar` returns "+3",
+  // "-2", "E".
+  const totalRoundScore = computeTotalScore(active.holes);
+  const totalRoundPar = active.holes
+    .filter((h) => h.shots.length > 0)
+    .reduce((s, h) => s + h.par, 0);
+  const totalRoundDiff = scoreVsPar(totalRoundScore, totalRoundPar);
+
   // Cumulative distance traveled along the playing line. Used by HoleLayout's
   // aim mode to project the ball's current position along the centerline so
   // the aim line for shot N+1 originates from where the ball actually is.
@@ -379,14 +391,19 @@ export function HoleTrackingPage() {
   // is too coarse (a 30-yd reading covers everything from a long putt to a
   // tap-in). Switch the TO PIN panel to feet, computed from the most precise
   // source available:
-  //   1. Last shot's GPS end position → green coord (haversine, then m → ft)
-  //   2. Fallback: yards-to-pin × 3 (rough, when no GPS available)
+  //   1. Made putt → 0 (ball is in the cup; ignore any tap location drift)
+  //   2. Last shot's GPS end position → green coord (haversine, then m → ft)
+  //   3. Fallback: yards-to-pin × 3 (rough, when no GPS available)
+  const lastShotMadePutt =
+    lastShotWasPutt && lastShot?.targetResult === 'made';
   const remainingFeet = lastShotOnGreen
-    ? lastShotEndDistFromGreenM != null
-      ? Math.round(lastShotEndDistFromGreenM * 3.28084)
-      : remainingYards != null
-        ? remainingYards * 3
-        : null
+    ? lastShotMadePutt
+      ? 0
+      : lastShotEndDistFromGreenM != null
+        ? Math.round(lastShotEndDistFromGreenM * 3.28084)
+        : remainingYards != null
+          ? remainingYards * 3
+          : null
     : null;
 
   // Putters are filtered out of the recommendation — the panel hides the
@@ -828,7 +845,7 @@ export function HoleTrackingPage() {
             pointerEvents: 'none'
           }}
         >
-          <StatPill label="Score" value={holeScore} accent />
+          <StatPill label="Score" value={totalRoundDiff} accent />
           <StatPill label="Shots" value={strokes} />
           <StatPill label="Putts" value={putts} />
           <StatPill label="Penalty" value={penaltyStrokes} />
@@ -1369,10 +1386,15 @@ function ShotRow({
 function StatPill({
   label,
   value,
+  subValue,
   accent = false
 }: {
   label: string;
-  value: number;
+  /** Main pill value. Numbers for counts (shots / putts / penalties), strings
+      for formatted reads like the par diff "+3", "-2", "E". */
+  value: number | string;
+  /** Optional small line under the value. */
+  subValue?: string;
   accent?: boolean;
 }) {
   return (
@@ -1411,6 +1433,21 @@ function StatPill({
       >
         {value}
       </Typography>
+      {subValue && (
+        <Typography
+          variant="caption"
+          sx={{
+            display: 'block',
+            fontSize: '0.7rem',
+            fontWeight: 700,
+            lineHeight: 1,
+            mt: 0.25,
+            color: '#fbbf24'
+          }}
+        >
+          {subValue}
+        </Typography>
+      )}
     </Box>
   );
 }
