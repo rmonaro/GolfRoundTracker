@@ -1481,14 +1481,14 @@ const emptyBoxSx = {
   bgcolor: BACKGROUND,
   color: 'rgba(255,255,255,0.6)',
   p: 2,
-  borderRadius: 2
+  borderRadius: 0
 } as const;
 
 const containerSx = {
   width: '100%',
   height: '100%',
   bgcolor: BACKGROUND,
-  borderRadius: 2,
+  borderRadius: 0,
   overflow: 'hidden',
   lineHeight: 0
 } as const;
