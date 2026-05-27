@@ -29,6 +29,13 @@ interface StartRoundInput {
     zip?: string | null;
   };
   holesPlayed: number;
+  /**
+   * Optional ISO timestamp for `started_at`. When omitted, defaults to now —
+   * the live-round flow. The Start Round form passes this to backdate a round
+   * that was already played on a previous day. The user still enters
+   * holes / shots through the normal flow afterward.
+   */
+  playedAt?: string | null;
 }
 
 export function useStartRound() {
@@ -37,7 +44,7 @@ export function useStartRound() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ course, holesPlayed }: StartRoundInput) => {
+    mutationFn: async ({ course, holesPlayed, playedAt }: StartRoundInput) => {
       if (!userId) throw new Error('Not authenticated');
 
       let courseId = course.id ?? null;
@@ -58,7 +65,7 @@ export function useStartRound() {
         courseId = created.id;
       }
 
-      const startedAt = new Date().toISOString();
+      const startedAt = playedAt ?? new Date().toISOString();
       const round = await roundRepo.create({
         user_id: userId,
         course_id: courseId,

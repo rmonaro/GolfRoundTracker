@@ -38,11 +38,19 @@ import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundSto
 import { useBagStore } from '@/stores/bagStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
-import { AddShotSheet, RESULT_LABELS, type ShotEditDraft } from '@/features/round/AddShotSheet';
+import {
+  AddShotSheet,
+  ClubPicker,
+  RESULT_LABELS,
+  tier1ForCategory,
+  type ClubTier1,
+  type ShotEditDraft
+} from '@/features/round/AddShotSheet';
 import { PENALTY_LABELS } from '@/features/round/ShotSelectors';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { useHoleLayout } from '@/features/course/useHoleLayout';
 import { metersToYards } from '@/features/course/distance';
+import { recommendClub } from '@/features/course/HoleLayout';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
 import { roundRepo } from '@/services/roundRepo';
 import { courseRepo } from '@/services/courseRepo';
@@ -111,6 +119,13 @@ export function HoleTrackingPage() {
   const [tracking, setTracking] = useState<{ lat: number; lng: number } | null>(null);
   const [trackingBusy, setTrackingBusy] = useState(false);
   const [trackingError, setTrackingError] = useState<string | null>(null);
+  // Club pre-selection: the user picks a club on the main screen so the next
+  // shot opens with it already chosen. Resets when the hole changes (see effect
+  // below); within a hole it persists across multiple shots so the user can
+  // line up two pitches in a row without re-tapping the picker.
+  const [selectedClubId, setSelectedClubId] = useState<string | null>(null);
+  const [selectedClubTier1, setSelectedClubTier1] = useState<ClubTier1 | null>(null);
+  const [clubPickerOpen, setClubPickerOpen] = useState(false);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -246,10 +261,22 @@ export function HoleTrackingPage() {
 
   // When the previous shot ended on the green, pre-select the user's putter
   // for the next shot so they don't have to re-tap the putter tier every
-  // putt. Uses the first putter in the bag (most users have only one).
-  const defaultClubId = lastShotOnGreen
+  // putt. Uses the first putter in the bag (most users have only one). The
+  // user-driven `selectedClubId` (set via the bottom-left club picker on the
+  // main screen) overrides this auto-pick.
+  const putterAutoClubId = lastShotOnGreen
     ? bagClubs.find((c) => c.category === 'putter')?.clubId ?? null
     : null;
+  const defaultClubId = selectedClubId ?? putterAutoClubId;
+  const selectedClub = bagClubs.find((c) => c.clubId === defaultClubId) ?? null;
+
+  // Reset the user club pick whenever the hole changes — each new hole starts
+  // with a blank slate so the picker doesn't carry e.g. a wedge over to a tee
+  // shot on the next hole.
+  useEffect(() => {
+    setSelectedClubId(null);
+    setSelectedClubTier1(null);
+  }, [hole.holeNumber]);
 
   // Yardage display rules (header chip + HoleLayoutCard chips):
   //   1. Prefer the user-entered hole.yardage (explicit override via HoleDetailsDialog)
@@ -262,6 +289,27 @@ export function HoleTrackingPage() {
     ? Math.round(metersToYards(layoutQuery.data.hole.centerline_distance_m))
     : null;
   const displayYards = hole.yardage ?? osmYards;
+  // Prefer the course-level (OSM) par when we have it — that's the
+  // authoritative value for the hole. Falls back to the local round's stored
+  // par (which is seeded from the course's total_par / holesPlayed default
+  // when the round was created) and finally null for the "—" display.
+  const osmPar = layoutQuery.data?.hole.par ?? null;
+  const displayPar = osmPar ?? hole.par;
+
+  // Distance from ball to pin, in yards. On shot 1 this equals the full hole
+  // yardage; on later shots it's full minus what the player has already
+  // covered along the centerline. Clamped to 0 so a slight over-walk doesn't
+  // show negative yards. The left-side TO PIN panel uses this (not the full
+  // hole yardage) so the suggested-club hint stays accurate as play progresses.
+  const ballDistanceYds = ballDistanceFromTeeM / 0.9144;
+  const remainingYards =
+    displayYards != null ? Math.max(0, Math.round(displayYards - ballDistanceYds)) : null;
+  // Putters are filtered out of the recommendation — the panel hides the
+  // suggestion entirely once the ball is on the green (lastShotOnGreen).
+  const suggestedClub =
+    remainingYards != null && !lastShotOnGreen
+      ? recommendClub(bagClubs, remainingYards)
+      : null;
 
   // Push derived values back into the local hole so autosave persists them.
   // Without this, the round_holes columns would stay stale because the user
@@ -561,7 +609,7 @@ export function HoleTrackingPage() {
               )}
             </Typography>
             <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }} noWrap>
-              {`Hole ${hole.holeNumber} · Par ${hole.par ?? '—'} · ${
+              {`Hole ${hole.holeNumber} · Par ${displayPar ?? '—'} · ${
                 displayYards ?? '—'
               } yds`}
             </Typography>
@@ -615,10 +663,12 @@ export function HoleTrackingPage() {
           }}
         />
 
-        {/* Full-hole yardage — fixed left panel. Replaces the on-map bubble
-            so it stays legible regardless of zoom / rotation. Hidden when no
-            yardage is known (e.g. unsynced course). */}
-        {displayYards != null && (
+        {/* Remaining yardage — fixed left panel. Replaces the on-map bubble so
+            it stays legible regardless of zoom / rotation. Underneath: the
+            suggested club for that distance (skipped on the green and when no
+            club in the bag has a recorded typical distance). Hidden entirely
+            when no yardage is known (e.g. unsynced course). */}
+        {remainingYards != null && (
           <Box
             sx={{
               position: 'absolute',
@@ -635,7 +685,8 @@ export function HoleTrackingPage() {
               py: 0.5,
               boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
               lineHeight: 1.1,
-              textAlign: 'center'
+              textAlign: 'center',
+              minWidth: 90
             }}
           >
             <Typography
@@ -657,8 +708,20 @@ export function HoleTrackingPage() {
                 fontWeight: 800
               }}
             >
-              {displayYards} yds
+              {remainingYards} yds
             </Typography>
+            {suggestedClub && (
+              <Typography
+                sx={{
+                  fontSize: '0.75rem',
+                  fontWeight: 700,
+                  color: '#fbbf24',
+                  mt: 0.25
+                }}
+              >
+                {suggestedClub.customName || suggestedClub.name}
+              </Typography>
+            )}
           </Box>
         )}
 
@@ -679,20 +742,50 @@ export function HoleTrackingPage() {
           <StatPill label="Penalty" value={penaltyStrokes} />
         </Stack>
 
-        {/* View Shots — bottom-left. Only renders once shots exist; opens the
-            shots tracker in a drawer. */}
+        {/* Club picker — bottom-left primary action. Shows the currently
+            selected club (or "Select club" placeholder); tap to slide up the
+            drawer with the full ClubPicker tier-1 / tier-2 UI. Pre-fills the
+            AddShotSheet so the user can scout club choice before committing. */}
+        <Button
+          variant="contained"
+          size="large"
+          startIcon={<SportsGolfRoundedIcon />}
+          onClick={() => setClubPickerOpen(true)}
+          sx={{
+            position: 'absolute',
+            bottom: 'calc(16px + env(safe-area-inset-bottom))',
+            left: 16,
+            zIndex: 4,
+            minHeight: 56,
+            maxWidth: 'calc(100% - 180px)',
+            bgcolor: 'rgba(11,20,16,0.85)',
+            color: 'common.white',
+            border: 1.5,
+            borderColor: selectedClub ? '#fbbf24' : 'rgba(255,255,255,0.18)',
+            backdropFilter: 'blur(6px)',
+            WebkitBackdropFilter: 'blur(6px)',
+            textTransform: 'none',
+            fontWeight: 700,
+            '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
+          }}
+        >
+          {selectedClub ? selectedClub.customName || selectedClub.name : 'Select club'}
+        </Button>
+
+        {/* View Shots — bottom-left, stacked above the club picker. Only
+            renders once shots exist; opens the shots tracker drawer. */}
         {hole.shots.length > 0 && (
           <Button
             variant="contained"
-            size="large"
+            size="small"
             startIcon={<FormatListBulletedRoundedIcon />}
             onClick={() => setShotsDrawerOpen(true)}
             sx={{
               position: 'absolute',
-              bottom: 'calc(16px + env(safe-area-inset-bottom))',
+              bottom: 'calc(84px + env(safe-area-inset-bottom))',
               left: 16,
               zIndex: 4,
-              minHeight: 56,
+              minHeight: 40,
               bgcolor: 'rgba(11,20,16,0.85)',
               color: 'common.white',
               border: 1,
@@ -702,7 +795,7 @@ export function HoleTrackingPage() {
               '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
             }}
           >
-            View Shots ({hole.shots.length})
+            Shots ({hole.shots.length})
           </Button>
         )}
 
@@ -769,6 +862,59 @@ export function HoleTrackingPage() {
           <AddRoundedIcon />
         </Fab>
       </Box>
+
+      {/* Club picker drawer — slides up from the bottom-left button. Reuses
+          the same ClubPicker component that lives inside AddShotSheet so the
+          tier-1 / tier-2 affordance is identical in both places. Auto-closes
+          when a leaf club is picked. */}
+      <Drawer
+        anchor="bottom"
+        open={clubPickerOpen}
+        onClose={() => setClubPickerOpen(false)}
+        PaperProps={{
+          sx: {
+            borderTopLeftRadius: 16,
+            borderTopRightRadius: 16,
+            maxHeight: '70dvh',
+            bgcolor: 'background.default'
+          }
+        }}
+      >
+        <Box sx={{ p: 2, pb: 'calc(16px + env(safe-area-inset-bottom))' }}>
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            sx={{ mb: 1.5 }}
+          >
+            <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+              Pick a club
+            </Typography>
+            <IconButton size="small" onClick={() => setClubPickerOpen(false)}>
+              <CloseRoundedIcon />
+            </IconButton>
+          </Stack>
+          {bagClubs.length === 0 ? (
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+              No clubs in your bag yet — add some in My Bag.
+            </Typography>
+          ) : (
+            <ClubPicker
+              bagClubs={bagClubs}
+              clubId={selectedClubId}
+              tier1={selectedClubTier1}
+              onChange={(nextClubId, nextTier1) => {
+                setSelectedClubId(nextClubId);
+                setSelectedClubTier1(nextTier1);
+                // Close the drawer on a concrete club pick. A tier-1 tap that
+                // expands a multi-club group (and leaves clubId null) keeps
+                // the drawer open so the user can pick the leaf club next.
+                if (nextClubId) setClubPickerOpen(false);
+              }}
+            />
+          )}
+        </Box>
+      </Drawer>
 
       {/* Shots tracker drawer — opened by the View Shots button on the map. */}
       <Drawer

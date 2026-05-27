@@ -48,6 +48,12 @@ export function StartRoundPage() {
   const [city, setCity] = useState<string>('');
   const [stateField, setStateField] = useState<string>('');
   const [zip, setZip] = useState<string>('');
+  // YYYY-MM-DD format — what <input type="date"> emits. Defaults to today in
+  // the user's local timezone so the normal "start round now" flow Just Works;
+  // backdating means typing/picking an earlier date. Converted to a noon-local
+  // ISO timestamp at submit so the round doesn't shift to the previous day in
+  // negative-UTC offsets.
+  const [roundDate, setRoundDate] = useState<string>(() => toLocalDateInput(new Date()));
   const [error, setError] = useState<string | null>(null);
 
   const onStart = async () => {
@@ -79,7 +85,8 @@ export function StartRoundPage() {
               state: stateField.trim() || null,
               zip: zip.trim() || null
             },
-        holesPlayed
+        holesPlayed,
+        playedAt: localDateInputToIso(roundDate)
       };
 
       if (!payload.course.name) {
@@ -99,6 +106,64 @@ export function StartRoundPage() {
       <PageHeader title="Start Round" subtitle="Set up the course and number of holes" back />
       <Stack spacing={2} px={2} pb={4}>
         {error && <Alert severity="error">{error}</Alert>}
+
+        {/* Top row: Date played (left half) + Holes selector (right half). Keeps
+            the two scoring-context decisions visible above the course picker so
+            they're the first things the user resolves. */}
+        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <CardContent>
+            <Stack direction="row" spacing={1.5} alignItems="flex-start">
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
+                >
+                  Date played
+                </Typography>
+                <TextField
+                  type="date"
+                  value={roundDate}
+                  onChange={(e) => setRoundDate(e.target.value)}
+                  fullWidth
+                  sx={{ mt: 1 }}
+                  inputProps={{ max: toLocalDateInput(new Date()) }}
+                />
+              </Box>
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
+                >
+                  Holes
+                </Typography>
+                <Box mt={1}>
+                  <ToggleGroup
+                    value={holeChoice}
+                    onChange={(v) => v && setHoleChoice(v)}
+                    options={[
+                      { label: '9', value: '9' },
+                      { label: '18', value: '18' },
+                      { label: 'Custom', value: 'custom' }
+                    ]}
+                  />
+                </Box>
+              </Box>
+            </Stack>
+            {holeChoice === 'custom' && (
+              <TextField
+                label="Number of holes"
+                type="number"
+                sx={{ mt: 2 }}
+                value={customHoles}
+                onChange={(e) => setCustomHoles(Math.max(1, Math.min(36, Number(e.target.value) || 1)))}
+                inputProps={{ inputMode: 'numeric', min: 1, max: 36 }}
+                fullWidth
+              />
+            )}
+          </CardContent>
+        </Card>
 
         <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
           <CardContent>
@@ -137,35 +202,6 @@ export function StartRoundPage() {
                 />
                 <TextField label="Tee Box" value={teeBox} onChange={(e) => setTeeBox(e.target.value)} />
               </Stack>
-            )}
-          </CardContent>
-        </Card>
-
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
-          <CardContent>
-            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Holes
-            </Typography>
-            <Box mt={1}>
-              <ToggleGroup
-                value={holeChoice}
-                onChange={(v) => v && setHoleChoice(v)}
-                options={[
-                  { label: '9', value: '9' },
-                  { label: '18', value: '18' },
-                  { label: 'Custom', value: 'custom' }
-                ]}
-              />
-            </Box>
-            {holeChoice === 'custom' && (
-              <TextField
-                label="Number of holes"
-                type="number"
-                sx={{ mt: 2 }}
-                value={customHoles}
-                onChange={(e) => setCustomHoles(Math.max(1, Math.min(36, Number(e.target.value) || 1)))}
-                inputProps={{ inputMode: 'numeric', min: 1, max: 36 }}
-              />
             )}
           </CardContent>
         </Card>
@@ -563,6 +599,28 @@ function CoursePicker({
       )}
     </Stack>
   );
+}
+
+/** YYYY-MM-DD in the user's local timezone — what <input type="date"> wants. */
+function toLocalDateInput(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * Convert a date-input string (YYYY-MM-DD, local time) to an ISO timestamp
+ * anchored at noon local time. Noon is safe — it can't drift to the wrong
+ * calendar day in any UTC offset (max swing is ±14h, so 12:00 local stays
+ * within the day in UTC even for Pacific/Kiritimati / Pacific/Pago_Pago).
+ * Returns null for an empty input.
+ */
+function localDateInputToIso(s: string): string | null {
+  if (!s) return null;
+  const [y, m, d] = s.split('-').map(Number);
+  if (!y || !m || !d) return null;
+  return new Date(y, m - 1, d, 12, 0, 0, 0).toISOString();
 }
 
 function numberOrNull(s: string): number | null {

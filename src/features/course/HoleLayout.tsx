@@ -89,7 +89,6 @@ const FEATURE_STYLE: Record<
   path:         { fill: '#bdbdbd', outline: '#9e9e9e', fillOpacity: 0.40, lineWidth: 1   }
 };
 const BACKGROUND = '#2d3e2d';
-const STRAIGHT_LINE_COLOR = '#ffffff';
 const CENTERLINE_COLOR = '#fbbf24';
 
 // Z-order for polygon fills. Higher index draws on top.
@@ -180,7 +179,7 @@ const YARDS_TO_METERS = 0.9144;
  * Skips putters (handled in putting mode) and clubs with no recorded distance.
  * Returns null when no club qualifies — caller suppresses the recommendation.
  */
-function recommendClub(
+export function recommendClub(
   bagClubs: BagClub[] | undefined,
   targetYards: number
 ): BagClub | null {
@@ -674,31 +673,8 @@ export function HoleLayout({
         }
       }
 
-      // Straight reference line — "as the crow flies" from ball to pin. On the
-      // first shot the ball is at the tee, so this is the classic tee→green
-      // reference; on later shots it shifts to ball→green.
-      map.addSource('straight-line', {
-        type: 'geojson',
-        data: {
-          type: 'Feature',
-          properties: {},
-          geometry: {
-            type: 'LineString',
-            coordinates: [aimStartLL, [hole.green_lng!, hole.green_lat!]]
-          }
-        }
-      });
-      map.addLayer({
-        id: 'straight-line',
-        type: 'line',
-        source: 'straight-line',
-        paint: {
-          'line-color': STRAIGHT_LINE_COLOR,
-          'line-width': 1.5,
-          'line-dasharray': [3, 2],
-          'line-opacity': 0.5
-        }
-      });
+      // (Tee→green dashed reference line removed — the amber aim line + the
+      // dogleg centerline cover the same intent without the extra clutter.)
 
       // Dogleg centerline — "playing line" (primary). Hidden in aimMode so
       // the user-controlled aim line below doesn't fight it visually.
@@ -762,17 +738,33 @@ export function HoleLayout({
         // Aim picker. The handle is UNCONSTRAINED — drag anywhere on the map.
         // Origin is the estimated ball position (aimStartLL): the tee on shot
         // 1, walked along the centerline by the sum of prior shot distances
-        // on later shots. Handle starts at the pin so the default state for
-        // every shot is "ball → pin" with the full remaining distance shown.
+        // on later shots.
         const pinLL: [number, number] = [hole.green_lng!, hole.green_lat!];
+
+        // Tee-shot landing cap: on a long hole, defaulting the handle to the
+        // pin puts the target a club or three further than any human can
+        // carry — and forces the user to drag it back every time. Cap the
+        // initial position at 225 yds from the tee (roughly a long driver
+        // carry) so the handle starts in the fairway. Shorter holes (≤225)
+        // keep the pin as the default. Only kicks in on shot 1 (ball at tee)
+        // when no explicit suggestedHandleDistanceM was provided.
+        const TEE_DEFAULT_CAP_YDS = 225;
+        const teeDefaultCapM = TEE_DEFAULT_CAP_YDS * YARDS_TO_METERS;
+        const holeLenM = hole.centerline_distance_m;
+        const isTeeShot = ballDistanceFromTeeM <= 0;
+
         // Default initial aim = pin (full remaining distance). For 3rd+ shots
         // not yet on the green, the caller passes `suggestedHandleDistanceM`
         // so the handle defaults to "ball + previous shot distance" along the
         // centerline — a smarter starting point for short approaches.
-        const initialAim: [number, number] =
-          suggestedHandleDistanceM != null
-            ? pointAlongFromStart(centerlineCoords, suggestedHandleDistanceM) ?? pinLL
-            : pinLL;
+        let initialAim: [number, number];
+        if (suggestedHandleDistanceM != null) {
+          initialAim = pointAlongFromStart(centerlineCoords, suggestedHandleDistanceM) ?? pinLL;
+        } else if (isTeeShot && holeLenM != null && holeLenM > teeDefaultCapM) {
+          initialAim = pointAlongFromStart(centerlineCoords, teeDefaultCapM) ?? pinLL;
+        } else {
+          initialAim = pinLL;
+        }
 
         // Mutable aim line — origin updates only on remount (ballDistanceFromTeeM
         // is in the useEffect deps), so we only need to mutate the end point.
@@ -813,14 +805,34 @@ export function HoleLayout({
             .addTo(map);
         }
 
+        // Target-style aim handle: concentric rings + crosshair tick marks +
+        // small center dot. Replaces the old filled amber disk so the player
+        // can see the green / fairway through the handle (rather than the
+        // handle obscuring what they're aiming at). All strokes are amber so
+        // the handle reads as one unit at a glance.
+        //
+        // The first `<rect fill="transparent">` is critical: SVG hit-testing
+        // only triggers on filled regions, so without a transparent backing
+        // the gaps between rings let taps fall through to the map canvas —
+        // which would fire onShotLanded and open the shot sheet on every aim
+        // adjustment. The backing makes the entire 44×44 SVG box one target.
         const handleEl = document.createElement('div');
+        handleEl.className = 'grt-aim-handle';
+        handleEl.innerHTML = `
+          <svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg" style="display:block;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.55));">
+            <rect x="0" y="0" width="44" height="44" fill="rgba(0,0,0,0.001)" />
+            <circle cx="22" cy="22" r="19" fill="none" stroke="#fbbf24" stroke-width="2.5" />
+            <circle cx="22" cy="22" r="11" fill="none" stroke="#fbbf24" stroke-width="2" />
+            <circle cx="22" cy="22" r="2.4" fill="#fbbf24" />
+            <line x1="22" y1="1" x2="22" y2="7" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+            <line x1="22" y1="37" x2="22" y2="43" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+            <line x1="1" y1="22" x2="7" y2="22" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+            <line x1="37" y1="22" x2="43" y2="22" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+          </svg>
+        `;
         Object.assign(handleEl.style, {
-          width: '28px',
-          height: '28px',
-          borderRadius: '50%',
-          background: '#fbbf24',
-          border: '2px solid #ffffff',
-          boxShadow: '0 2px 7px rgba(0,0,0,0.6)',
+          width: '44px',
+          height: '44px',
           cursor: 'grab',
           touchAction: 'none',
           userSelect: 'none',
@@ -829,37 +841,6 @@ export function HoleLayout({
           WebkitTouchCallout: 'none',
           WebkitTapHighlightColor: 'transparent'
         } as Partial<CSSStyleDeclaration>);
-
-        const labelEl = document.createElement('div');
-        Object.assign(labelEl.style, {
-          marginTop: '6px',
-          padding: '3px 9px',
-          background: 'rgba(11,20,16,0.88)',
-          color: '#ffffff',
-          border: '1.5px solid #fbbf24',
-          borderRadius: '10px',
-          font: '700 11px system-ui, sans-serif',
-          whiteSpace: 'nowrap',
-          pointerEvents: 'none',
-          boxShadow: '0 2px 6px rgba(0,0,0,0.45)'
-        } as Partial<CSSStyleDeclaration>);
-
-        const originLabel = ballDistanceFromTeeM > 0 ? 'from ball' : 'from tee';
-        const updateLabel = (aimPt: [number, number]) => {
-          const dM = haversineMetersFE(aimStartLL, aimPt);
-          if (puttingMode) {
-            // Putts are short — feet reads better than yards. 1 m = 3.28084 ft.
-            labelEl.textContent = `${Math.round(dM * 3.28084)} ft ${originLabel}`;
-          } else {
-            const yds = Math.round(dM / YARDS_TO_METERS);
-            const pick = recommendClub(bagClubs, yds);
-            const clubSuffix = pick
-              ? ` · ${pick.customName || pick.name}`
-              : '';
-            labelEl.textContent = `${yds} yds ${originLabel}${clubSuffix}`;
-          }
-        };
-        updateLabel(initialAim);
 
         // `draggable: false` — Mapbox's built-in drag uses pointer events that
         // misfire under iOS WKWebView with `interactive: false`. We handle the
@@ -873,9 +854,80 @@ export function HoleLayout({
           .setLngLat(initialAim)
           .addTo(map);
 
+        // Left-side distance label — small amber pill that sits 30px to the
+        // left of the target with a right-pointing arrow on its right edge so
+        // it visually points at the aim point. Updates live as the user drags
+        // so they can see the ball→target distance without looking away.
+        //
+        // `anchor: 'right'` lines the label's right edge up with the marker
+        // position; `marginRight: 30px` then pushes the whole label left.
+        // Arrow = two stacked CSS triangles (outer amber + inner dark) so the
+        // tip mirrors the pill's amber border with a dark center.
+        const labelEl = document.createElement('div');
+        Object.assign(labelEl.style, {
+          position: 'relative',
+          display: 'inline-block',
+          background: 'rgba(11,20,16,0.88)',
+          color: '#ffffff',
+          padding: '1px 5px',
+          borderRadius: '6px',
+          font: '700 11px system-ui, sans-serif',
+          lineHeight: '1.2',
+          border: '1px solid #fbbf24',
+          marginRight: '70px',
+          whiteSpace: 'nowrap',
+          pointerEvents: 'none',
+          boxShadow: '0 1px 3px rgba(0,0,0,0.45)'
+        } as Partial<CSSStyleDeclaration>);
+
+        const labelText = document.createElement('span');
+        labelEl.appendChild(labelText);
+
+        // Outer (amber) triangle — sits just past the pill's right edge so
+        // its left base aligns with the pill border. Uses CSS triangle trick
+        // (zero w/h + transparent vertical borders + colored horizontal one).
+        const arrowOuter = document.createElement('div');
+        Object.assign(arrowOuter.style, {
+          position: 'absolute',
+          right: '-6px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          width: '0',
+          height: '0',
+          borderTop: '5px solid transparent',
+          borderBottom: '5px solid transparent',
+          borderLeft: '6px solid #fbbf24'
+        } as Partial<CSSStyleDeclaration>);
+        labelEl.appendChild(arrowOuter);
+
+        // Inner (dark) triangle — inset by ~1.5px so a thin amber rim shows
+        // around the arrow, matching the pill's border.
+        const arrowInner = document.createElement('div');
+        Object.assign(arrowInner.style, {
+          position: 'absolute',
+          right: '-4px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          width: '0',
+          height: '0',
+          borderTop: '3.5px solid transparent',
+          borderBottom: '3.5px solid transparent',
+          borderLeft: '4.5px solid rgba(11,20,16,0.88)'
+        } as Partial<CSSStyleDeclaration>);
+        labelEl.appendChild(arrowInner);
+
+        const updateLabel = (aimPt: [number, number]) => {
+          const dM = haversineMetersFE(aimStartLL, aimPt);
+          if (puttingMode) {
+            labelText.textContent = `${Math.round(dM * 3.28084)} ft`;
+          } else {
+            labelText.textContent = `${Math.round(dM / YARDS_TO_METERS)} yds`;
+          }
+        };
+        updateLabel(initialAim);
         const labelMarker = new mapboxgl.Marker({
           element: labelEl,
-          anchor: 'top'
+          anchor: 'right'
         })
           .setLngLat(initialAim)
           .addTo(map);
@@ -925,6 +977,14 @@ export function HoleLayout({
         handleEl.addEventListener('pointermove', onPointerMove);
         handleEl.addEventListener('pointerup', onPointerEnd);
         handleEl.addEventListener('pointercancel', onPointerEnd);
+        // Belt-and-suspenders: kill the synthetic click that follows a tap so
+        // it can't bubble up and trigger Mapbox's `map.on('click')` (which
+        // opens the shot sheet). Without this the handle can both move AND
+        // record a shot from a single tap on iOS.
+        handleEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+        });
       } else if (holeLengthM != null) {
         // Walkback distance-to-pin markers along the centerline (100/150/200/250).
         // Only render markers shorter than the hole — a 380-yard hole skips 250.
@@ -985,6 +1045,15 @@ export function HoleLayout({
     if (onShotLanded) {
       const greenLL: [number, number] = [hole.green_lng!, hole.green_lat!];
       const onMapClick = (e: mapboxgl.MapMouseEvent) => {
+        // Defense in depth: even if a click slips past the handle's own
+        // stopPropagation (e.g. some platforms don't dispatch a synthetic
+        // click after `setPointerCapture`), refuse to open the shot sheet
+        // when the underlying DOM target was the handle or one of its
+        // descendants. Without this, dragging or even tapping the target
+        // would open the shot UI.
+        const target = e.originalEvent?.target as Node | null;
+        const handleNode = document.querySelector('.grt-aim-handle');
+        if (target && handleNode && handleNode.contains(target)) return;
         const end: [number, number] = [e.lngLat.lng, e.lngLat.lat];
         const distM = haversineMetersFE(aimStartLL, end);
         const { lie, targetResult } = classifyTap(
@@ -1179,19 +1248,8 @@ function buildSvgRender(layout: HoleLayoutData, compact: boolean) {
         );
       })}
 
-      {/* Straight reference line (dashed white, faded). */}
-      {teeXY && greenXY && (
-        <line
-          x1={teeXY[0]}
-          y1={teeXY[1]}
-          x2={greenXY[0]}
-          y2={greenXY[1]}
-          stroke={STRAIGHT_LINE_COLOR}
-          strokeWidth={compact ? 0.8 : 1.2}
-          strokeDasharray={compact ? '3,2' : '4,3'}
-          strokeOpacity={0.55}
-        />
-      )}
+      {/* (Tee→green dashed reference line removed — the centerline below
+          carries the playing-line intent on its own.) */}
 
       {/* Dogleg centerline (solid amber). */}
       {centerlineXY.length >= 2 && (

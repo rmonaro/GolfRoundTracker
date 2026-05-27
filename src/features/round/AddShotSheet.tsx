@@ -3,6 +3,9 @@ import {
   Box,
   Button,
   Chip,
+  Dialog,
+  DialogContent,
+  DialogTitle,
   Divider,
   IconButton,
   InputAdornment,
@@ -13,6 +16,7 @@ import {
   ToggleButtonGroup,
   Typography
 } from '@mui/material';
+import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import { metersToYards } from '@/services/gpsService';
 import type {
@@ -30,7 +34,7 @@ import type {
  * Tier-1 buckets shown above the club sub-list — 5 buttons in one row.
  * Hybrids ride in the "wood" bucket (commonly called rescue woods).
  */
-type ClubTier1 = 'driver' | 'wood' | 'iron' | 'wedge' | 'putter';
+export type ClubTier1 = 'driver' | 'wood' | 'iron' | 'wedge' | 'putter';
 
 const TIER1_CATEGORIES: Record<ClubTier1, ClubCategory[]> = {
   driver: ['driver'],
@@ -58,7 +62,7 @@ const TIER1_ICONS: Record<ClubTier1, React.ComponentType<{ size?: number }>> = {
 
 const TIER1_ORDER: ClubTier1[] = ['driver', 'wood', 'iron', 'wedge', 'putter'];
 
-function tier1ForCategory(cat: ClubCategory): ClubTier1 {
+export function tier1ForCategory(cat: ClubCategory): ClubTier1 {
   if (cat === 'driver') return 'driver';
   if (cat === 'wood' || cat === 'hybrid') return 'wood';
   if (cat === 'wedge') return 'wedge';
@@ -231,6 +235,7 @@ export function AddShotSheet({
 }: AddShotSheetProps) {
   const [clubId, setClubId] = useState<string | null>(null);
   const [tier1, setTier1] = useState<ClubTier1 | null>(null);
+  const [clubPickerOpen, setClubPickerOpen] = useState(false);
   const [distance, setDistance] = useState<string>('');
   const [unit, setUnit] = useState<DistanceUnit>('yards');
   const [targetResult, setTargetResult] = useState<TargetResult | null>(null);
@@ -428,105 +433,150 @@ export function AddShotSheet({
       </Stack>
 
       <Box sx={{ px: 2, pb: 2, overflowY: 'auto', flex: 1 }}>
-        {/* 1. CLUB — tier 1 (Driver / Irons / Wedges / Putter) + conditional tier 2 sub-list */}
-        <SectionLabel>1. Club</SectionLabel>
-        {bagClubs.length === 0 ? (
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            No clubs in your bag yet — add some in My Bag.
-          </Typography>
-        ) : (
-          <ClubPicker
-            bagClubs={bagClubs}
-            clubId={clubId}
-            tier1={tier1}
-            onChange={(nextClubId, nextTier1) => {
-              setClubId(nextClubId);
-              setTier1(nextTier1);
-            }}
-          />
-        )}
+        {/* Top row: 33% Club + Distance stacked on the left, 67% Target on
+            the right. The club appears as a compact button — pre-selected
+            when the caller passed a `defaultClubId` (e.g. from the main-screen
+            club picker), or showing "Select Club" otherwise. Tapping opens a
+            sub-dialog with the full tier-1 / tier-2 ClubPicker. */}
+        <Box
+          sx={{
+            display: 'grid',
+            gridTemplateColumns: '33% 1fr',
+            columnGap: 1.5,
+            mb: 2
+          }}
+        >
+          {/* LEFT COLUMN — Club + Distance stacked */}
+          <Stack spacing={1.25}>
+            <Box>
+              <SectionLabel>Club</SectionLabel>
+              {bagClubs.length === 0 ? (
+                <Typography variant="caption" color="text.secondary">
+                  Add clubs in My Bag.
+                </Typography>
+              ) : (
+                <Button
+                  fullWidth
+                  variant={selectedClub ? 'contained' : 'outlined'}
+                  startIcon={<SportsGolfRoundedIcon />}
+                  onClick={() => setClubPickerOpen(true)}
+                  sx={{
+                    minHeight: 56,
+                    textTransform: 'none',
+                    fontWeight: 700,
+                    justifyContent: 'flex-start',
+                    px: 1.25,
+                    '& .MuiButton-startIcon': { mr: 0.75 }
+                  }}
+                >
+                  <Box
+                    component="span"
+                    sx={{
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap'
+                    }}
+                  >
+                    {selectedClub
+                      ? selectedClub.customName || selectedClub.name
+                      : 'Select Club'}
+                  </Box>
+                </Button>
+              )}
+            </Box>
+
+            {/* Distance — GPS hint sits above the field when seeded. */}
+            <Box>
+              <SectionLabel>Distance</SectionLabel>
+              {calculatedDistance != null && (
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ display: 'block', mb: 0.5 }}
+                >
+                  GPS: {Math.round(metersToYards(calculatedDistance))} yds
+                </Typography>
+              )}
+              <Stack direction="row" spacing={0.5} alignItems="stretch">
+                <TextField
+                  value={distance}
+                  onChange={(e) => setDistance(e.target.value)}
+                  placeholder="0"
+                  type="number"
+                  inputMode="decimal"
+                  inputProps={{ inputMode: 'decimal', step: '0.5', min: 0, max: 999 }}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        {unit === 'feet' ? 'ft' : 'yds'}
+                      </InputAdornment>
+                    )
+                  }}
+                  error={!distanceValid}
+                  sx={{ flex: 1, minWidth: 0 }}
+                />
+              </Stack>
+              <ToggleButtonGroup
+                exclusive
+                value={unit}
+                onChange={(_, v) => v && setUnit(v as DistanceUnit)}
+                fullWidth
+                size="small"
+                sx={{
+                  mt: 0.5,
+                  '& .MuiToggleButton-root': {
+                    minHeight: 32,
+                    fontWeight: 700,
+                    textTransform: 'none'
+                  },
+                  '& .Mui-selected': {
+                    bgcolor: 'primary.main',
+                    color: 'primary.contrastText',
+                    '&:hover': { bgcolor: 'primary.dark' }
+                  }
+                }}
+              >
+                <ToggleButton value="yards">yds</ToggleButton>
+                <ToggleButton value="feet">ft</ToggleButton>
+              </ToggleButtonGroup>
+              {!distanceValid && (
+                <Typography
+                  variant="caption"
+                  color="error"
+                  sx={{ display: 'block', mt: 0.5 }}
+                >
+                  0–999 only
+                </Typography>
+              )}
+            </Box>
+          </Stack>
+
+          {/* RIGHT COLUMN — Target */}
+          <Box>
+            <SectionLabel>{targetSectionLabel(targetType)}</SectionLabel>
+            {targetType === 'fairway' && (
+              <FairwaySelector value={targetResult} onChange={setTargetResult} />
+            )}
+            {targetType === 'green' && (
+              <BullseyeTarget
+                value={targetResult}
+                onChange={setTargetResult}
+                {...GREEN_TARGET_PRESET}
+                centerVariant="green"
+              />
+            )}
+            {targetType === 'putt' && (
+              <BullseyeTarget
+                value={targetResult}
+                onChange={setTargetResult}
+                {...PUTT_TARGET_PRESET}
+                centerVariant="success"
+              />
+            )}
+          </Box>
+        </Box>
 
         <Divider sx={{ mb: 2 }} />
-
-        {/* 2. DISTANCE + UNIT — GPS-captured distance shown inline when the
-            caller seeded one via `defaultGps` (i.e. the on-course Track flow). */}
-        <SectionLabel>2. Distance</SectionLabel>
-        {calculatedDistance != null && (
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-            GPS: {Math.round(metersToYards(calculatedDistance))} yds — adjust below if needed
-          </Typography>
-        )}
-        <Stack direction="row" spacing={1} alignItems="stretch" mb={!distanceValid ? 0.5 : 2}>
-          <TextField
-            value={distance}
-            onChange={(e) => setDistance(e.target.value)}
-            placeholder="0"
-            type="number"
-            inputMode="decimal"
-            inputProps={{ inputMode: 'decimal', step: '0.5', min: 0, max: 999 }}
-            InputProps={{
-              endAdornment: (
-                <InputAdornment position="end">{unit === 'feet' ? 'ft' : 'yds'}</InputAdornment>
-              )
-            }}
-            error={!distanceValid}
-            sx={{ flex: 2 }}
-          />
-          <ToggleButtonGroup
-            exclusive
-            value={unit}
-            onChange={(_, v) => v && setUnit(v as DistanceUnit)}
-            sx={{
-              flex: 1,
-              height: '100%',
-              '& .MuiToggleButton-root': {
-                minHeight: 56,
-                height: '100%',
-                fontWeight: 700,
-                textTransform: 'none'
-              },
-              '& .Mui-selected': {
-                bgcolor: 'primary.main',
-                color: 'primary.contrastText',
-                '&:hover': { bgcolor: 'primary.dark' }
-              }
-            }}
-          >
-            <ToggleButton value="yards">yds</ToggleButton>
-            <ToggleButton value="feet">ft</ToggleButton>
-          </ToggleButtonGroup>
-        </Stack>
-        {!distanceValid && (
-          <Typography variant="caption" color="error" sx={{ display: 'block', mb: 2, mt: 0.5 }}>
-            0–999 only
-          </Typography>
-        )}
-
-        <Divider sx={{ mb: 2 }} />
-
-        {/* 3. TARGET (context-aware) */}
-        <SectionLabel>3. {targetSectionLabel(targetType)}</SectionLabel>
-        {targetType === 'fairway' && (
-          <FairwaySelector value={targetResult} onChange={setTargetResult} />
-        )}
-        {targetType === 'green' && (
-          <BullseyeTarget
-            value={targetResult}
-            onChange={setTargetResult}
-            {...GREEN_TARGET_PRESET}
-            centerVariant="green"
-          />
-        )}
-        {targetType === 'putt' && (
-          <BullseyeTarget
-            value={targetResult}
-            onChange={setTargetResult}
-            {...PUTT_TARGET_PRESET}
-            centerVariant="success"
-          />
-        )}
-
-        <Divider sx={{ my: 2 }} />
 
         {/* 4. LIE — hidden for putts by default (you're on the green). Reappears
             when the putt overshoots ("Long"), with `green` swapped for `fringe`
@@ -602,6 +652,44 @@ export function AddShotSheet({
           {editing ? 'Update Shot' : 'Save Shot'}
         </Button>
       </Box>
+
+      {/* Nested club picker — MUI Dialog portals to document.body so it sits
+          above the SwipeableDrawer correctly. Auto-closes when the user
+          commits to a leaf club. Tier-1 taps that expand a multi-club group
+          keep the dialog open so the user can drill in. */}
+      <Dialog
+        open={clubPickerOpen}
+        onClose={() => setClubPickerOpen(false)}
+        fullWidth
+        maxWidth="sm"
+      >
+        <DialogTitle
+          sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pr: 1 }}
+        >
+          Pick a club
+          <IconButton size="small" onClick={() => setClubPickerOpen(false)}>
+            <CloseRoundedIcon />
+          </IconButton>
+        </DialogTitle>
+        <DialogContent dividers>
+          {bagClubs.length === 0 ? (
+            <Typography variant="body2" color="text.secondary">
+              No clubs in your bag yet — add some in My Bag.
+            </Typography>
+          ) : (
+            <ClubPicker
+              bagClubs={bagClubs}
+              clubId={clubId}
+              tier1={tier1}
+              onChange={(nextClubId, nextTier1) => {
+                setClubId(nextClubId);
+                setTier1(nextTier1);
+                if (nextClubId) setClubPickerOpen(false);
+              }}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
     </SwipeableDrawer>
   );
 }
@@ -629,7 +717,7 @@ interface ClubPickerProps {
   onChange: (clubId: string | null, tier1: ClubTier1 | null) => void;
 }
 
-function ClubPicker({ bagClubs, clubId, tier1, onChange }: ClubPickerProps) {
+export function ClubPicker({ bagClubs, clubId, tier1, onChange }: ClubPickerProps) {
   const sortedBag = [...bagClubs].sort((a, b) => a.orderPosition - b.orderPosition);
 
   const groups: Record<ClubTier1, BagClub[]> = {

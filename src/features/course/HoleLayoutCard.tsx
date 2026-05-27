@@ -1,4 +1,4 @@
-import { Box, Card, CardContent, Chip, CircularProgress, Stack, Typography } from '@mui/material';
+import { Box, Card, CardContent, CircularProgress, Typography } from '@mui/material';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import { useHoleLayout } from './useHoleLayout';
 import { HoleLayout } from './HoleLayout';
@@ -38,8 +38,6 @@ interface HoleLayoutCardProps {
 export function HoleLayoutCard({
   courseId,
   holeNumber,
-  par,
-  yardage,
   compact = false,
   aimMode = false,
   ballDistanceFromTeeM = 0,
@@ -58,12 +56,14 @@ export function HoleLayoutCard({
     return (
       <Card
         elevation={0}
+        square
         sx={{
           bgcolor: 'background.paper',
           height: '100%',
           display: 'flex',
           flexDirection: 'column',
-          overflow: 'hidden'
+          overflow: 'hidden',
+          borderRadius: 0
         }}
       >
         <Box sx={{ flex: 1, minHeight: compact ? 160 : 240 }}>
@@ -78,42 +78,13 @@ export function HoleLayoutCard({
             onShotLanded={onShotLanded}
           />
         </Box>
-        {(par != null || yardage != null) && (
-          <Stack
-            direction="row"
-            spacing={0.75}
-            sx={{
-              p: 0.75,
-              borderTop: 1,
-              borderColor: 'divider',
-              bgcolor: 'background.paper'
-            }}
-          >
-            {par != null && (
-              <Chip
-                size="small"
-                label={`Par ${par}`}
-                sx={{ fontWeight: 600 }}
-              />
-            )}
-            {yardage != null && (
-              <Chip size="small" label={`${yardage} yds`} sx={{ fontWeight: 600 }} />
-            )}
-            <Box sx={{ flex: 1 }} />
-            <Chip
-              size="small"
-              label={`Hole ${holeNumber}`}
-              color="primary"
-              variant="outlined"
-              sx={{ fontWeight: 700 }}
-            />
-          </Stack>
-        )}
       </Card>
     );
   }
 
-  // Fallback: pending or unavailable. Render a clean card with par/yardage chips.
+  // Fallback: pending or unavailable. Just a centered status message — the
+  // par / yardage info now lives in the page header and the left "TO PIN"
+  // overlay, so we don't need duplicate chips here.
   const message =
     status === 'pending'
       ? 'Hole layout syncing — try again shortly.'
@@ -124,11 +95,13 @@ export function HoleLayoutCard({
   return (
     <Card
       elevation={0}
+      square
       sx={{
         bgcolor: 'background.paper',
         height: '100%',
         display: 'flex',
-        flexDirection: 'column'
+        flexDirection: 'column',
+        borderRadius: 0
       }}
     >
       <CardContent
@@ -149,10 +122,6 @@ export function HoleLayoutCard({
         <Typography variant="caption" color="text.secondary" align="center">
           {message}
         </Typography>
-        <Stack direction="row" spacing={0.75} mt={0.5}>
-          {par != null && <Chip size="small" label={`Par ${par}`} />}
-          {yardage != null && <Chip size="small" label={`${yardage} yds`} />}
-        </Stack>
       </CardContent>
     </Card>
   );
