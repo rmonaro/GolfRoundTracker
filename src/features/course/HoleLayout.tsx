@@ -569,14 +569,6 @@ export function HoleLayout({
     );
     bounds.extend([hole.green_lng, hole.green_lat]);
 
-    // In putting mode, replace the bounds with the green polygon's bbox so
-    // the camera zooms in tight on just the green. Falls back to a small
-    // bbox around the green coord if no polygon was tagged for this hole.
-    const puttingBounds = new mapboxgl.LngLatBounds(
-      [hole.green_lng, hole.green_lat],
-      [hole.green_lng, hole.green_lat]
-    );
-
     for (const f of layout.features) {
       const geom = coordsToGeometry(f.coords, f.is_line);
       if (!geom) continue;
@@ -589,23 +581,23 @@ export function HoleLayout({
       const arr = bucket.get(f.feature_type) ?? [];
       arr.push(feat);
       bucket.set(f.feature_type, arr);
-
-      if (f.feature_type === 'green') {
-        for (const pt of flattenCoords(f.coords, f.is_line)) {
-          puttingBounds.extend(pt);
-        }
-      }
     }
 
-    // If no green polygon was tagged, fall back to ±15m around the green coord
-    // (a typical green is 15-25m across; this lets fitBounds settle on a
-    // sensible zoom even without polygon data).
-    if (puttingBounds.getNorth() === puttingBounds.getSouth()) {
-      const dLat = 15 / 111000;
-      const dLng = 15 / (111000 * Math.cos((hole.green_lat * Math.PI) / 180));
-      puttingBounds.extend([hole.green_lng - dLng, hole.green_lat - dLat]);
-      puttingBounds.extend([hole.green_lng + dLng, hole.green_lat + dLat]);
-    }
+    // Putting bounds: a fixed ±18m square centered on the hole's recorded
+    // green coordinate. Building bounds from the polygon's actual vertices
+    // (the previous approach) made fitBounds center on the polygon's bbox
+    // mid-point, which drifts off the green's true center when the polygon
+    // is asymmetric — pushing the green into a corner of the viewport. A
+    // fixed-radius square around the canonical green coord guarantees the
+    // green centers in the viewport with the symmetric padding below.
+    const PUTTING_HALF_SPAN_M = 18;
+    const dLat = PUTTING_HALF_SPAN_M / 111000;
+    const dLng =
+      PUTTING_HALF_SPAN_M / (111000 * Math.cos((hole.green_lat * Math.PI) / 180));
+    const puttingBounds = new mapboxgl.LngLatBounds(
+      [hole.green_lng - dLng, hole.green_lat - dLat],
+      [hole.green_lng + dLng, hole.green_lat + dLat]
+    );
 
     // Centerline coordinates: prefer the cached OSM dogleg, fall back to a
     // 2-point tee→green line so the amber layer still renders for synthesized

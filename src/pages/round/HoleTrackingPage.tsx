@@ -261,17 +261,35 @@ export function HoleTrackingPage() {
       ? (lastShot.distanceUnit === 'feet' ? lastShot.distance / 3 : lastShot.distance) *
         0.9144
       : 0;
-  const lastShotOnGreen = lastShot?.lie === 'green';
+  // The player is "on the green" when any of these are true:
+  //   • the last recorded shot's lie is green (e.g. approach stuck the green)
+  //   • the last recorded shot was a putt (clubCategory === 'putter') — even
+  //     a missed putt leaves the ball on the green, so the next shot is
+  //     another putt
+  //   • the user manually picked a putter on the main-screen club selector
+  //     (handles the case where lie tracking didn't capture green, but the
+  //     player obviously is there)
+  // Any of these triggers puttingMode (green-centered zoom, no aim target)
+  // and forces the putter as the default club for the next shot.
+  const lastShotClub = lastShot
+    ? bagClubs.find((c) => c.clubId === lastShot.clubId) ?? null
+    : null;
+  const lastShotWasPutt = lastShotClub?.category === 'putter';
+  const selectedClubObj = selectedClubId
+    ? bagClubs.find((c) => c.clubId === selectedClubId) ?? null
+    : null;
+  const userPickedPutter = selectedClubObj?.category === 'putter';
+  const lastShotOnGreen =
+    lastShot?.lie === 'green' || lastShotWasPutt || userPickedPutter;
   const suggestedHandleDistanceM =
     hole.shots.length >= 2 && !lastShotOnGreen && lastShotDistanceM > 0
       ? ballDistanceFromTeeM + lastShotDistanceM
       : undefined;
 
-  // When the previous shot ended on the green, pre-select the user's putter
-  // for the next shot so they don't have to re-tap the putter tier every
-  // putt. Uses the first putter in the bag (most users have only one). The
-  // user-driven `selectedClubId` (set via the bottom-left club picker on the
-  // main screen) overrides this auto-pick.
+  // Pre-select the user's putter when on the green. Uses the first putter in
+  // the bag (most users have only one). The user-driven `selectedClubId`
+  // overrides this auto-pick, but when the user already picked the putter
+  // this just re-affirms it.
   const putterAutoClubId = lastShotOnGreen
     ? bagClubs.find((c) => c.category === 'putter')?.clubId ?? null
     : null;
