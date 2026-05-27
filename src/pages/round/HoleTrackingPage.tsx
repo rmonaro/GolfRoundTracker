@@ -1019,8 +1019,10 @@ export function HoleTrackingPage() {
             sx={{
               position: 'absolute',
               bottom: 'calc(84px + env(safe-area-inset-bottom))',
-              left: 16,
-              right: 16,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              // 20% narrower than full-width: 80% of the map width, centered.
+              width: '80%',
               zIndex: 5,
               display: 'flex',
               gap: 1,
@@ -1028,13 +1030,35 @@ export function HoleTrackingPage() {
               border: 1.5,
               borderColor: '#fbbf24',
               borderRadius: 2,
-              p: 1,
+              // 20px horizontal padding per side; vertical kept tight.
+              px: '20px',
+              py: 1,
               backdropFilter: 'blur(6px)',
               WebkitBackdropFilter: 'blur(6px)',
               boxShadow: '0 4px 12px rgba(0,0,0,0.45)'
             }}
           >
-            <Box sx={{ flex: 1, alignSelf: 'center', minWidth: 0 }}>
+            {/* LEFT — Cancel */}
+            <Button
+              size="small"
+              onClick={() => setPendingGps(null)}
+              sx={{
+                color: 'common.white',
+                minHeight: 40,
+                textTransform: 'none'
+              }}
+            >
+              Cancel
+            </Button>
+            {/* CENTER — Ball Landed read-out */}
+            <Box
+              sx={{
+                flex: 1,
+                alignSelf: 'center',
+                minWidth: 0,
+                textAlign: 'center'
+              }}
+            >
               <Typography
                 variant="caption"
                 sx={{
@@ -1054,17 +1078,7 @@ export function HoleTrackingPage() {
                 {Math.round(metersToYards(pendingGps.calculatedDistanceM))} yds
               </Typography>
             </Box>
-            <Button
-              size="small"
-              onClick={() => setPendingGps(null)}
-              sx={{
-                color: 'common.white',
-                minHeight: 40,
-                textTransform: 'none'
-              }}
-            >
-              Cancel
-            </Button>
+            {/* RIGHT — Record Shot (fully rounded pill) */}
             <Button
               variant="contained"
               size="small"
@@ -1073,7 +1087,16 @@ export function HoleTrackingPage() {
                 setEditingShot(null);
                 setShotSheet(true);
               }}
-              sx={{ minHeight: 40, textTransform: 'none', fontWeight: 700 }}
+              sx={{
+                minHeight: 40,
+                textTransform: 'none',
+                fontWeight: 700,
+                // 100% rounded on both ends — `borderRadius: 999` is the
+                // standard "pill" trick (any value greater than half the
+                // element's height collapses to a full semicircle on each side).
+                borderRadius: 999,
+                px: 2.5
+              }}
             >
               Record Shot
             </Button>
