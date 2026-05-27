@@ -67,6 +67,14 @@ interface HoleLayoutProps {
     inferredLie: Lie | null;
     inferredTargetResult: TargetResult | null;
   }) => void;
+  /**
+   * Pending landing point chosen by the user. Renders as a small white-bordered
+   * red dot on the map. The parent holds this state (set in `onShotLanded`) and
+   * passes it back so we can render the marker without re-opening the shot
+   * sheet — the user gets a chance to confirm or move the marker before
+   * committing the shot.
+   */
+  landingPoint?: [number, number] | null;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -466,7 +474,8 @@ export function HoleLayout({
   suggestedHandleDistanceM,
   puttingMode = false,
   bagClubs,
-  onShotLanded
+  onShotLanded,
+  landingPoint = null
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -1030,6 +1039,13 @@ export function HoleLayout({
           bearing: puttingMode ? 0 : bearing,
           animate: false
         });
+        // Pull the camera back ~10% in normal mode so the hole sits inside the
+        // viewport with more breathing room. Mapbox zoom is logarithmic (each
+        // level doubles scale) so a 10% scale reduction is log2(1.1) ≈ 0.137
+        // zoom units. Putting mode keeps its tight green-only framing.
+        if (!puttingMode) {
+          map.setZoom(map.getZoom() - Math.log2(1.1));
+        }
       } catch {
         // Degenerate bbox (e.g. all points identical) — ignore; the initial
         // center/zoom is already a sensible view.
@@ -1037,6 +1053,26 @@ export function HoleLayout({
     };
 
     map.on('load', onLoad);
+
+    // Pending landing-point marker — a white-ringed red disk dropped where
+    // the user last tapped. The parent owns the position (set in
+    // `onShotLanded`) and re-passes it here, so the marker persists across
+    // renders without needing internal state in this component.
+    if (landingPoint) {
+      const lpEl = document.createElement('div');
+      Object.assign(lpEl.style, {
+        width: '18px',
+        height: '18px',
+        borderRadius: '50%',
+        background: '#ef4444',
+        border: '3px solid #ffffff',
+        boxShadow: '0 2px 6px rgba(0,0,0,0.6)',
+        pointerEvents: 'none'
+      } as Partial<CSSStyleDeclaration>);
+      new mapboxgl.Marker({ element: lpEl, anchor: 'center' })
+        .setLngLat(landingPoint)
+        .addTo(map);
+    }
 
     // Tap-to-record. Fires for clicks on empty map area. The aim handle
     // captures its own pointer events upstream so it doesn't trigger this.
@@ -1088,7 +1124,8 @@ export function HoleLayout({
     suggestedHandleDistanceM,
     puttingMode,
     bagClubs,
-    onShotLanded
+    onShotLanded,
+    landingPoint
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

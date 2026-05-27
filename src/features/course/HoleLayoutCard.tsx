@@ -33,6 +33,8 @@ interface HoleLayoutCardProps {
     inferredLie: Lie | null;
     inferredTargetResult: TargetResult | null;
   }) => void;
+  /** Pending landing point marker. See HoleLayoutProps.landingPoint. */
+  landingPoint?: [number, number] | null;
 }
 
 export function HoleLayoutCard({
@@ -44,7 +46,8 @@ export function HoleLayoutCard({
   suggestedHandleDistanceM,
   puttingMode = false,
   bagClubs,
-  onShotLanded
+  onShotLanded,
+  landingPoint = null
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -76,6 +79,7 @@ export function HoleLayoutCard({
             puttingMode={puttingMode}
             bagClubs={bagClubs}
             onShotLanded={onShotLanded}
+            landingPoint={landingPoint}
           />
         </Box>
       </Card>

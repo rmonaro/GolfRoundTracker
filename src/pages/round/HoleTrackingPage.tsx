@@ -648,7 +648,13 @@ export function HoleTrackingPage() {
           suggestedHandleDistanceM={suggestedHandleDistanceM}
           puttingMode={lastShotOnGreen}
           bagClubs={bagClubs}
+          landingPoint={
+            pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
+          }
           onShotLanded={(data) => {
+            // Just stash the landing point — DON'T open the shot UI yet. The
+            // user gets a chance to move the marker by tapping elsewhere on
+            // the map, then commits via the "Record Shot" button.
             setPendingGps({
               startLat: data.start[1],
               startLng: data.start[0],
@@ -658,8 +664,6 @@ export function HoleTrackingPage() {
               inferredLie: data.inferredLie,
               inferredTargetResult: data.inferredTargetResult
             });
-            setEditingShot(null);
-            setShotSheet(true);
           }}
         />
 
@@ -861,6 +865,76 @@ export function HoleTrackingPage() {
         >
           <AddRoundedIcon />
         </Fab>
+
+        {/* Pending landing-point confirm bar. Appears above the FABs when the
+            user has tapped a spot but not yet committed. Tap the map again to
+            move it; tap Record Shot to open the shot sheet pre-filled with
+            the tapped position, lie, and direction; tap Cancel to clear. */}
+        {pendingGps && (
+          <Box
+            sx={{
+              position: 'absolute',
+              bottom: 'calc(84px + env(safe-area-inset-bottom))',
+              left: 16,
+              right: 16,
+              zIndex: 5,
+              display: 'flex',
+              gap: 1,
+              bgcolor: 'rgba(11,20,16,0.92)',
+              border: 1.5,
+              borderColor: '#fbbf24',
+              borderRadius: 2,
+              p: 1,
+              backdropFilter: 'blur(6px)',
+              WebkitBackdropFilter: 'blur(6px)',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.45)'
+            }}
+          >
+            <Box sx={{ flex: 1, alignSelf: 'center', minWidth: 0 }}>
+              <Typography
+                variant="caption"
+                sx={{
+                  display: 'block',
+                  fontSize: '0.65rem',
+                  fontWeight: 700,
+                  letterSpacing: 0.5,
+                  color: '#fbbf24',
+                  textTransform: 'uppercase'
+                }}
+              >
+                Ball Landed
+              </Typography>
+              <Typography
+                sx={{ color: 'common.white', fontSize: '0.95rem', fontWeight: 700 }}
+              >
+                {Math.round(metersToYards(pendingGps.calculatedDistanceM))} yds
+              </Typography>
+            </Box>
+            <Button
+              size="small"
+              onClick={() => setPendingGps(null)}
+              sx={{
+                color: 'common.white',
+                minHeight: 40,
+                textTransform: 'none'
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="contained"
+              size="small"
+              color="primary"
+              onClick={() => {
+                setEditingShot(null);
+                setShotSheet(true);
+              }}
+              sx={{ minHeight: 40, textTransform: 'none', fontWeight: 700 }}
+            >
+              Record Shot
+            </Button>
+          </Box>
+        )}
       </Box>
 
       {/* Club picker drawer — slides up from the bottom-left button. Reuses
