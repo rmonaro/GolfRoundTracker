@@ -8,6 +8,7 @@ import { AppRouter } from '@/router/AppRouter';
 import { AuthProvider } from '@/features/auth/AuthProvider';
 import { SessionHydrator } from '@/features/auth/SessionHydrator';
 import { initMapbox } from '@/features/course/mapbox';
+import { useWatchSync } from '@/features/watch/useWatchSync';
 
 // Set the Mapbox access token once at bootstrap. No-op if VITE_MAPBOX_TOKEN
 // is absent — the hole layout falls back to SVG rendering in that case.
@@ -24,6 +25,13 @@ const queryClient = new QueryClient({
   }
 });
 
+// Headless side-effect component — hosts the watch-sync hook inside the React
+// tree (it needs store hooks). No render output; lives next to SessionHydrator.
+function WatchSyncMount() {
+  useWatchSync();
+  return null;
+}
+
 export function App() {
   const mode = useSettingsStore((s) => s.themeMode);
   const theme = useMemo(() => (mode === 'light' ? lightTheme : darkTheme), [mode]);
@@ -35,6 +43,7 @@ export function App() {
         <BrowserRouter>
           <AuthProvider>
             <SessionHydrator />
+            <WatchSyncMount />
             <AppRouter />
           </AuthProvider>
         </BrowserRouter>

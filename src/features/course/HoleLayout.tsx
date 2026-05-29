@@ -92,6 +92,13 @@ interface HoleLayoutProps {
    * so we keep the map clean until they commit or cancel.
    */
   hideAim?: boolean;
+  /**
+   * When true, the aim handle renders as a small amber dot instead of the
+   * larger crosshair-target. Used for approach shots where the target sits
+   * on top of the green polygon — a crosshair would obscure the surface
+   * the player is trying to read; a dot stays out of the way.
+   */
+  useTargetDot?: boolean;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -494,7 +501,8 @@ export function HoleLayout({
   onShotLanded,
   landingPoint = null,
   shotEndPoints = [],
-  hideAim = false
+  hideAim = false,
+  useTargetDot = false
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -848,34 +856,45 @@ export function HoleLayout({
             .addTo(map);
         }
 
-        // Target-style aim handle: concentric rings + crosshair tick marks +
-        // small center dot. Replaces the old filled amber disk so the player
-        // can see the green / fairway through the handle (rather than the
-        // handle obscuring what they're aiming at). All strokes are amber so
-        // the handle reads as one unit at a glance.
+        // Aim handle SVG. Two visual modes:
+        //   • Default (crosshair): concentric amber rings + cardinal ticks +
+        //     center dot. Best for tee shots / longer approaches where the
+        //     player wants a precise aiming reticle.
+        //   • Compact (useTargetDot): a small amber dot. Used for approach
+        //     shots where the target lands on or near the green polygon —
+        //     the crosshair would obscure the green surface the player is
+        //     trying to read.
         //
-        // The first `<rect fill="transparent">` is critical: SVG hit-testing
-        // only triggers on filled regions, so without a transparent backing
-        // the gaps between rings let taps fall through to the map canvas —
-        // which would fire onShotLanded and open the shot sheet on every aim
-        // adjustment. The backing makes the entire 44×44 SVG box one target.
+        // In BOTH modes the first `<rect fill="rgba(0,0,0,0.001)">` is
+        // critical: SVG hit-testing only triggers on filled regions, so
+        // without a transparent backing the gaps in the SVG let taps fall
+        // through to the map canvas and fire onShotLanded on every aim
+        // adjustment. The backing makes the entire SVG box one target.
+        const handleSize = useTargetDot ? 28 : 44;
         const handleEl = document.createElement('div');
         handleEl.className = 'grt-aim-handle';
-        handleEl.innerHTML = `
-          <svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg" style="display:block;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.55));">
-            <rect x="0" y="0" width="44" height="44" fill="rgba(0,0,0,0.001)" />
-            <circle cx="22" cy="22" r="19" fill="none" stroke="#fbbf24" stroke-width="2.5" />
-            <circle cx="22" cy="22" r="11" fill="none" stroke="#fbbf24" stroke-width="2" />
-            <circle cx="22" cy="22" r="2.4" fill="#fbbf24" />
-            <line x1="22" y1="1" x2="22" y2="7" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
-            <line x1="22" y1="37" x2="22" y2="43" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
-            <line x1="1" y1="22" x2="7" y2="22" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
-            <line x1="37" y1="22" x2="43" y2="22" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
-          </svg>
-        `;
+        handleEl.innerHTML = useTargetDot
+          ? `
+            <svg width="28" height="28" viewBox="0 0 28 28" xmlns="http://www.w3.org/2000/svg" style="display:block;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.55));">
+              <rect x="0" y="0" width="28" height="28" fill="rgba(0,0,0,0.001)" />
+              <circle cx="14" cy="14" r="7" fill="#fbbf24" stroke="#ffffff" stroke-width="2" />
+            </svg>
+          `
+          : `
+            <svg width="44" height="44" viewBox="0 0 44 44" xmlns="http://www.w3.org/2000/svg" style="display:block;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.55));">
+              <rect x="0" y="0" width="44" height="44" fill="rgba(0,0,0,0.001)" />
+              <circle cx="22" cy="22" r="19" fill="none" stroke="#fbbf24" stroke-width="2.5" />
+              <circle cx="22" cy="22" r="11" fill="none" stroke="#fbbf24" stroke-width="2" />
+              <circle cx="22" cy="22" r="2.4" fill="#fbbf24" />
+              <line x1="22" y1="1" x2="22" y2="7" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+              <line x1="22" y1="37" x2="22" y2="43" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+              <line x1="1" y1="22" x2="7" y2="22" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+              <line x1="37" y1="22" x2="43" y2="22" stroke="#fbbf24" stroke-width="2.5" stroke-linecap="round" />
+            </svg>
+          `;
         Object.assign(handleEl.style, {
-          width: '44px',
-          height: '44px',
+          width: `${handleSize}px`,
+          height: `${handleSize}px`,
           cursor: 'grab',
           touchAction: 'none',
           userSelect: 'none',
@@ -1199,7 +1218,8 @@ export function HoleLayout({
     onShotLanded,
     landingPoint,
     shotEndPoints,
-    hideAim
+    hideAim,
+    useTargetDot
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

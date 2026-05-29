@@ -39,6 +39,8 @@ interface HoleLayoutCardProps {
   shotEndPoints?: Array<[number, number]>;
   /** Suppress aim handle / line while a landing-point pin is active. */
   hideAim?: boolean;
+  /** Render the aim handle as a compact dot instead of the crosshair. */
+  useTargetDot?: boolean;
 }
 
 export function HoleLayoutCard({
@@ -53,7 +55,8 @@ export function HoleLayoutCard({
   onShotLanded,
   landingPoint = null,
   shotEndPoints = [],
-  hideAim = false
+  hideAim = false,
+  useTargetDot = false
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -88,6 +91,7 @@ export function HoleLayoutCard({
             landingPoint={landingPoint}
             shotEndPoints={shotEndPoints}
             hideAim={hideAim}
+            useTargetDot={useTargetDot}
           />
         </Box>
       </Card>

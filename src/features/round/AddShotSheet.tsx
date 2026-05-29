@@ -353,15 +353,19 @@ export function AddShotSheet({
     }
   }, [selectedClub]);
 
-  // When the user hits the ideal target, auto-suggest a matching lie.
-  // They can still override.
+  // When the user taps the ideal target, sync the lie to match — fairway-hit
+  // → fairway, green-hit → green, putt-made → green. This fires whenever the
+  // user changes their target pick, so re-tapping fairway after manually
+  // setting lie to 'rough' still updates lie back to 'fairway'. `lie` is
+  // NOT in the deps — that way, a user edit to the lie selector AFTER the
+  // auto-set sticks (we don't re-fire on every lie change and overwrite it).
   useEffect(() => {
     if (!targetResult) return;
-    if (lie !== null) return;
     if (targetType === 'green' && targetResult === 'hit') setLie('green');
     else if (targetType === 'fairway' && targetResult === 'hit') setLie('fairway');
     else if (targetType === 'putt' && targetResult === 'made') setLie('green');
-  }, [targetResult, targetType, lie]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetResult, targetType]);
 
   const distanceNumber = distance.trim() === '' ? null : Number(distance);
   const distanceValid =

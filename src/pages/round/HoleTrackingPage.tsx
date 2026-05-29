@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   Box,
   Button,
@@ -51,6 +51,7 @@ import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { useHoleLayout } from '@/features/course/useHoleLayout';
 import { metersToYards } from '@/features/course/distance';
 import { recommendClub } from '@/features/course/HoleLayout';
+import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
 import { roundRepo } from '@/services/roundRepo';
@@ -413,6 +414,19 @@ export function HoleTrackingPage() {
   // can't accidentally add a phantom shot after the ball is in the cup.
   // They can still navigate to the next/prev hole via the header arrows.
   const holeComplete = lastShotMadePutt;
+
+  // "Next shot lands on the green" — the player is close enough to the pin
+  // that this swing is an approach (≤ 200 yds remaining). On approach shots
+  // the crosshair-target obscures the green polygon the player is trying to
+  // read, so we swap it for a compact dot. Putting mode owns its own no-
+  // target state; holeComplete locks the aim out entirely.
+  const APPROACH_RANGE_YDS = 200;
+  const nextShotOntoGreen =
+    !lastShotOnGreen &&
+    !holeComplete &&
+    remainingYards != null &&
+    remainingYards > 0 &&
+    remainingYards <= APPROACH_RANGE_YDS;
   const remainingFeet = lastShotOnGreen
     ? lastShotMadePutt
       ? 0
@@ -638,6 +652,85 @@ export function HoleTrackingPage() {
   const goPrev = () => setCurrentHole(Math.max(0, idx - 1));
   const goNext = () => setCurrentHole(Math.min(active.holes.length - 1, idx + 1));
 
+  // Watch → phone message handler. Refs keep the listener pinned to the
+  // latest handler functions without re-subscribing on every render (a
+  // resubscribe storm would silently double-fire the next watch message).
+  const goPrevRef = useRef(goPrev);
+  const goNextRef = useRef(goNext);
+  const onSubmitShotRef = useRef(onSubmitShot);
+  const bagClubsRef = useRef(bagClubs);
+  useEffect(() => {
+    goPrevRef.current = goPrev;
+    goNextRef.current = goNext;
+    onSubmitShotRef.current = onSubmitShot;
+    bagClubsRef.current = bagClubs;
+  });
+  useEffect(() => {
+    let handle: { remove: () => Promise<void> } | null = null;
+    (async () => {
+      handle = await watchBridge.onMessage((msg: WatchInboundMessage) => {
+        if (msg.type === 'navigateHole') {
+          if (msg.direction === 'prev') goPrevRef.current();
+          else if (msg.direction === 'next') goNextRef.current();
+          return;
+        }
+        if (msg.type === 'recordShot') {
+          // Lie auto-fill mirrors AddShotSheet's logic. Distance left null —
+          // the user can backfill on the phone if they care. GPS pair flows
+          // through so the next aim line + lastShotEndDistFromGreen reads
+          // the actual landing position.
+          const club = bagClubsRef.current.find((c) => c.clubId === msg.clubId) ?? null;
+          let lie: import('@/models').Lie | null = null;
+          if (msg.targetType === 'green' && msg.targetResult === 'hit') lie = 'green';
+          else if (msg.targetType === 'fairway' && msg.targetResult === 'hit') lie = 'fairway';
+          else if (msg.targetType === 'putt' && msg.targetResult === 'made') lie = 'green';
+
+          // Mirror deriveShotResult from AddShotSheet without importing it
+          // (avoid circular deps).
+          let shotResult: import('@/models').ShotResult;
+          if (msg.targetType === 'putt') {
+            shotResult = msg.targetResult === 'made' ? 'made_putt' : 'putt';
+          } else if (msg.targetType === 'green') {
+            shotResult =
+              msg.targetResult === 'hit'
+                ? 'green'
+                : (msg.targetResult as import('@/models').ShotResult);
+          } else {
+            shotResult =
+              msg.targetResult === 'hit'
+                ? 'fairway'
+                : (msg.targetResult as import('@/models').ShotResult);
+          }
+
+          onSubmitShotRef
+            .current({
+              clubId: msg.clubId,
+              clubCategory: club?.category ?? null,
+              distance: null,
+              distanceUnit: null,
+              targetType: msg.targetType,
+              targetResult: msg.targetResult,
+              lie,
+              penaltyType: null,
+              derivedShotResult: shotResult,
+              notes: null,
+              startLat: msg.startLat ?? null,
+              startLng: msg.startLng ?? null,
+              endLat: msg.endLat ?? null,
+              endLng: msg.endLng ?? null,
+              calculatedDistance: null
+            })
+            .catch((err) => {
+              console.error('[watch] recordShot from watch failed', err);
+            });
+        }
+      });
+    })();
+    return () => {
+      handle?.remove().catch(() => undefined);
+    };
+  }, []);
+
   const finishRound = async () => {
     const score = computeTotalScore(active.holes);
     try {
@@ -775,6 +868,7 @@ export function HoleTrackingPage() {
           // hole is complete — both states mean "no more shots to plan from
           // here", so the handle / line / distance pill would be misleading.
           hideAim={!!pendingGps || holeComplete}
+          useTargetDot={nextShotOntoGreen}
           onShotLanded={
             holeComplete
               ? undefined
@@ -1035,18 +1129,18 @@ export function HoleTrackingPage() {
             sx={{
               position: 'absolute',
               bottom: 'calc(84px + env(safe-area-inset-bottom))',
-              left: '50%',
-              transform: 'translateX(-50%)',
-              // 20% narrower than full-width: 80% of the map width, centered.
-              width: '80%',
+              // Full-width — pin to both edges of the map area.
+              left: 0,
+              right: 0,
               zIndex: 5,
               display: 'flex',
+              alignItems: 'center',
               gap: 1,
               bgcolor: 'rgba(11,20,16,0.92)',
               border: 1.5,
               borderColor: '#fbbf24',
-              borderRadius: 2,
-              // 20px horizontal padding per side; vertical kept tight.
+              // No corner radius — bar runs edge-to-edge.
+              borderRadius: 0,
               px: '20px',
               py: 1,
               backdropFilter: 'blur(6px)',
@@ -1054,25 +1148,13 @@ export function HoleTrackingPage() {
               boxShadow: '0 4px 12px rgba(0,0,0,0.45)'
             }}
           >
-            {/* LEFT — Cancel */}
-            <Button
-              size="small"
-              onClick={() => setPendingGps(null)}
-              sx={{
-                color: 'common.white',
-                minHeight: 40,
-                textTransform: 'none'
-              }}
-            >
-              Cancel
-            </Button>
-            {/* CENTER — Ball Landed read-out */}
+            {/* LEFT — Ball Landed read-out */}
             <Box
               sx={{
                 flex: 1,
                 alignSelf: 'center',
                 minWidth: 0,
-                textAlign: 'center'
+                textAlign: 'left'
               }}
             >
               <Typography
@@ -1094,7 +1176,7 @@ export function HoleTrackingPage() {
                 {Math.round(metersToYards(pendingGps.calculatedDistanceM))} yds
               </Typography>
             </Box>
-            {/* RIGHT — Record Shot (fully rounded pill) */}
+            {/* RIGHT — Record (fully rounded pill) then Close (X) */}
             <Button
               variant="contained"
               size="small"
@@ -1107,15 +1189,20 @@ export function HoleTrackingPage() {
                 minHeight: 40,
                 textTransform: 'none',
                 fontWeight: 700,
-                // 100% rounded on both ends — `borderRadius: 999` is the
-                // standard "pill" trick (any value greater than half the
-                // element's height collapses to a full semicircle on each side).
                 borderRadius: 999,
                 px: 2.5
               }}
             >
-              Record Shot
+              Record
             </Button>
+            <IconButton
+              aria-label="cancel landing point"
+              onClick={() => setPendingGps(null)}
+              size="small"
+              sx={{ color: 'common.white' }}
+            >
+              <CloseRoundedIcon />
+            </IconButton>
           </Box>
         )}
       </Box>
