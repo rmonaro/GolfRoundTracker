@@ -1037,15 +1037,16 @@ export function HoleLayout({
           .setLngLat(initialAim)
           .addTo(map);
 
-        // Left-side distance label — small amber pill that sits 30px to the
-        // left of the target with a right-pointing arrow on its right edge so
-        // it visually points at the aim point. Updates live as the user drags
-        // so they can see the ball→target distance without looking away.
+        // Left-side distance label — small amber pill positioned to the LEFT
+        // of the aim target so it never overlaps the crosshair / dot. Updates
+        // live as the user drags so they can see the ball→target distance
+        // without looking away.
         //
-        // `anchor: 'right'` lines the label's right edge up with the marker
-        // position; `marginRight: 30px` then pushes the whole label left.
-        // Arrow = two stacked CSS triangles (outer amber + inner dark) so the
-        // tip mirrors the pill's amber border with a dark center.
+        // Positioning: `anchor: 'right'` lines the label's right edge up with
+        // the lng/lat, then `offset: [-LABEL_OFFSET_PX, 0]` shifts the whole
+        // marker left in pixel space (clean separation from the target). CSS
+        // margins don't move Mapbox markers — the Marker's offset option is
+        // the only reliable way to get a pixel gap.
         const labelEl = document.createElement('div');
         Object.assign(labelEl.style, {
           position: 'relative',
@@ -1057,7 +1058,6 @@ export function HoleLayout({
           font: '700 11px system-ui, sans-serif',
           lineHeight: '1.2',
           border: '1px solid #fbbf24',
-          marginRight: '70px',
           whiteSpace: 'nowrap',
           pointerEvents: 'none',
           boxShadow: '0 1px 3px rgba(0,0,0,0.45)'
@@ -1108,9 +1108,14 @@ export function HoleLayout({
           }
         };
         updateLabel(initialAim);
+        // Pixel gap between the label's right edge (incl. arrow) and the
+        // aim marker's center. Scales with the marker size so the dot and
+        // the crosshair both get a sensible gap.
+        const LABEL_OFFSET_PX = Math.round(handleSize / 2) + 14;
         const labelMarker = new mapboxgl.Marker({
           element: labelEl,
-          anchor: 'right'
+          anchor: 'right',
+          offset: [-LABEL_OFFSET_PX, 0]
         })
           .setLngLat(initialAim)
           .addTo(map);

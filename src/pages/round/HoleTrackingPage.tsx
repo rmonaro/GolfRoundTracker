@@ -1330,6 +1330,57 @@ export function HoleTrackingPage() {
           </Box>
         )}
 
+        {/* Made — one-tap putt record. Only on the green and before the hole
+            is complete. Uses the player's putter, the current remaining feet
+            as the putt distance, and records a made-putt shot directly —
+            skipping the Add Shot sheet for the most common end-of-hole
+            action. Sits above the Add Shot FAB to keep the FAB stack
+            consistent on every hole. */}
+        {!holeComplete &&
+          lastShotOnGreen &&
+          bagClubs.some((c) => c.category === 'putter') && (
+            <Fab
+              variant="extended"
+              aria-label="record made putt"
+              onClick={() => {
+                const putter = bagClubs.find((c) => c.category === 'putter');
+                if (!putter) return;
+                void onSubmitShot({
+                  clubId: putter.clubId,
+                  clubCategory: 'putter',
+                  distance: remainingFeet,
+                  distanceUnit: remainingFeet != null ? 'feet' : null,
+                  targetType: 'putt',
+                  targetResult: 'made',
+                  lie: 'green',
+                  penaltyType: null,
+                  derivedShotResult: 'made_putt',
+                  notes: null,
+                  startLat: null,
+                  startLng: null,
+                  endLat: null,
+                  endLng: null,
+                  calculatedDistance: null
+                });
+              }}
+              sx={{
+                position: 'absolute',
+                bottom: 'calc(84px + env(safe-area-inset-bottom))',
+                right: 16,
+                zIndex: 4,
+                bgcolor: '#2e7d32',
+                color: 'common.white',
+                fontWeight: 800,
+                px: 2.5,
+                '&:hover': { bgcolor: '#1b5e20' },
+                boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
+              }}
+            >
+              <FlagCircleRoundedIcon sx={{ mr: 1 }} />
+              Made
+            </Fab>
+          )}
+
         {/* Add Shot — circular FAB, bottom-right. Hidden once the hole is
             complete (a made putt) so the user can't accidentally add a phantom
             shot. Use the header arrows to move on to the next hole. */}
