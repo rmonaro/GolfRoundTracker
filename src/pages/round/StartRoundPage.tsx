@@ -102,7 +102,15 @@ export function StartRoundPage() {
   };
 
   return (
-    <Box>
+    <Box
+      sx={{
+        // Lands the heading 50px below the iOS status bar (or 50px from
+        // page top on platforms without one). PageHeader contributes its
+        // own 16px (pt: 2), so the wrapper adds the remaining 34px on top
+        // of the safe-area inset.
+        pt: 'calc(env(safe-area-inset-top) + 34px)'
+      }}
+    >
       <PageHeader title="Start Round" subtitle="Set up the course and number of holes" back />
       <Stack spacing={2} px={2} pb={4}>
         {error && <Alert severity="error">{error}</Alert>}

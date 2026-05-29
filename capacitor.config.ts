@@ -16,10 +16,16 @@ const config: CapacitorConfig = {
   appName: 'Golf Round Tracker',
   webDir: 'dist',
   ios: {
-    // Lets safe-area-inset CSS (which the app uses heavily) work the way it
-    // does in mobile Safari. Without 'always' the WKWebView ignores the
-    // notch / home-indicator regions and content gets cut off.
-    contentInset: 'always'
+    // 'never' lets the WKWebView extend edge-to-edge under the status bar
+    // and over the home-indicator zone. With 'never', env(safe-area-inset-*)
+    // returns real pixel values that our CSS already handles via padding/
+    // height calcs (see MobileShell, HoleTrackingPage, AddShotSheet).
+    //
+    // 'always' (the previous setting) auto-insets the web content away from
+    // the safe areas — which clamps the app inside a smaller box AND zeroes
+    // out env(safe-area-inset-*), so our CSS can't make the layout fill the
+    // screen.
+    contentInset: 'never'
   },
   android: {
     // Match the deep colour the dark theme expects so there's no white flash
