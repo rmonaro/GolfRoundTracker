@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import type { HoleLayoutData } from '@/services/holesRepo';
-import type { BagClub, CourseHole, HoleFeature, Lie, LngLat, TargetResult } from '@/models';
+import type { BagClub, CourseHole, HoleFeature, Lie, LngLat, TargetResult, TargetType } from '@/models';
 import {
   buildProjector,
   expandBoundsFromPoints,
@@ -118,6 +118,13 @@ interface HoleLayoutProps {
    * defaults to the pin as before).
    */
   maxAimDistanceFromBallM?: number;
+  /**
+   * Target type for the upcoming shot. Used by tap-to-record classification:
+   * a tap on the target's surface (fairway for tee shots on par 4/5; green
+   * otherwise) registers as targetResult='hit'. Defaults to 'green' to match
+   * legacy behavior.
+   */
+  targetType?: TargetType;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -503,7 +510,8 @@ function classifyTap(
   tap: [number, number],
   features: HoleFeature[],
   bearing: number,
-  green: [number, number]
+  green: [number, number],
+  targetType: TargetType
 ): { lie: Lie | null; targetResult: TargetResult | null } {
   // Walk features by priority so the topmost polygon wins.
   const priority: Array<{ type: string; lie: Lie }> = [
@@ -551,8 +559,16 @@ function classifyTap(
   const along = dx * Math.sin(br) + dy * Math.cos(br);
   const across = dx * Math.cos(br) - dy * Math.sin(br);
 
+  // A tap on the target's own surface counts as a hit. Otherwise classify the
+  // miss by direction relative to the green. For fairway-target shots (tee
+  // shot on par 4/5) the tee box also counts — both register as lie='fairway'
+  // via the priority list above.
+  const targetMatched =
+    (targetType === 'green' && lie === 'green') ||
+    (targetType === 'fairway' && lie === 'fairway');
+
   let targetResult: TargetResult | null;
-  if (lie === 'green') {
+  if (targetMatched) {
     targetResult = 'hit';
   } else if (Math.abs(along) > Math.abs(across)) {
     targetResult = along > 0 ? 'long' : 'short';
@@ -579,7 +595,8 @@ export function HoleLayout({
   hideAim = false,
   useTargetDot = false,
   pinOverride = null,
-  maxAimDistanceFromBallM
+  maxAimDistanceFromBallM,
+  targetType = 'green'
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -1291,7 +1308,8 @@ export function HoleLayout({
           end,
           layout.features,
           bearing,
-          greenLL
+          greenLL,
+          targetType
         );
         onShotLanded({
           start: aimStartLL,
@@ -1325,7 +1343,8 @@ export function HoleLayout({
     hideAim,
     useTargetDot,
     pinOverride,
-    maxAimDistanceFromBallM
+    maxAimDistanceFromBallM,
+    targetType
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

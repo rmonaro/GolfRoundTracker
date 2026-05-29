@@ -60,6 +60,21 @@ export const holesRepo = {
     if (error) throw toAppError(error, 'Could not save orientation');
   },
 
+  /**
+   * Update the shared course-wide pin position for a hole. Passing null/null
+   * clears the override and falls everyone back to the course's stored green
+   * coord. Backed by a SECURITY DEFINER RPC so callers can only touch the
+   * pin columns, never the rest of the holes row.
+   */
+  async setPin(holeId: string, lng: number | null, lat: number | null): Promise<void> {
+    const { error } = await supabase.rpc('set_hole_pin', {
+      p_hole_id: holeId,
+      p_lng: lng,
+      p_lat: lat
+    });
+    if (error) throw toAppError(error, 'Could not save pin position');
+  },
+
   async flipHole(holeId: string): Promise<void> {
     // Fetch the row, swap tee/green, advance rotation by π, mark manual.
     const { data: row, error: fetchErr } = await supabase

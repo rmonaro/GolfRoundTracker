@@ -58,7 +58,8 @@ import { scoreVsPar } from '@/utils/format';
 import { roundRepo } from '@/services/roundRepo';
 import { bagRepo } from '@/services/bagRepo';
 import { courseRepo } from '@/services/courseRepo';
-import { useQuery } from '@tanstack/react-query';
+import { holesRepo } from '@/services/holesRepo';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   STROKE_PENALTY_TYPES,
   type BagClub,
@@ -77,6 +78,7 @@ export function HoleTrackingPage() {
   const bagClubs = useBagStore((s) => s.clubs);
   const setBagClubs = useBagStore((s) => s.setClubs);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -405,7 +407,16 @@ export function HoleTrackingPage() {
   useEffect(() => {
     setSelectedClubId(null);
     setSelectedClubTier1(null);
+    setPinEditMode(false);
   }, [hole.holeNumber]);
+
+  // The Move Pin button is hidden when the player isn't on the green. If
+  // they leave the green while pin-edit mode is active (rare — usually they'd
+  // tap to set first), clear the flag so subsequent map taps aren't
+  // misinterpreted as pin placements.
+  useEffect(() => {
+    if (!lastShotOnGreen && pinEditMode) setPinEditMode(false);
+  }, [lastShotOnGreen, pinEditMode]);
 
   // Auto-select the putter whenever the last recorded shot signals the ball
   // is on the green. Three signals — any one is enough:
@@ -450,6 +461,17 @@ export function HoleTrackingPage() {
   // when the round was created) and finally null for the "—" display.
   const osmPar = layoutQuery.data?.hole.par ?? null;
   const displayPar = osmPar ?? hole.par;
+
+  // Target type for the upcoming shot — drives tap-to-record classification
+  // on the map. Mirrors the rules in AddShotSheet.pickTargetType: putter →
+  // putt; shot #1 on par 4/5 → fairway; otherwise → green.
+  const upcomingShotNumber = hole.shots.length + 1;
+  const upcomingTargetType: import('@/models').TargetType =
+    selectedClub?.category === 'putter'
+      ? 'putt'
+      : upcomingShotNumber === 1 && (displayPar ?? hole.par) !== 3
+        ? 'fairway'
+        : 'green';
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
@@ -974,10 +996,16 @@ export function HoleTrackingPage() {
           // compete with the active task.
           hideAim={!!pendingGps || holeComplete || pinEditMode}
           useTargetDot={nextShotOntoGreen}
+          targetType={upcomingTargetType}
           pinOverride={
-            hole.pinLat != null && hole.pinLng != null
-              ? [hole.pinLng, hole.pinLat]
-              : null
+            // Course-wide shared pin (saved by any player; everyone inherits it).
+            // Falls back to the legacy per-round override on the LocalHole for
+            // any round that was started before the shared-pin migration.
+            layoutQuery.data?.hole.pin_lat != null && layoutQuery.data?.hole.pin_lng != null
+              ? [layoutQuery.data.hole.pin_lng, layoutQuery.data.hole.pin_lat]
+              : hole.pinLat != null && hole.pinLng != null
+                ? [hole.pinLng, hole.pinLat]
+                : null
           }
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
           onShotLanded={
@@ -989,10 +1017,23 @@ export function HoleTrackingPage() {
                   // pin (flag marker, aim line endpoint, putting bounds,
                   // distance-to-pin) picks up the override on next render.
                   if (pinEditMode) {
-                    updateHole(hole.holeNumber, {
-                      pinLat: data.end[1],
-                      pinLng: data.end[0]
-                    });
+                    // Persist to the shared course-wide pin so every other
+                    // player on this course inherits the new position. Bail
+                    // gracefully if the layout isn't loaded — there's no hole
+                    // row to update yet.
+                    const holeId = layoutQuery.data?.hole.id;
+                    if (holeId) {
+                      void (async () => {
+                        try {
+                          await holesRepo.setPin(holeId, data.end[0], data.end[1]);
+                          queryClient.invalidateQueries({
+                            queryKey: ['hole-layout', active?.courseId, hole.holeNumber]
+                          });
+                        } catch {
+                          // Swallow — the user can retry by moving the pin again.
+                        }
+                      })();
+                    }
                     setPinEditMode(false);
                     return;
                   }
@@ -1092,11 +1133,14 @@ export function HoleTrackingPage() {
           <StatPill label="Penalty" value={penaltyStrokes} />
         </Stack>
 
-        {/* Move Pin — small icon button on the top-center. Tap to enter
-            pin-edit mode; the next tap on the map sets the new pin
-            position for this hole. While active, shows a banner + Cancel/
-            Reset to clear the override and revert to the course coord. */}
-        {!holeComplete && (
+        {/* Move Pin — small icon button on the top-center. Visible only once
+            the player is on the green (avoids accidental taps while still
+            playing the hole, and matches when the precise pin actually
+            matters). Tap to enter pin-edit mode; the next tap on the map
+            saves the new pin position to the shared course library so every
+            other player inherits it. While active, shows a banner + Reset
+            to clear the override and revert to the course coord. */}
+        {!holeComplete && lastShotOnGreen && (
           <IconButton
             aria-label={pinEditMode ? 'cancel pin move' : 'move pin position'}
             onClick={() => setPinEditMode((v) => !v)}
@@ -1146,11 +1190,30 @@ export function HoleTrackingPage() {
             }}
           >
             Tap green to set pin
-            {(hole.pinLat != null || hole.pinLng != null) && (
+            {(layoutQuery.data?.hole.pin_lat != null ||
+              layoutQuery.data?.hole.pin_lng != null ||
+              hole.pinLat != null ||
+              hole.pinLng != null) && (
               <Button
                 size="small"
                 onClick={() => {
-                  updateHole(hole.holeNumber, { pinLat: null, pinLng: null });
+                  const holeId = layoutQuery.data?.hole.id;
+                  if (holeId) {
+                    void (async () => {
+                      try {
+                        await holesRepo.setPin(holeId, null, null);
+                        queryClient.invalidateQueries({
+                          queryKey: ['hole-layout', active?.courseId, hole.holeNumber]
+                        });
+                      } catch {
+                        // ignore; user can retry
+                      }
+                    })();
+                  }
+                  // Also clear any legacy per-round override.
+                  if (hole.pinLat != null || hole.pinLng != null) {
+                    updateHole(hole.holeNumber, { pinLat: null, pinLng: null });
+                  }
                   setPinEditMode(false);
                 }}
                 sx={{

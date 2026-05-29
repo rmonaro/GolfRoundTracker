@@ -2,7 +2,7 @@ import { Box, Card, CardContent, CircularProgress, Typography } from '@mui/mater
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import { useHoleLayout } from './useHoleLayout';
 import { HoleLayout } from './HoleLayout';
-import type { BagClub, Lie, TargetResult } from '@/models';
+import type { BagClub, Lie, TargetResult, TargetType } from '@/models';
 
 interface HoleLayoutCardProps {
   courseId: string | null | undefined;
@@ -45,6 +45,8 @@ interface HoleLayoutCardProps {
   pinOverride?: [number, number] | null;
   /** Bag-reach cap for initial aim position on shots off the tee. */
   maxAimDistanceFromBallM?: number;
+  /** Upcoming shot's target type — drives tap-to-record hit classification. */
+  targetType?: TargetType;
 }
 
 export function HoleLayoutCard({
@@ -62,7 +64,8 @@ export function HoleLayoutCard({
   hideAim = false,
   useTargetDot = false,
   pinOverride = null,
-  maxAimDistanceFromBallM
+  maxAimDistanceFromBallM,
+  targetType
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -100,6 +103,7 @@ export function HoleLayoutCard({
             useTargetDot={useTargetDot}
             pinOverride={pinOverride}
             maxAimDistanceFromBallM={maxAimDistanceFromBallM}
+            targetType={targetType}
           />
         </Box>
       </Card>

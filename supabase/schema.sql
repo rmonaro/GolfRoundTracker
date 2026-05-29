@@ -151,6 +151,8 @@ create table if not exists public.holes (
   tee_lat double precision,
   green_lng double precision,
   green_lat double precision,
+  pin_lng double precision,
+  pin_lat double precision,
   rotation_radians double precision,
   orientation_confidence text
     check (orientation_confidence in ('confirmed', 'reversed', 'assumed', 'manual')),

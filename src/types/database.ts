@@ -110,6 +110,8 @@ export interface HoleRow {
   tee_lat: number | null;
   green_lng: number | null;
   green_lat: number | null;
+  pin_lng: number | null;
+  pin_lat: number | null;
   rotation_radians: number | null;
   orientation_confidence: OrientationConfidence | null;
   bbox_min_lng: number | null;
