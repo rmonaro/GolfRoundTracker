@@ -871,6 +871,29 @@ export function HoleTrackingPage() {
     navigate(`/round/summary/${active.roundId}`, { replace: true });
   };
 
+  // Peek-at-stats: opens the summary page in read-only mode WITHOUT marking
+  // the round complete. Plain navigate (no replace) so the back button
+  // returns the user to their current hole.
+  const viewStats = () => {
+    navigate(`/round/summary/${active.roundId}`);
+  };
+
+  // Auto-finish the round when a putt is holed on the final hole. Guarded by
+  // a ref so it only fires once per page lifetime — if the user returns to
+  // edit a shot after the round closed, we don't re-stamp completed_at.
+  const autoFinishedRef = useRef(false);
+  const isLastHole = idx === active.holes.length - 1;
+  useEffect(() => {
+    if (autoFinishedRef.current) return;
+    if (!holeComplete || !isLastHole) return;
+    autoFinishedRef.current = true;
+    void finishRound();
+    // finishRound is stable in this component (recreated each render but with
+    // the same closure shape); excluding it avoids needing useCallback and
+    // doesn't introduce a stale-closure bug — score/holes are read fresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [holeComplete, isLastHole]);
+
   return (
     <Box
       sx={{
@@ -959,7 +982,7 @@ export function HoleTrackingPage() {
           >
             <ArrowForwardIosRoundedIcon />
           </IconButton>
-          <IconButton aria-label="finish" color="primary" onClick={finishRound}>
+          <IconButton aria-label="view round stats" color="primary" onClick={viewStats}>
             <FlagCircleRoundedIcon />
           </IconButton>
         </Stack>

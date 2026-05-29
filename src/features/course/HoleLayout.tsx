@@ -1125,10 +1125,21 @@ export function HoleLayout({
         // routes subsequent move/up events to the handle regardless of which
         // element is actually under the finger, so the canvas underneath
         // can't steal the gesture.
+        //
+        // Tap-vs-drag discrimination: tracking the pointer's starting screen
+        // position lets us treat a low-movement pointerup as a TAP. A tap on
+        // the handle fires onShotLanded with the handle's current location,
+        // which solves the "ball landed exactly at my aim mark, but I can't
+        // tap there because the handle is in the way" UX hole.
+        const TAP_THRESHOLD_PX = 8;
         let activePointerId: number | null = null;
+        let pointerStartPx: { x: number; y: number } | null = null;
+        let didDrag = false;
         const onPointerDown = (e: PointerEvent) => {
           if (activePointerId !== null) return;
           activePointerId = e.pointerId;
+          pointerStartPx = { x: e.clientX, y: e.clientY };
+          didDrag = false;
           handleEl.setPointerCapture(e.pointerId);
           handleEl.style.cursor = 'grabbing';
           e.preventDefault();
@@ -1137,6 +1148,15 @@ export function HoleLayout({
         const onPointerMove = (e: PointerEvent) => {
           if (e.pointerId !== activePointerId) return;
           e.preventDefault();
+          // Tap budget: ignore tiny finger jitter so a perfect tap still
+          // counts. Once the pointer moves past the threshold we're in
+          // drag territory for the rest of this gesture.
+          if (!didDrag && pointerStartPx) {
+            const dx = e.clientX - pointerStartPx.x;
+            const dy = e.clientY - pointerStartPx.y;
+            if (Math.hypot(dx, dy) > TAP_THRESHOLD_PX) didDrag = true;
+          }
+          if (!didDrag) return;
           const rect = map.getContainer().getBoundingClientRect();
           const px = e.clientX - rect.left;
           const py = e.clientY - rect.top;
@@ -1153,12 +1173,37 @@ export function HoleLayout({
         };
         const onPointerEnd = (e: PointerEvent) => {
           if (e.pointerId !== activePointerId) return;
+          const wasTap = !didDrag;
           activePointerId = null;
+          pointerStartPx = null;
+          didDrag = false;
           handleEl.style.cursor = 'grab';
           try {
             handleEl.releasePointerCapture(e.pointerId);
           } catch {
             // Already released — ignore.
+          }
+          // Tap on the handle → "ball landed exactly here". Mirrors the
+          // normal map-click flow: classify the lie + direction, then ship
+          // up to the parent which opens AddShotSheet pre-filled.
+          if (wasTap && onShotLanded) {
+            const aimPt = handleMarker.getLngLat();
+            const end: [number, number] = [aimPt.lng, aimPt.lat];
+            const distM = haversineMetersFE(aimStartLL, end);
+            const { lie, targetResult } = classifyTap(
+              end,
+              layout.features,
+              bearing,
+              effectivePin,
+              targetType
+            );
+            onShotLanded({
+              start: aimStartLL,
+              end,
+              calculatedDistanceM: distM,
+              inferredLie: lie,
+              inferredTargetResult: targetResult
+            });
           }
         };
         handleEl.addEventListener('pointerdown', onPointerDown);
