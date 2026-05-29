@@ -125,6 +125,12 @@ interface HoleLayoutProps {
    * legacy behavior.
    */
   targetType?: TargetType;
+  /**
+   * When true, render the centerline yardage markers (100/150/200/250) even
+   * while aimMode is on. Non-aim mode always shows them. Off by default so
+   * aim mode stays uncluttered until the player toggles them.
+   */
+  showYardageMarkers?: boolean;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -179,6 +185,45 @@ function getStyle(type: string) {
 }
 
 // -------------------- Geometry helpers --------------------
+
+/**
+ * Offset a geographic point by `distM` meters along compass `bearingDeg`
+ * (CW from north). Equirectangular approximation — fine for golf-course
+ * distances (<300m) where Earth curvature is negligible.
+ */
+function offsetByMeters(
+  point: [number, number],
+  bearingDeg: number,
+  distM: number
+): [number, number] {
+  const br = (bearingDeg * Math.PI) / 180;
+  const cosLat = Math.cos((point[1] * Math.PI) / 180);
+  const dLat = (distM * Math.cos(br)) / 111000;
+  const dLng = (distM * Math.sin(br)) / (111000 * cosLat);
+  return [point[0] + dLng, point[1] + dLat];
+}
+
+/**
+ * Walk from `start` along compass `bearingDeg` in 1-meter steps until the
+ * point exits `polygon`. Returns the last point still inside. Caps the
+ * search at `maxStepsM` (default 50) so we don't loop forever on tiny or
+ * malformed polygons. Returns null if `start` itself is already outside.
+ */
+function walkToPolygonEdge(
+  start: [number, number],
+  bearingDeg: number,
+  polygon: [number, number][],
+  maxStepsM = 50
+): [number, number] | null {
+  if (!pointInPolygon(start, polygon)) return null;
+  let lastInside: [number, number] = start;
+  for (let d = 1; d <= maxStepsM; d += 1) {
+    const test = offsetByMeters(start, bearingDeg, d);
+    if (!pointInPolygon(test, polygon)) return lastInside;
+    lastInside = test;
+  }
+  return lastInside;
+}
 
 /** Ray-casting point-in-polygon. Polygon is the outer ring as [lng, lat] points. */
 function pointInPolygon(point: [number, number], polygon: [number, number][]): boolean {
@@ -364,6 +409,44 @@ function pointAlongFromEnd(
     if (segLen >= remaining) {
       const t = remaining / segLen;
       return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    }
+    remaining -= segLen;
+  }
+  return null;
+}
+
+/**
+ * Like `pointAlongFromEnd` but also returns the local tee→green bearing of
+ * the segment that contains the returned point. Needed for "right of the
+ * fairway" placement on dogleg holes — the global tee→green bearing doesn't
+ * line up with the local fairway direction once the centerline turns, so a
+ * perpendicular walk drifts off the actual right edge.
+ */
+function pointAndBearingAlongFromEnd(
+  coords: [number, number][],
+  distanceMeters: number
+): { point: [number, number]; bearingDeg: number } | null {
+  if (coords.length < 2 || distanceMeters <= 0) return null;
+  let remaining = distanceMeters;
+  for (let i = coords.length - 1; i > 0; i--) {
+    const a = coords[i];
+    const b = coords[i - 1];
+    const segLen = haversineMetersFE(a, b);
+    if (segLen >= remaining) {
+      const t = remaining / segLen;
+      const point: [number, number] = [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t
+      ];
+      // Local tee→green direction of this segment = bearing from b → a
+      // (b is closer to the tee, a is closer to the green in this loop).
+      const cosLat = Math.cos((a[1] * Math.PI) / 180);
+      const dLng = (a[0] - b[0]) * cosLat;
+      const dLat = a[1] - b[1];
+      // atan2(east, north) gives compass bearing CW from north.
+      let bearingDeg = (Math.atan2(dLng, dLat) * 180) / Math.PI;
+      if (bearingDeg < 0) bearingDeg += 360;
+      return { point, bearingDeg };
     }
     remaining -= segLen;
   }
@@ -596,7 +679,8 @@ export function HoleLayout({
   useTargetDot = false,
   pinOverride = null,
   maxAimDistanceFromBallM,
-  targetType = 'green'
+  targetType = 'green',
+  showYardageMarkers = false
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -1218,28 +1302,58 @@ export function HoleLayout({
           e.stopPropagation();
           e.preventDefault();
         });
-      } else if (holeLengthM != null) {
-        // Walkback distance-to-pin markers along the centerline (100/150/200/250).
-        // Only render markers shorter than the hole — a 380-yard hole skips 250.
+      }
+
+      // Walkback distance-to-pin markers along the centerline (100/150/200/250).
+      // Shown in non-aim mode by default; in aim mode only when the player
+      // toggles them on via `showYardageMarkers`. Only renders markers
+      // shorter than the hole — a 380-yard hole skips 250.
+      const shouldRenderYardageMarkers =
+        holeLengthM != null && !hideAim && !puttingMode &&
+        (!aimMode || showYardageMarkers);
+      if (shouldRenderYardageMarkers && holeLengthM != null) {
+        // Standard golf course distance-marker colors:
+        //   Red 100, White 150, Blue 200, Yellow 250.
+        // Each marker is a colored circle sitting directly on the
+        // centerline at its yard-point. Anchored at center so the pin
+        // sits exactly on the geographic point.
+        const MARKER_STYLES: Record<number, { bg: string; text: string; border: string }> = {
+          100: { bg: '#ef4444', text: '#ffffff', border: '#ffffff' }, // red
+          150: { bg: '#ffffff', text: '#0b1410', border: '#0b1410' }, // white
+          200: { bg: '#3b82f6', text: '#ffffff', border: '#ffffff' }, // blue
+          250: { bg: '#fbbf24', text: '#0b1410', border: '#0b1410' }  // yellow
+        };
         for (const yds of YARDAGE_MARKERS) {
           const distM = yds * YARDS_TO_METERS;
           if (distM >= holeLengthM) continue;
           const pt = pointAlongFromEnd(centerlineCoords, distM);
           if (!pt) continue;
-          const el = document.createElement('div');
-          el.textContent = String(yds);
-          Object.assign(el.style, {
-            background: 'rgba(11,20,16,0.82)',
-            color: '#fbbf24',
-            padding: '1px 6px',
-            borderRadius: '8px',
+
+          const style = MARKER_STYLES[yds] ?? {
+            bg: '#fbbf24',
+            text: '#0b1410',
+            border: '#ffffff'
+          };
+          const dot = document.createElement('div');
+          dot.textContent = String(yds);
+          Object.assign(dot.style, {
+            width: '22px',
+            height: '22px',
+            borderRadius: '50%',
+            background: style.bg,
+            color: style.text,
+            border: `1.5px solid ${style.border}`,
             font: '700 10px system-ui, sans-serif',
-            border: '1px solid rgba(255,255,255,0.4)',
-            whiteSpace: 'nowrap',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
             pointerEvents: 'none',
             boxShadow: '0 1px 3px rgba(0,0,0,0.45)'
           } as Partial<CSSStyleDeclaration>);
-          new mapboxgl.Marker({ element: el }).setLngLat(pt).addTo(map);
+
+          new mapboxgl.Marker({ element: dot, anchor: 'center' })
+            .setLngLat(pt)
+            .addTo(map);
         }
       }
 
@@ -1394,7 +1508,8 @@ export function HoleLayout({
     useTargetDot,
     pinOverride,
     maxAimDistanceFromBallM,
-    targetType
+    targetType,
+    showYardageMarkers
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

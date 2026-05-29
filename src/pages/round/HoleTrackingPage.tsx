@@ -28,6 +28,7 @@ import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBulletedRounded';
 import MyLocationRoundedIcon from '@mui/icons-material/MyLocationRounded';
 import StopCircleRoundedIcon from '@mui/icons-material/StopCircleRounded';
+import StraightenRoundedIcon from '@mui/icons-material/StraightenRounded';
 import {
   ensureGpsPermission,
   getCurrentPosition,
@@ -138,6 +139,7 @@ export function HoleTrackingPage() {
   // Hides the aim UI and disables tap-to-record-shot while active so the
   // tap is unambiguous.
   const [pinEditMode, setPinEditMode] = useState(false);
+  const [showYardageMarkers, setShowYardageMarkers] = useState(false);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -1066,6 +1068,7 @@ export function HoleTrackingPage() {
           hideAim={!!pendingGps || holeComplete || pinEditMode}
           useTargetDot={nextShotOntoGreen}
           targetType={upcomingTargetType}
+          showYardageMarkers={showYardageMarkers}
           pinOverride={
             // Course-wide shared pin (saved by any player; everyone inherits it).
             // Falls back to the legacy per-round override on the LocalHole for
@@ -1449,6 +1452,35 @@ export function HoleTrackingPage() {
               Made
             </Fab>
           )}
+
+        {/* Yardage markers toggle — small FAB above the Add Shot button.
+            Tap to show the 100/150/200/250-yd distance markers from the
+            green along the centerline. Tap again to hide. Hidden once the
+            hole is complete. */}
+        {!holeComplete && (
+          <Fab
+            size="small"
+            aria-label={showYardageMarkers ? 'hide yardage markers' : 'show yardage markers'}
+            onClick={() => setShowYardageMarkers((v) => !v)}
+            sx={{
+              position: 'absolute',
+              bottom: lastShotOnGreen
+                ? 'calc(152px + env(safe-area-inset-bottom))'
+                : 'calc(84px + env(safe-area-inset-bottom))',
+              right: 16,
+              zIndex: 4,
+              bgcolor: showYardageMarkers ? '#fbbf24' : 'rgba(11,20,16,0.85)',
+              color: showYardageMarkers ? '#0b1410' : '#fbbf24',
+              border: '1.5px solid #fbbf24',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+              '&:hover': {
+                bgcolor: showYardageMarkers ? '#f59e0b' : 'rgba(11,20,16,0.95)'
+              }
+            }}
+          >
+            <StraightenRoundedIcon fontSize="small" />
+          </Fab>
+        )}
 
         {/* Add Shot — circular FAB, bottom-right. Hidden once the hole is
             complete (a made putt) so the user can't accidentally add a phantom

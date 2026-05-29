@@ -47,6 +47,8 @@ interface HoleLayoutCardProps {
   maxAimDistanceFromBallM?: number;
   /** Upcoming shot's target type — drives tap-to-record hit classification. */
   targetType?: TargetType;
+  /** Toggle the 100/150/200/250 centerline yardage markers in aim mode. */
+  showYardageMarkers?: boolean;
 }
 
 export function HoleLayoutCard({
@@ -65,7 +67,8 @@ export function HoleLayoutCard({
   useTargetDot = false,
   pinOverride = null,
   maxAimDistanceFromBallM,
-  targetType
+  targetType,
+  showYardageMarkers = false
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -104,6 +107,7 @@ export function HoleLayoutCard({
             pinOverride={pinOverride}
             maxAimDistanceFromBallM={maxAimDistanceFromBallM}
             targetType={targetType}
+            showYardageMarkers={showYardageMarkers}
           />
         </Box>
       </Card>
