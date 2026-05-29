@@ -77,12 +77,16 @@ export function useBag() {
   });
 
   const quickAdd = useMutation({
-    mutationFn: async (clubs: Array<{ name: string; category: ClubCategory }>) => {
+    mutationFn: async (
+      clubs: Array<{ name: string; category: ClubCategory; typicalDistanceYards?: number | null }>
+    ) => {
       if (!userId) throw new Error('Not authenticated');
       let position = query.data?.length ?? 0;
-      for (const { name, category } of clubs) {
+      for (const { name, category, typicalDistanceYards } of clubs) {
         const club = await bagRepo.createClub(name, category);
-        await bagRepo.addToBag(userId, club.id, position);
+        await bagRepo.addToBag(userId, club.id, position, {
+          typicalDistanceYards: typicalDistanceYards ?? null
+        });
         position++;
       }
     },

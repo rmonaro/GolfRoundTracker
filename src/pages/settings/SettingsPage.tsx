@@ -23,7 +23,21 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { authService } from '@/services/authService';
 import { profileRepo } from '@/services/profileRepo';
 import { toAppError } from '@/services/errors';
-import type { DominantHand } from '@/models';
+import type { DominantHand, SkillLevel, Gender } from '@/models';
+
+const skillLevelOptions = (
+  gender: Gender | ''
+): { value: SkillLevel; label: string; helper: string }[] => [
+  { value: 'beginner', label: 'Beginner', helper: 'New to golf or shoots 100+' },
+  { value: 'average', label: 'Average', helper: 'Typically shoots 90–100' },
+  { value: 'good', label: 'Good', helper: 'Typically shoots 80–90' },
+  { value: 'advanced', label: 'Advanced', helper: 'Single-digit handicap' },
+  {
+    value: 'pga_tour',
+    label: gender === 'female' ? 'LPGA Tour' : 'PGA Tour',
+    helper: 'Scratch / professional'
+  }
+];
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -44,6 +58,8 @@ export function SettingsPage() {
     profile?.handicap_goal != null ? String(profile.handicap_goal) : ''
   );
   const [dominantHand, setDominantHand] = useState<DominantHand | ''>(profile?.dominant_hand ?? '');
+  const [skillLevel, setSkillLevel] = useState<SkillLevel | ''>(profile?.skill_level ?? '');
+  const [gender, setGender] = useState<Gender | ''>(profile?.gender ?? '');
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +70,8 @@ export function SettingsPage() {
       setLastName(profile.last_name ?? '');
       setHandicapGoal(profile.handicap_goal != null ? String(profile.handicap_goal) : '');
       setDominantHand(profile.dominant_hand ?? '');
+      setSkillLevel(profile.skill_level ?? '');
+      setGender(profile.gender ?? '');
     }
   }, [profile]);
 
@@ -66,7 +84,9 @@ export function SettingsPage() {
         first_name: firstName.trim() || null,
         last_name: lastName.trim() || null,
         handicap_goal: handicapGoal ? Number(handicapGoal) : null,
-        dominant_hand: dominantHand || null
+        dominant_hand: dominantHand || null,
+        skill_level: skillLevel || null,
+        gender: gender || null
       });
       setProfile(updated);
       setSavedAt(Date.now());
@@ -121,6 +141,36 @@ export function SettingsPage() {
                   <MenuItem value="left">Left</MenuItem>
                 </TextField>
               </Stack>
+              <TextField
+                select
+                fullWidth
+                label="Gender"
+                value={gender}
+                onChange={(e) => setGender(e.target.value as Gender | '')}
+                helperText="Used to pick the right yardage reference table for your bag."
+              >
+                <MenuItem value="">—</MenuItem>
+                <MenuItem value="male">Male</MenuItem>
+                <MenuItem value="female">Female</MenuItem>
+              </TextField>
+              <TextField
+                select
+                fullWidth
+                label="Skill level"
+                value={skillLevel}
+                onChange={(e) => setSkillLevel(e.target.value as SkillLevel | '')}
+                helperText={
+                  skillLevelOptions(gender).find((o) => o.value === skillLevel)?.helper ??
+                  'Used to tailor recommendations and expected stats.'
+                }
+              >
+                <MenuItem value="">—</MenuItem>
+                {skillLevelOptions(gender).map((opt) => (
+                  <MenuItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </MenuItem>
+                ))}
+              </TextField>
               <Button variant="contained" onClick={onSave} disabled={saving}>
                 {saving ? 'Saving…' : savedAt ? 'Saved' : 'Save'}
               </Button>

@@ -1,5 +1,5 @@
 import { supabase } from '@/lib/supabase';
-import type { Profile, DominantHand } from '@/models';
+import type { Profile, DominantHand, SkillLevel, Gender } from '@/models';
 import { toAppError } from './errors';
 
 export const profileRepo = {
@@ -20,6 +20,8 @@ export const profileRepo = {
     last_name?: string | null;
     handicap_goal?: number | null;
     dominant_hand?: DominantHand | null;
+    skill_level?: SkillLevel | null;
+    gender?: Gender | null;
   }): Promise<Profile> {
     const { data, error } = await supabase
       .from('profiles')

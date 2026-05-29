@@ -1,6 +1,8 @@
 export type {
   ClubCategory,
   DominantHand,
+  SkillLevel,
+  Gender,
   DistanceUnit,
   FairwayResult,
   ShotResult,

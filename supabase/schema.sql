@@ -8,6 +8,8 @@ create extension if not exists "uuid-ossp";
 -- profiles
 -- ---------------------------------------------------------------------------
 create type dominant_hand as enum ('right', 'left');
+create type skill_level as enum ('beginner', 'average', 'good', 'advanced', 'pga_tour');
+create type gender as enum ('male', 'female');
 
 create table if not exists public.profiles (
   id uuid primary key references auth.users(id) on delete cascade,
@@ -16,12 +18,18 @@ create table if not exists public.profiles (
   email text not null,
   handicap_goal numeric(4,1),
   dominant_hand dominant_hand,
+  skill_level skill_level,
+  gender gender,
   is_admin boolean not null default false,
   created_at timestamptz not null default now()
 );
 
 -- Safe-add for existing installs (migration 007).
 alter table public.profiles add column if not exists is_admin boolean not null default false;
+-- Safe-add for existing installs (migration 013).
+alter table public.profiles add column if not exists skill_level skill_level;
+-- Safe-add for existing installs (migration 014).
+alter table public.profiles add column if not exists gender gender;
 
 -- Auto-create a profile row whenever a new auth user is created.
 create or replace function public.handle_new_user()

@@ -33,7 +33,12 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { useBag } from '@/features/bag/useBag';
 import { CATEGORY_LABELS, DEFAULT_BAG } from '@/features/bag/defaultClubs';
 import { CLUB_BRANDS, OTHER_BRAND } from '@/features/bag/brands';
-import { type BagClub, type ClubCategory } from '@/models';
+import {
+  getDefaultYardage,
+  getDefaultYardageByName
+} from '@/features/bag/clubYardageDefaults';
+import { useAuthStore } from '@/stores/authStore';
+import { type BagClub, type ClubCategory, type SkillLevel, type Gender } from '@/models';
 
 const CATEGORY_ORDER: ClubCategory[] = ['driver', 'wood', 'hybrid', 'iron', 'wedge', 'putter'];
 
@@ -57,6 +62,8 @@ type WedgeType = (typeof WEDGE_TYPES)[number];
 
 export function BagPage() {
   const { data, isLoading, addClub, removeClub, editBagClub, reorder, quickAdd, clearBag } = useBag();
+  const skillLevel = useAuthStore((s) => s.profile?.skill_level ?? null);
+  const gender = useAuthStore((s) => s.profile?.gender ?? null);
   const [addOpen, setAddOpen] = useState(false);
   const [quickOpen, setQuickOpen] = useState(false);
   const [editing, setEditing] = useState<BagClub | null>(null);
@@ -239,6 +246,8 @@ export function BagPage() {
 
       <ClubFormDialog
         mode="add"
+        skillLevel={skillLevel}
+        gender={gender}
         open={addOpen}
         onClose={() => setAddOpen(false)}
         onSubmit={(values) => {
@@ -261,6 +270,8 @@ export function BagPage() {
       />
       <ClubFormDialog
         mode="edit"
+        skillLevel={skillLevel}
+        gender={gender}
         open={!!editing}
         initial={editing ? parseExistingClub(editing) : undefined}
         onClose={() => setEditing(null)}
@@ -292,7 +303,14 @@ export function BagPage() {
         existing={data ?? []}
         onClose={() => setQuickOpen(false)}
         onSubmit={(clubs) => {
-          if (clubs.length > 0) quickAdd.mutate(clubs);
+          if (clubs.length > 0) {
+            quickAdd.mutate(
+              clubs.map((c) => ({
+                ...c,
+                typicalDistanceYards: getDefaultYardageByName(skillLevel, gender, c.name, c.category)
+              }))
+            );
+          }
           setQuickOpen(false);
         }}
       />
@@ -425,13 +443,15 @@ interface ClubFormValues {
 
 interface ClubFormDialogProps {
   mode: 'add' | 'edit';
+  skillLevel: SkillLevel | null;
+  gender: Gender | null;
   open: boolean;
   initial?: ClubFormValues;
   onClose: () => void;
   onSubmit: (values: ClubFormValues) => void;
 }
 
-function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDialogProps) {
+function ClubFormDialog({ mode, skillLevel, gender, open, initial, onClose, onSubmit }: ClubFormDialogProps) {
   const [brandSelection, setBrandSelection] = useState<string>('');
   const [customBrand, setCustomBrand] = useState<string>('');
   const [category, setCategory] = useState<ClubCategory>('iron');
@@ -440,9 +460,15 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
   const [wedgeType, setWedgeType] = useState<WedgeType | null>(null);
   const [model, setModel] = useState<string>('');
   const [typicalDistance, setTypicalDistance] = useState<string>('');
+  // Whether the user has manually edited the distance field — once true, we
+  // stop auto-filling so we don't overwrite their input.
+  const [distanceTouched, setDistanceTouched] = useState(false);
 
   useEffect(() => {
     if (!open) return;
+    // In edit mode the existing value is the user's own — treat it as touched.
+    // In add mode we start empty and let the auto-prefill fill it in.
+    setDistanceTouched(mode === 'edit');
     if (initial) {
       setCategory(initial.category);
       setNumber(initial.number);
@@ -486,6 +512,21 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
       setWedgeType(null);
     }
   }, [category]);
+
+  // Auto-prefill typical distance from the skill-level table while the user is
+  // building the club, until they manually type something into the field.
+  useEffect(() => {
+    if (!open || distanceTouched || !skillLevel || !gender) return;
+    if (category === 'putter') return;
+    const loftValue = loft.trim() === '' ? null : Number(loft);
+    const suggested = getDefaultYardage(skillLevel, gender, {
+      category,
+      number,
+      wedgeType,
+      loft: loftValue != null && Number.isFinite(loftValue) ? loftValue : null
+    });
+    setTypicalDistance(suggested != null ? String(suggested) : '');
+  }, [open, distanceTouched, skillLevel, gender, category, number, wedgeType, loft]);
 
   const resolvedBrand =
     brandSelection === OTHER_BRAND ? customBrand.trim() || null : brandSelection || null;
@@ -667,14 +708,21 @@ function ClubFormDialog({ mode, open, initial, onClose, onSubmit }: ClubFormDial
             <TextField
               label="Typical distance (optional)"
               value={typicalDistance}
-              onChange={(e) => setTypicalDistance(e.target.value)}
+              onChange={(e) => {
+                setDistanceTouched(true);
+                setTypicalDistance(e.target.value);
+              }}
               placeholder="e.g. 245"
               type="number"
               inputProps={{ inputMode: 'numeric', step: 1, min: 0 }}
               InputProps={{
                 endAdornment: <InputAdornment position="end">yds</InputAdornment>
               }}
-              helperText="How far you typically hit this club. Used to suggest the right club while aiming."
+              helperText={
+                mode === 'add' && skillLevel && gender && !distanceTouched
+                  ? 'Suggested from your skill level — edit to override.'
+                  : 'How far you typically hit this club. Used to suggest the right club while aiming.'
+              }
             />
           )}
 

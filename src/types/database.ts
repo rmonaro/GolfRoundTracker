@@ -3,6 +3,8 @@
 
 export type ClubCategory = 'driver' | 'wood' | 'hybrid' | 'iron' | 'wedge' | 'putter';
 export type DominantHand = 'right' | 'left';
+export type SkillLevel = 'beginner' | 'average' | 'good' | 'advanced' | 'pga_tour';
+export type Gender = 'male' | 'female';
 export type FairwayResult = 'hit' | 'left' | 'right' | 'short' | 'long' | 'na';
 export type DistanceUnit = 'yards' | 'feet';
 
@@ -42,6 +44,8 @@ export interface ProfileRow {
   email: string;
   handicap_goal: number | null;
   dominant_hand: DominantHand | null;
+  skill_level: SkillLevel | null;
+  gender: Gender | null;
   is_admin: boolean;
   created_at: string;
 }
