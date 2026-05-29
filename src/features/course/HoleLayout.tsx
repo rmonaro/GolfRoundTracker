@@ -99,6 +99,25 @@ interface HoleLayoutProps {
    * the player is trying to read; a dot stays out of the way.
    */
   useTargetDot?: boolean;
+  /**
+   * Per-round pin override `[lng, lat]`. When set, replaces the course's
+   * stored green coord as the canonical pin position for: flag marker,
+   * aim-line endpoint, putting bounds center, and direction inference in
+   * `classifyTap`. The centerline + walkback markers stay tied to the
+   * course centerline (pin moves within a 10-25m green; the course-level
+   * playing line approximation stays close enough).
+   */
+  pinOverride?: [number, number] | null;
+  /**
+   * Maximum distance (meters) from the ball that the aim handle should
+   * default to on shots OFF the tee. When the remaining ball→pin distance
+   * exceeds this value, the initial handle position is capped at
+   * `ball + maxAimDistanceFromBallM` along the centerline — the player
+   * can still drag past, but the default reflects what they can actually
+   * reach with a club from their bag. Undefined → no cap (initial aim
+   * defaults to the pin as before).
+   */
+  maxAimDistanceFromBallM?: number;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -211,23 +230,79 @@ const YARDS_TO_METERS = 0.9144;
  * Skips putters (handled in putting mode) and clubs with no recorded distance.
  * Returns null when no club qualifies — caller suppresses the recommendation.
  */
+/**
+ * Pick the club whose typical carry is closest to `targetYards`.
+ *
+ * Always skips putters and clubs without a recorded `typicalDistanceYards`.
+ *
+ * When `opts.excludeDriver` is true (shots off the deck — anywhere past
+ * the tee box on a long approach), the search is layered:
+ *
+ *   1. **Woods + hybrids** — if the bag has any with a recorded yardage,
+ *      pick the one whose typical carry is CLOSEST to the target. Real
+ *      golf intent: from 250 yds in the fairway you swing a 3-wood or a
+ *      hybrid, not a driver.
+ *   2. **Long irons (1-5)** — if the bag has none of the above but does
+ *      have irons, pick the one with the LONGEST typical carry (= lowest
+ *      iron number in practice; a 3-iron carries further than a 5-iron).
+ *      We don't parse club names to find the "lowest number"; the carry
+ *      ranking does it for us and works even on novelty-named irons.
+ *   3. **Anything left** — closest yardage match across remaining bag.
+ *
+ * When excludeDriver is false the function does a plain closest-match
+ * search (the historical behavior used in aim mode tooltips).
+ */
 export function recommendClub(
   bagClubs: BagClub[] | undefined,
-  targetYards: number
+  targetYards: number,
+  opts: { excludeDriver?: boolean } = {}
 ): BagClub | null {
   if (!bagClubs || bagClubs.length === 0) return null;
-  let best: BagClub | null = null;
-  let bestDelta = Infinity;
-  for (const c of bagClubs) {
-    if (c.category === 'putter') continue;
-    if (c.typicalDistanceYards == null) continue;
-    const delta = Math.abs(c.typicalDistanceYards - targetYards);
-    if (delta < bestDelta) {
-      bestDelta = delta;
-      best = c;
+  const excludeDriver = opts.excludeDriver === true;
+
+  const withYardage = bagClubs.filter(
+    (c) => c.category !== 'putter' && c.typicalDistanceYards != null
+  );
+  if (withYardage.length === 0) return null;
+
+  const closestMatch = (pool: BagClub[]): BagClub | null => {
+    let best: BagClub | null = null;
+    let bestDelta = Infinity;
+    for (const c of pool) {
+      const delta = Math.abs((c.typicalDistanceYards as number) - targetYards);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        best = c;
+      }
     }
+    return best;
+  };
+
+  if (excludeDriver) {
+    // 1. Woods + hybrids — yardage-matched.
+    const woodsHybrids = withYardage.filter(
+      (c) => c.category === 'wood' || c.category === 'hybrid'
+    );
+    if (woodsHybrids.length > 0) {
+      return closestMatch(woodsHybrids);
+    }
+    // 2. Long irons — pick the one that carries furthest (= lowest number).
+    const irons = withYardage.filter((c) => c.category === 'iron');
+    if (irons.length > 0) {
+      return irons.reduce(
+        (best, c) =>
+          (c.typicalDistanceYards as number) > (best.typicalDistanceYards as number)
+            ? c
+            : best
+      );
+    }
+    // 3. Fallback — everything except driver + putter.
+    const remaining = withYardage.filter((c) => c.category !== 'driver');
+    return remaining.length > 0 ? closestMatch(remaining) : null;
   }
-  return best;
+
+  // No exclusion — plain closest-match.
+  return closestMatch(withYardage);
 }
 /** Walkback markers — distance-to-pin reference points spaced from the green. */
 const YARDAGE_MARKERS = [100, 150, 200, 250] as const;
@@ -502,7 +577,9 @@ export function HoleLayout({
   landingPoint = null,
   shotEndPoints = [],
   hideAim = false,
-  useTargetDot = false
+  useTargetDot = false,
+  pinOverride = null,
+  maxAimDistanceFromBallM
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -537,6 +614,14 @@ export function HoleLayout({
     const bearing = teeToGreenBearing(hole) ?? 0;
     const centerLng = (hole.tee_lng + hole.green_lng) / 2;
     const centerLat = (hole.tee_lat + hole.green_lat) / 2;
+    // Pin position — per-round override (e.g. dragged-by-user pin) wins over
+    // the course-level green centroid. Used for the flag marker, aim-line
+    // endpoint, puttingBounds center, and direction inference on tap. The
+    // centerline + bearing stay tied to the course coords so the playing-line
+    // orientation doesn't shift when the cup moves a few meters.
+    const effectivePin: [number, number] = pinOverride
+      ? pinOverride
+      : [hole.green_lng, hole.green_lat];
 
     let map: mapboxgl.Map;
     try {
@@ -616,10 +701,10 @@ export function HoleLayout({
     const PUTTING_HALF_SPAN_M = 18;
     const dLat = PUTTING_HALF_SPAN_M / 111000;
     const dLng =
-      PUTTING_HALF_SPAN_M / (111000 * Math.cos((hole.green_lat * Math.PI) / 180));
+      PUTTING_HALF_SPAN_M / (111000 * Math.cos((effectivePin[1] * Math.PI) / 180));
     const puttingBounds = new mapboxgl.LngLatBounds(
-      [hole.green_lng - dLng, hole.green_lat - dLat],
-      [hole.green_lng + dLng, hole.green_lat + dLat]
+      [effectivePin[0] - dLng, effectivePin[1] - dLat],
+      [effectivePin[0] + dLng, effectivePin[1] + dLat]
     );
 
     // Centerline coordinates: prefer the cached OSM dogleg, fall back to a
@@ -769,7 +854,7 @@ export function HoleLayout({
           <polygon points="2,2 12,5 2,8" fill="#e53935" />
         </svg>`;
       new mapboxgl.Marker({ element: greenEl, anchor: 'bottom' })
-        .setLngLat([hole.green_lng!, hole.green_lat!])
+        .setLngLat(effectivePin)
         .addTo(map);
 
       // Note: the full-hole yardage no longer renders on the map. The parent
@@ -790,7 +875,7 @@ export function HoleLayout({
         // Origin is the estimated ball position (aimStartLL): the tee on shot
         // 1, walked along the centerline by the sum of prior shot distances
         // on later shots.
-        const pinLL: [number, number] = [hole.green_lng!, hole.green_lat!];
+        const pinLL: [number, number] = effectivePin;
 
         // Tee-shot landing cap: on a long hole, defaulting the handle to the
         // pin puts the target a club or three further than any human can
@@ -815,6 +900,25 @@ export function HoleLayout({
           initialAim = pointAlongFromStart(centerlineCoords, teeDefaultCapM) ?? pinLL;
         } else {
           initialAim = pinLL;
+        }
+
+        // Bag-reach cap: on shots OFF the tee, if the pin is farther than the
+        // player can carry with anything in their bag, pull the default aim
+        // back to "ball + max carry" along the centerline. Drags can still
+        // exceed this — it's only the initial position. The cap is skipped
+        // on the tee (driver lives there) and when the remaining distance
+        // already fits inside max carry.
+        if (
+          !isTeeShot &&
+          maxAimDistanceFromBallM != null &&
+          maxAimDistanceFromBallM > 0
+        ) {
+          const remainingToPinM = Math.max(0, (holeLenM ?? 0) - ballDistanceFromTeeM);
+          if (remainingToPinM > maxAimDistanceFromBallM) {
+            const cappedTotalM = ballDistanceFromTeeM + maxAimDistanceFromBallM;
+            const capped = pointAlongFromStart(centerlineCoords, cappedTotalM);
+            if (capped) initialAim = capped;
+          }
         }
 
         // Mutable aim line — origin updates only on remount (ballDistanceFromTeeM
@@ -1170,7 +1274,7 @@ export function HoleLayout({
     // DOM markers (tee pill, green flag) all have pointer-events: none, so
     // taps on them pass through and still register here.
     if (onShotLanded) {
-      const greenLL: [number, number] = [hole.green_lng!, hole.green_lat!];
+      const greenLL: [number, number] = effectivePin;
       const onMapClick = (e: mapboxgl.MapMouseEvent) => {
         // Defense in depth: even if a click slips past the handle's own
         // stopPropagation (e.g. some platforms don't dispatch a synthetic
@@ -1219,7 +1323,9 @@ export function HoleLayout({
     landingPoint,
     shotEndPoints,
     hideAim,
-    useTargetDot
+    useTargetDot,
+    pinOverride,
+    maxAimDistanceFromBallM
   ]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with

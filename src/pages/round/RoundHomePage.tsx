@@ -1,23 +1,83 @@
-import { Box, Button, Card, CardContent, Stack, Typography } from '@mui/material';
+import { useState } from 'react';
+import {
+  Alert,
+  Box,
+  Button,
+  Card,
+  CardContent,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
+  IconButton,
+  Stack,
+  Typography
+} from '@mui/material';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
+import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import { useNavigate } from 'react-router-dom';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useRoundStore } from '@/stores/roundStore';
+import { useAuthStore } from '@/stores/authStore';
 import { scoreVsPar } from '@/utils/format';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
+import { roundRepo } from '@/services/roundRepo';
 
 export function RoundHomePage() {
   const active = useRoundStore((s) => s.active);
+  const endRound = useRoundStore((s) => s.endRound);
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const userId = useAuthStore((s) => s.session?.user.id);
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // Tombstones the active round: deletes the row in Supabase (schema cascade
+  // drops round_holes + shots) and clears the local store so the resume card
+  // disappears. Errors surface in the dialog instead of swallowing — the
+  // user can retry or cancel and the local round stays intact.
+  const deleteActive = useMutation({
+    mutationFn: async (roundId: string) => roundRepo.deleteRound(roundId),
+    onSuccess: () => {
+      endRound();
+      queryClient.invalidateQueries({ queryKey: ['rounds', userId] });
+      setConfirmDelete(false);
+    }
+  });
 
   return (
     <Box>
       <PageHeader title="Round" subtitle="Start a new round or resume" />
       <Stack spacing={2} px={2} pb={3}>
         {active && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper', border: '1px solid', borderColor: 'primary.main' }}>
-            <CardContent>
+          <Card
+            elevation={0}
+            sx={{
+              bgcolor: 'background.paper',
+              border: '1px solid',
+              borderColor: 'primary.main',
+              position: 'relative'
+            }}
+          >
+            {/* Delete affordance — absolute-positioned over the card so the
+                resume button stays the primary action. Confirmation dialog
+                prevents accidental loss; only fully removes the round from
+                Supabase + local store on confirm. */}
+            <IconButton
+              aria-label="delete active round"
+              size="small"
+              onClick={() => setConfirmDelete(true)}
+              sx={{
+                position: 'absolute',
+                top: 6,
+                right: 6,
+                color: 'text.secondary'
+              }}
+            >
+              <DeleteOutlineRoundedIcon fontSize="small" />
+            </IconButton>
+            <CardContent sx={{ pr: 5 }}>
               <Typography
                 variant="caption"
                 color="primary"
@@ -80,6 +140,48 @@ export function RoundHomePage() {
           </CardContent>
         </Card>
       </Stack>
+
+      <Dialog
+        open={confirmDelete}
+        onClose={() => {
+          if (deleteActive.isPending) return;
+          setConfirmDelete(false);
+        }}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>Delete active round?</DialogTitle>
+        <DialogContent>
+          {active && (
+            <Typography variant="body2">
+              <strong>{active.courseName}</strong>
+              <br />
+              All hole and shot data will be removed. This cannot be undone.
+            </Typography>
+          )}
+          {deleteActive.error && (
+            <Alert severity="error" sx={{ mt: 1.5 }}>
+              {(deleteActive.error as Error).message}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setConfirmDelete(false)}
+            disabled={deleteActive.isPending}
+          >
+            Cancel
+          </Button>
+          <Button
+            color="error"
+            variant="contained"
+            onClick={() => active && deleteActive.mutate(active.roundId)}
+            disabled={deleteActive.isPending || !active}
+          >
+            {deleteActive.isPending ? 'Deleting…' : 'Delete'}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

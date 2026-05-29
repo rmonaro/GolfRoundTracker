@@ -54,6 +54,17 @@ export interface LocalHole {
   clubsUsed: string[];
   shots: LocalShot[];
   dirty: boolean;
+  /**
+   * Per-round pin position override. The course's stored `green_lng/lat` is
+   * the centroid of the green; in real play the pin is moved daily within
+   * the green polygon. When set these win over the course coords for the
+   * flag marker, aim-line endpoint, putting bounds, and distance-to-pin
+   * readings. Cleared when the round ends. Lives only in the local store
+   * for now (no DB column) — the Zustand persist middleware keeps it across
+   * refreshes within the device.
+   */
+  pinLat?: number | null;
+  pinLng?: number | null;
 }
 
 export interface ActiveRound {

@@ -22,6 +22,7 @@ import ArrowForwardIosRoundedIcon from '@mui/icons-material/ArrowForwardIosRound
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import FlagCircleRoundedIcon from '@mui/icons-material/FlagCircleRounded';
+import EditLocationAltRoundedIcon from '@mui/icons-material/EditLocationAltRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBulletedRounded';
@@ -55,6 +56,7 @@ import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
 import { roundRepo } from '@/services/roundRepo';
+import { bagRepo } from '@/services/bagRepo';
 import { courseRepo } from '@/services/courseRepo';
 import { useQuery } from '@tanstack/react-query';
 import {
@@ -73,6 +75,7 @@ export function HoleTrackingPage() {
   const removeShotLocal = useRoundStore((s) => s.removeShot);
   const markShotSynced = useRoundStore((s) => s.markShotSynced);
   const bagClubs = useBagStore((s) => s.clubs);
+  const setBagClubs = useBagStore((s) => s.setClubs);
   const navigate = useNavigate();
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
@@ -128,6 +131,11 @@ export function HoleTrackingPage() {
   const [selectedClubId, setSelectedClubId] = useState<string | null>(null);
   const [selectedClubTier1, setSelectedClubTier1] = useState<ClubTier1 | null>(null);
   const [clubPickerOpen, setClubPickerOpen] = useState(false);
+  // Pin-edit mode: when on, the next tap on the map sets this hole's pin
+  // position (stored on the LocalHole as pinLat/pinLng) and exits the mode.
+  // Hides the aim UI and disables tap-to-record-shot while active so the
+  // tap is unambiguous.
+  const [pinEditMode, setPinEditMode] = useState(false);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -329,6 +337,37 @@ export function HoleTrackingPage() {
       ? ballDistanceFromTeeM + lastShotDistanceM
       : undefined;
 
+  // Longest carry in the bag (any non-putter club with a recorded typical
+  // distance). Drives the aim-handle bag-reach cap below — on shots off the
+  // tee, the default aim won't sit further out than the player can actually
+  // reach. Drives are included since the user CAN swing one off the deck
+  // even if it's not recommended.
+  const maxBagCarryYds = bagClubs.reduce((acc, c) => {
+    if (c.category === 'putter') return acc;
+    if (c.typicalDistanceYards == null) return acc;
+    return Math.max(acc, c.typicalDistanceYards);
+  }, 0);
+  // Skip the cap entirely on shot 1 (driver handles it) by passing undefined
+  // when the ball is still at the tee.
+  const maxAimDistanceFromBallM =
+    ballDistanceFromTeeM > 0 && maxBagCarryYds > 0
+      ? maxBagCarryYds * 0.9144
+      : undefined;
+
+  // Display yardage + remaining yards needed early so the recommended-club
+  // computation below can hand the right distance to `recommendClub`. These
+  // are also read by the TO PIN overlay further down.
+  const osmYardsEarly =
+    layoutQuery.data?.hole.centerline_distance_m != null
+      ? Math.round(metersToYards(layoutQuery.data.hole.centerline_distance_m))
+      : null;
+  const displayYardsEarly = hole.yardage ?? osmYardsEarly;
+  const ballDistanceYdsEarly = ballDistanceFromTeeM / 0.9144;
+  const remainingYardsEarly =
+    displayYardsEarly != null
+      ? Math.max(0, Math.round(displayYardsEarly - ballDistanceYdsEarly))
+      : null;
+
   // Pre-select the user's putter when on the green. Uses the first putter in
   // the bag (most users have only one). The user-driven `selectedClubId`
   // overrides this auto-pick, but when the user already picked the putter
@@ -336,7 +375,28 @@ export function HoleTrackingPage() {
   const putterAutoClubId = lastShotOnGreen
     ? bagClubs.find((c) => c.category === 'putter')?.clubId ?? null
     : null;
-  const defaultClubId = selectedClubId ?? putterAutoClubId;
+  // Auto-recommend club based on remaining distance to the pin. Only fires
+  // off-green (putters handle themselves above) and only when we have a
+  // distance to work with. The recommendation is bag-relative: closest
+  // typicalDistanceYards to remainingYards. Slots into `defaultClubId` as
+  // the LAST fallback so a manual pick or putter auto-select still wins.
+  //
+  // Driver exclusion rule: once the ball is off the tee (anywhere past
+  // ballDistanceFromTeeM > 0) AND the remaining shot is long (> 200 yds),
+  // never suggest the driver — you don't swing one off the deck. The
+  // recommender falls back to the longest non-driver in the bag (typically
+  // a 3-wood or hybrid). For shot 1 from the tee we still allow the driver.
+  const excludeDriverForRec =
+    ballDistanceFromTeeM > 0 &&
+    remainingYardsEarly != null &&
+    remainingYardsEarly > 200;
+  const recommendedClubId =
+    !lastShotOnGreen && remainingYardsEarly != null && remainingYardsEarly > 0
+      ? recommendClub(bagClubs, remainingYardsEarly, {
+          excludeDriver: excludeDriverForRec
+        })?.clubId ?? null
+      : null;
+  const defaultClubId = selectedClubId ?? putterAutoClubId ?? recommendedClubId;
   const selectedClub = bagClubs.find((c) => c.clubId === defaultClubId) ?? null;
 
   // Reset the user club pick whenever the hole changes — each new hole starts
@@ -439,9 +499,14 @@ export function HoleTrackingPage() {
 
   // Putters are filtered out of the recommendation — the panel hides the
   // suggestion entirely once the ball is on the green (lastShotOnGreen).
+  // The driver exclusion mirrors the defaultClubId recommendation above so
+  // the TO PIN panel and the bottom-left club button never disagree.
   const suggestedClub =
     remainingYards != null && !lastShotOnGreen
-      ? recommendClub(bagClubs, remainingYards)
+      ? recommendClub(bagClubs, remainingYards, {
+          excludeDriver:
+            ballDistanceFromTeeM > 0 && remainingYards > 200
+        })
       : null;
 
   // Push derived values back into the local hole so autosave persists them.
@@ -633,6 +698,45 @@ export function HoleTrackingPage() {
         calculated_distance: calculatedDistance
       });
       markShotSynced(hole.holeNumber, tempId, persisted.id);
+
+      // Auto-record typical yardage the first time a non-putter club is
+      // used. The recommender depends on `typicalDistanceYards` to suggest
+      // sensible clubs off the tee / fairway, so every new club acquired
+      // mid-round backfills its baseline distance from the first shot.
+      // Subsequent shots leave the existing value alone — the user can
+      // refine it in My Bag → club edit if needed.
+      if (
+        clubId != null &&
+        distance != null &&
+        distance > 0 &&
+        distanceUnit === 'yards'
+      ) {
+        const club = bagClubs.find((c) => c.clubId === clubId);
+        // Skip putters (typical putt distance has no useful meaning) and
+        // clubs that already have a recorded yardage.
+        if (
+          club &&
+          club.category !== 'putter' &&
+          club.typicalDistanceYards == null
+        ) {
+          try {
+            await bagRepo.updateBagClub(club.bagId, {
+              typical_distance_yards: distance
+            });
+            // Optimistically reflect the new yardage in the bag store so the
+            // next recommendation cycle sees it without waiting on a refetch.
+            setBagClubs(
+              bagClubs.map((c) =>
+                c.bagId === club.bagId
+                  ? { ...c, typicalDistanceYards: distance }
+                  : c
+              )
+            );
+          } catch (err) {
+            console.warn('[shot] typical yardage backfill failed', err);
+          }
+        }
+      }
     } catch (err) {
       console.error('[shot] save failed', err);
     }
@@ -864,18 +968,36 @@ export function HoleTrackingPage() {
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
           shotEndPoints={shotEndPoints}
-          // Hide the aim UI while reviewing a tap (pendingGps) AND after the
-          // hole is complete — both states mean "no more shots to plan from
-          // here", so the handle / line / distance pill would be misleading.
-          hideAim={!!pendingGps || holeComplete}
+          // Hide the aim UI while reviewing a tap (pendingGps), after the
+          // hole is complete, OR while moving the pin — in all three states
+          // the handle / line / distance pill would either be misleading or
+          // compete with the active task.
+          hideAim={!!pendingGps || holeComplete || pinEditMode}
           useTargetDot={nextShotOntoGreen}
+          pinOverride={
+            hole.pinLat != null && hole.pinLng != null
+              ? [hole.pinLng, hole.pinLat]
+              : null
+          }
+          maxAimDistanceFromBallM={maxAimDistanceFromBallM}
           onShotLanded={
             holeComplete
               ? undefined
               : (data) => {
-                  // Just stash the landing point — DON'T open the shot UI yet.
-                  // The user gets a chance to move the marker by tapping
-                  // elsewhere on the map, then commits via "Record Shot".
+                  // Pin-edit mode reuses the same tap stream — set the new
+                  // pin position and exit the mode. Everything that uses the
+                  // pin (flag marker, aim line endpoint, putting bounds,
+                  // distance-to-pin) picks up the override on next render.
+                  if (pinEditMode) {
+                    updateHole(hole.holeNumber, {
+                      pinLat: data.end[1],
+                      pinLng: data.end[0]
+                    });
+                    setPinEditMode(false);
+                    return;
+                  }
+                  // Normal flow — stash the landing point; user commits via
+                  // "Record Shot".
                   setPendingGps({
                     startLat: data.start[1],
                     startLng: data.start[0],
@@ -969,6 +1091,81 @@ export function HoleTrackingPage() {
           <StatPill label="Putts" value={putts} />
           <StatPill label="Penalty" value={penaltyStrokes} />
         </Stack>
+
+        {/* Move Pin — small icon button on the top-center. Tap to enter
+            pin-edit mode; the next tap on the map sets the new pin
+            position for this hole. While active, shows a banner + Cancel/
+            Reset to clear the override and revert to the course coord. */}
+        {!holeComplete && (
+          <IconButton
+            aria-label={pinEditMode ? 'cancel pin move' : 'move pin position'}
+            onClick={() => setPinEditMode((v) => !v)}
+            size="small"
+            sx={{
+              position: 'absolute',
+              top: 12,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 3,
+              bgcolor: pinEditMode ? '#fbbf24' : 'rgba(11,20,16,0.85)',
+              color: pinEditMode ? '#0b1410' : 'common.white',
+              border: 1.5,
+              borderColor: '#fbbf24',
+              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+              '&:hover': {
+                bgcolor: pinEditMode ? '#f59e0b' : 'rgba(11,20,16,0.95)'
+              }
+            }}
+          >
+            <EditLocationAltRoundedIcon fontSize="small" />
+          </IconButton>
+        )}
+
+        {pinEditMode && (
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 56,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              zIndex: 4,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              bgcolor: 'rgba(11,20,16,0.92)',
+              color: 'common.white',
+              border: 1.5,
+              borderColor: '#fbbf24',
+              borderRadius: 999,
+              px: 1.5,
+              py: 0.5,
+              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+              fontSize: '0.8rem',
+              fontWeight: 700,
+              whiteSpace: 'nowrap'
+            }}
+          >
+            Tap green to set pin
+            {(hole.pinLat != null || hole.pinLng != null) && (
+              <Button
+                size="small"
+                onClick={() => {
+                  updateHole(hole.holeNumber, { pinLat: null, pinLng: null });
+                  setPinEditMode(false);
+                }}
+                sx={{
+                  color: '#fbbf24',
+                  textTransform: 'none',
+                  ml: 1,
+                  minWidth: 0,
+                  px: 0.5
+                }}
+              >
+                Reset
+              </Button>
+            )}
+          </Box>
+        )}
 
         {/* Club picker — bottom-left primary action. Shows the currently
             selected club (or "Select club" placeholder); tap to slide up the

@@ -41,6 +41,10 @@ interface HoleLayoutCardProps {
   hideAim?: boolean;
   /** Render the aim handle as a compact dot instead of the crosshair. */
   useTargetDot?: boolean;
+  /** Per-round pin position override [lng, lat]. */
+  pinOverride?: [number, number] | null;
+  /** Bag-reach cap for initial aim position on shots off the tee. */
+  maxAimDistanceFromBallM?: number;
 }
 
 export function HoleLayoutCard({
@@ -56,7 +60,9 @@ export function HoleLayoutCard({
   landingPoint = null,
   shotEndPoints = [],
   hideAim = false,
-  useTargetDot = false
+  useTargetDot = false,
+  pinOverride = null,
+  maxAimDistanceFromBallM
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -92,6 +98,8 @@ export function HoleLayoutCard({
             shotEndPoints={shotEndPoints}
             hideAim={hideAim}
             useTargetDot={useTargetDot}
+            pinOverride={pinOverride}
+            maxAimDistanceFromBallM={maxAimDistanceFromBallM}
           />
         </Box>
       </Card>
