@@ -21,6 +21,7 @@ create table if not exists public.profiles (
   skill_level skill_level,
   gender gender,
   is_admin boolean not null default false,
+  onboarded_at timestamptz,
   created_at timestamptz not null default now()
 );
 
@@ -30,6 +31,8 @@ alter table public.profiles add column if not exists is_admin boolean not null d
 alter table public.profiles add column if not exists skill_level skill_level;
 -- Safe-add for existing installs (migration 014).
 alter table public.profiles add column if not exists gender gender;
+-- Safe-add for existing installs (migration 015).
+alter table public.profiles add column if not exists onboarded_at timestamptz;
 
 -- Auto-create a profile row whenever a new auth user is created.
 create or replace function public.handle_new_user()

@@ -15,6 +15,7 @@ import { PastRoundsPage } from '@/pages/round/PastRoundsPage';
 import { StatsPage } from '@/pages/stats/StatsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
+import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { AdminGuard } from '@/admin/AdminGuard';
 import { AdminLayout } from '@/admin/pages/AdminLayout';
 import { AdminOverview } from '@/admin/pages/AdminOverview';
@@ -77,6 +78,14 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <WatchPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/onboarding"
+        element={
+          <AuthGuard>
+            <OnboardingPage />
           </AuthGuard>
         }
       />

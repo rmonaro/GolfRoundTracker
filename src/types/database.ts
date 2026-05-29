@@ -47,6 +47,7 @@ export interface ProfileRow {
   skill_level: SkillLevel | null;
   gender: Gender | null;
   is_admin: boolean;
+  onboarded_at: string | null;
   created_at: string;
 }
 
