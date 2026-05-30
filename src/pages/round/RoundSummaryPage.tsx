@@ -79,7 +79,15 @@ export function RoundSummaryPage() {
   const backPar = back.reduce((s, h) => s + h.par, 0);
 
   return (
-    <Box>
+    <Box
+      sx={{
+        // 20px below the iOS status bar / device top (the route renders
+        // outside MobileShell, so the page has to handle safe-area-inset
+        // itself). PageHeader contributes its own 16px (pt: 2); the
+        // remaining 4px comes from this wrapper.
+        pt: 'calc(env(safe-area-inset-top) + 4px)'
+      }}
+    >
       <PageHeader title="Round Summary" subtitle={round.course_name} back="/round" />
       <Stack spacing={2} px={2} pb={4}>
         <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
@@ -98,11 +106,14 @@ export function RoundSummaryPage() {
               </Button>
             </Stack>
             <Stack direction="row" alignItems="baseline" spacing={2} mt={0.5}>
-              <Typography variant="h2" sx={{ fontWeight: 800 }}>
-                {stats.totalScore}
-              </Typography>
-              <Typography variant="h5" color="primary" sx={{ fontWeight: 700 }}>
+              {/* Headline = score-to-par (E / +N / -N). The raw stroke
+                  total is still surfaced as a secondary chip below so the
+                  number isn't lost. */}
+              <Typography variant="h2" color="primary" sx={{ fontWeight: 800 }}>
                 {scoreVsPar(stats.totalScore, stats.totalPar)}
+              </Typography>
+              <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                {stats.totalScore}
               </Typography>
               <Typography variant="body2" color="text.secondary">
                 par {stats.totalPar}

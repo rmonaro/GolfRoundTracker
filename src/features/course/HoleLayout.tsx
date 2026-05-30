@@ -696,6 +696,20 @@ export function HoleLayout({
   }, [useMapbox, layout, compact]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
+  // Persistent map + landing-point marker handles so we can update them
+  // imperatively in side-effects without tearing down the whole map. This is
+  // what prevents the "map flashes/reloads on every tap" feeling — the main
+  // map-creation effect no longer re-fires when the user taps to record.
+  const mapRef = useRef<mapboxgl.Map | null>(null);
+  const landingMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  // Keep the latest onShotLanded reachable from the (stable) click handler
+  // without having to put it in the effect's deps. Inline arrow functions on
+  // the parent get a fresh identity every render — including them as a dep
+  // would also force a full map rebuild on every parent state change.
+  const onShotLandedRef = useRef(onShotLanded);
+  useEffect(() => {
+    onShotLandedRef.current = onShotLanded;
+  }, [onShotLanded]);
 
   useEffect(() => {
     if (!useMapbox || !containerRef.current) return;
@@ -752,6 +766,10 @@ export function HoleLayout({
       setMapErrored(true);
       return;
     }
+
+    // Expose the map to side-effects (landing-point marker, etc.) so they
+    // can update overlays without forcing this whole effect to re-fire.
+    mapRef.current = map;
 
     map.on('error', (e) => {
       console.warn('[mapbox] runtime error', e);
@@ -1143,7 +1161,18 @@ export function HoleLayout({
           lineHeight: '1.2',
           border: '1px solid #fbbf24',
           whiteSpace: 'nowrap',
-          pointerEvents: 'none',
+          // Receive taps so they don't fall through to the map canvas and
+          // record a shot at the label's location (left of the actual aim).
+          // The handlers below convert any tap on the label into a "record
+          // shot at the aim's current LngLat" call — same as tapping the
+          // crosshair itself.
+          pointerEvents: 'auto',
+          cursor: 'pointer',
+          touchAction: 'none',
+          userSelect: 'none',
+          WebkitUserSelect: 'none',
+          WebkitTouchCallout: 'none',
+          WebkitTapHighlightColor: 'transparent',
           boxShadow: '0 1px 3px rgba(0,0,0,0.45)'
         } as Partial<CSSStyleDeclaration>);
 
@@ -1203,6 +1232,44 @@ export function HoleLayout({
         })
           .setLngLat(initialAim)
           .addTo(map);
+
+        // Treat any tap on the yardage label as a tap on the aim crosshair.
+        // Without this, taps on the label fall through to the map canvas
+        // (since pointerEvents was 'none') and record a shot at the label's
+        // screen position — left of the actual aim point.
+        const onLabelTap = () => {
+          const cb = onShotLandedRef.current;
+          if (!cb) return;
+          const aimPt = handleMarker.getLngLat();
+          const end: [number, number] = [aimPt.lng, aimPt.lat];
+          const distM = haversineMetersFE(aimStartLL, end);
+          const { lie, targetResult } = classifyTap(
+            end,
+            layout.features,
+            bearing,
+            effectivePin,
+            targetType
+          );
+          cb({
+            start: aimStartLL,
+            end,
+            calculatedDistanceM: distM,
+            inferredLie: lie,
+            inferredTargetResult: targetResult
+          });
+        };
+        // Pointerdown so we beat the map's click. stopPropagation +
+        // preventDefault stops Mapbox from also firing its own click
+        // handler at the touch location.
+        labelEl.addEventListener('pointerdown', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+          onLabelTap();
+        });
+        labelEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          e.preventDefault();
+        });
 
         // Custom pointer-based drag. Works for mouse, pen, and touch via a
         // single code path. `setPointerCapture` is the key bit on iOS — it
@@ -1430,68 +1497,64 @@ export function HoleLayout({
         .addTo(map);
     }
 
-    // Pending landing-point marker — a white-ringed red disk dropped where
-    // the user last tapped. The parent owns the position (set in
-    // `onShotLanded`) and re-passes it here, so the marker persists across
-    // renders without needing internal state in this component.
-    if (landingPoint) {
-      const lpEl = document.createElement('div');
-      Object.assign(lpEl.style, {
-        width: '18px',
-        height: '18px',
-        borderRadius: '50%',
-        background: '#ef4444',
-        border: '3px solid #ffffff',
-        boxShadow: '0 2px 6px rgba(0,0,0,0.6)',
-        pointerEvents: 'none'
-      } as Partial<CSSStyleDeclaration>);
-      new mapboxgl.Marker({ element: lpEl, anchor: 'center' })
-        .setLngLat(landingPoint)
-        .addTo(map);
-    }
+    // Pending landing-point marker is managed by a separate effect below so
+    // a new tap doesn't trigger this whole map-creation effect to re-fire.
+    // See `useEffect([landingPoint, useMapbox])` further down.
 
-    // Tap-to-record. Fires for clicks on empty map area. The aim handle
-    // captures its own pointer events upstream so it doesn't trigger this.
-    // DOM markers (tee pill, green flag) all have pointer-events: none, so
-    // taps on them pass through and still register here.
-    if (onShotLanded) {
-      const greenLL: [number, number] = effectivePin;
-      const onMapClick = (e: mapboxgl.MapMouseEvent) => {
-        // Defense in depth: even if a click slips past the handle's own
-        // stopPropagation (e.g. some platforms don't dispatch a synthetic
-        // click after `setPointerCapture`), refuse to open the shot sheet
-        // when the underlying DOM target was the handle or one of its
-        // descendants. Without this, dragging or even tapping the target
-        // would open the shot UI.
-        const target = e.originalEvent?.target as Node | null;
-        const handleNode = document.querySelector('.grt-aim-handle');
-        if (target && handleNode && handleNode.contains(target)) return;
-        const end: [number, number] = [e.lngLat.lng, e.lngLat.lat];
-        const distM = haversineMetersFE(aimStartLL, end);
-        const { lie, targetResult } = classifyTap(
-          end,
-          layout.features,
-          bearing,
-          greenLL,
-          targetType
-        );
-        onShotLanded({
-          start: aimStartLL,
-          end,
-          calculatedDistanceM: distM,
-          inferredLie: lie,
-          inferredTargetResult: targetResult
-        });
-      };
-      map.on('click', onMapClick);
-    }
+    // Tap-to-record. Always bind so we don't need to re-attach the listener
+    // when `onShotLanded` changes identity (it's an inline arrow in the
+    // parent and gets a fresh reference on every render). The handler reads
+    // the latest callback via `onShotLandedRef.current` — same effect as
+    // useCallback at the call site, without forcing the parent to memo it.
+    const greenLL: [number, number] = effectivePin;
+    const onMapClick = (e: mapboxgl.MapMouseEvent) => {
+      const cb = onShotLandedRef.current;
+      if (!cb) return;
+      // Defense in depth: even if a click slips past the handle's own
+      // stopPropagation (e.g. some platforms don't dispatch a synthetic
+      // click after `setPointerCapture`), refuse to open the shot sheet
+      // when the underlying DOM target was the handle or one of its
+      // descendants. Without this, dragging or even tapping the target
+      // would open the shot UI.
+      const target = e.originalEvent?.target as Node | null;
+      const handleNode = document.querySelector('.grt-aim-handle');
+      if (target && handleNode && handleNode.contains(target)) return;
+      const end: [number, number] = [e.lngLat.lng, e.lngLat.lat];
+      const distM = haversineMetersFE(aimStartLL, end);
+      const { lie, targetResult } = classifyTap(
+        end,
+        layout.features,
+        bearing,
+        greenLL,
+        targetType
+      );
+      cb({
+        start: aimStartLL,
+        end,
+        calculatedDistanceM: distM,
+        inferredLie: lie,
+        inferredTargetResult: targetResult
+      });
+    };
+    map.on('click', onMapClick);
 
     // Critical: release the WebGL context. Capacitor / iOS WebView is strict
     // about concurrent contexts; a leaked map is the kind of bug that only
     // shows up after the user swipes through 10 holes.
     return () => {
+      // Clear the landing marker first so its DOM node isn't dangling after
+      // the map (and its container) is torn down.
+      landingMarkerRef.current?.remove();
+      landingMarkerRef.current = null;
+      mapRef.current = null;
       map.remove();
     };
+    // Intentionally excluded from deps:
+    //   onShotLanded — read from onShotLandedRef inside the click handler so
+    //     a fresh inline arrow on the parent doesn't force a map rebuild.
+    //   landingPoint — managed by its own effect below so a new tap doesn't
+    //     tear down the map.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     useMapbox,
     layout,
@@ -1501,8 +1564,6 @@ export function HoleLayout({
     suggestedHandleDistanceM,
     puttingMode,
     bagClubs,
-    onShotLanded,
-    landingPoint,
     shotEndPoints,
     hideAim,
     useTargetDot,
@@ -1511,6 +1572,37 @@ export function HoleLayout({
     targetType,
     showYardageMarkers
   ]);
+
+  // Landing-point marker — add/move/remove imperatively on the live map so a
+  // user tap doesn't trigger the big map-creation effect above. Keeps the
+  // map instance stable across taps (no flash, no re-init, no Mapbox refetch).
+  useEffect(() => {
+    if (!useMapbox) return;
+    const map = mapRef.current;
+    if (!map) return;
+    if (!landingPoint) {
+      landingMarkerRef.current?.remove();
+      landingMarkerRef.current = null;
+      return;
+    }
+    if (landingMarkerRef.current) {
+      landingMarkerRef.current.setLngLat(landingPoint);
+      return;
+    }
+    const el = document.createElement('div');
+    Object.assign(el.style, {
+      width: '18px',
+      height: '18px',
+      borderRadius: '50%',
+      background: '#ef4444',
+      border: '3px solid #ffffff',
+      boxShadow: '0 2px 6px rgba(0,0,0,0.6)',
+      pointerEvents: 'none'
+    } as Partial<CSSStyleDeclaration>);
+    landingMarkerRef.current = new mapboxgl.Marker({ element: el, anchor: 'center' })
+      .setLngLat(landingPoint)
+      .addTo(map);
+  }, [landingPoint, useMapbox]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with
   // a 0×0 canvas at construction time. Matches HoleLayoutCard's wrapper.

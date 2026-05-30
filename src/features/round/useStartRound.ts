@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { courseRepo } from '@/services/courseRepo';
 import { roundRepo } from '@/services/roundRepo';
+import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/authStore';
 import { emptyHoles, useRoundStore } from '@/stores/roundStore';
 import type { Course } from '@/models';
@@ -82,8 +83,27 @@ export function useStartRound() {
         handicap_differential: null
       });
 
+      // Per-hole par. Prefer the OSM-sourced public.holes.par (authoritative
+      // per-hole value); fall back to the course-average for any hole that
+      // doesn't have OSM data yet. Without this every hole gets the same
+      // average par and scoring is wrong on every par-3/par-5 hole — a
+      // par-3 played in 3 reads as "+1" because the stored par was an
+      // average like 2 or 4 instead of 3.
       const defaultPar = Math.round(course.totalPar / holesPlayed) || 4;
-      const holes = emptyHoles(holesPlayed, defaultPar);
+      const osmPars: Record<number, number> = {};
+      if (courseId) {
+        const { data: osmHoles } = await supabase
+          .from('holes')
+          .select('hole_number, par')
+          .eq('course_id', courseId);
+        for (const h of osmHoles ?? []) {
+          if (h.par != null) osmPars[h.hole_number] = h.par;
+        }
+      }
+      const holes = emptyHoles(holesPlayed, defaultPar).map((h) => ({
+        ...h,
+        par: osmPars[h.holeNumber] ?? h.par
+      }));
 
       startActive({
         roundId: round.id,

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Box,
   Button,
@@ -273,9 +273,19 @@ export function HoleTrackingPage() {
   // numbered amber dots on the map. Shots without GPS coords are dropped so
   // we don't render markers at [null, null]. The LAST one also becomes the
   // aim-line origin in HoleLayout, overriding the centerline walk.
-  const shotEndPoints: Array<[number, number]> = hole.shots
-    .filter((s) => s.endLat != null && s.endLng != null)
-    .map((s) => [s.endLng as number, s.endLat as number]);
+  //
+  // Memoized so the array identity is stable when the underlying shot list
+  // hasn't actually changed — otherwise the HoleLayout map effect, which
+  // has shotEndPoints in its deps, would tear down and recreate the entire
+  // Mapbox instance on every parent render (e.g. every tap that sets
+  // pendingGps).
+  const shotEndPoints: Array<[number, number]> = useMemo(
+    () =>
+      hole.shots
+        .filter((s) => s.endLat != null && s.endLng != null)
+        .map((s) => [s.endLng as number, s.endLat as number] as [number, number]),
+    [hole.shots]
+  );
 
   // Smart aim-handle hint: on 3rd+ shots, when the ball isn't on the green,
   // seed the handle at "ball position + previous shot distance" along the
@@ -291,6 +301,20 @@ export function HoleTrackingPage() {
   // canonical coords to test how close the last shot landed. TanStack Query
   // dedupes this call with HoleLayoutCard's own fetch.
   const layoutQuery = useHoleLayout(active.courseId, hole.holeNumber);
+
+  // Pin override (course-wide shared pin → legacy per-round → null).
+  // Memoized for the same reason as shotEndPoints — a fresh [lng,lat] array
+  // on every render would invalidate the HoleLayout map effect's deps and
+  // cause a full Mapbox rebuild on every tap.
+  const sharedPinLng = layoutQuery.data?.hole.pin_lng ?? null;
+  const sharedPinLat = layoutQuery.data?.hole.pin_lat ?? null;
+  const localPinLng = hole.pinLng;
+  const localPinLat = hole.pinLat;
+  const pinOverride = useMemo<[number, number] | null>(() => {
+    if (sharedPinLng != null && sharedPinLat != null) return [sharedPinLng, sharedPinLat];
+    if (localPinLng != null && localPinLat != null) return [localPinLng, localPinLat];
+    return null;
+  }, [sharedPinLng, sharedPinLat, localPinLng, localPinLat]);
 
   // Did the last shot land within ~30 yards (≈27 m) of the green? This covers
   // "around the green" — a chip-shot landing zone where the next stroke is
@@ -463,6 +487,18 @@ export function HoleTrackingPage() {
   // when the round was created) and finally null for the "—" display.
   const osmPar = layoutQuery.data?.hole.par ?? null;
   const displayPar = osmPar ?? hole.par;
+
+  // Heal mis-seeded per-hole par. Old rounds were started with every hole
+  // initialised to course-average par, which means a par-3 hole could have
+  // a stored par of 2 or 4 — making scoreVsPar wrong (3 strokes on a "par
+  // 2" reads as "+1" instead of "E"). Once we know the authoritative OSM
+  // par, push it back into the local hole; autosave then persists the
+  // correction to round_holes.par.
+  useEffect(() => {
+    if (osmPar != null && osmPar !== hole.par) {
+      updateHole(hole.holeNumber, { par: osmPar });
+    }
+  }, [osmPar, hole.par, hole.holeNumber, updateHole]);
 
   // Target type for the upcoming shot — drives tap-to-record classification
   // on the map. Mirrors the rules in AddShotSheet.pickTargetType: putter →
@@ -1069,16 +1105,7 @@ export function HoleTrackingPage() {
           useTargetDot={nextShotOntoGreen}
           targetType={upcomingTargetType}
           showYardageMarkers={showYardageMarkers}
-          pinOverride={
-            // Course-wide shared pin (saved by any player; everyone inherits it).
-            // Falls back to the legacy per-round override on the LocalHole for
-            // any round that was started before the shared-pin migration.
-            layoutQuery.data?.hole.pin_lat != null && layoutQuery.data?.hole.pin_lng != null
-              ? [layoutQuery.data.hole.pin_lng, layoutQuery.data.hole.pin_lat]
-              : hole.pinLat != null && hole.pinLng != null
-                ? [hole.pinLng, hole.pinLat]
-                : null
-          }
+          pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
           onShotLanded={
             holeComplete
@@ -1417,6 +1444,30 @@ export function HoleTrackingPage() {
               onClick={() => {
                 const putter = bagClubs.find((c) => c.category === 'putter');
                 if (!putter) return;
+                // Pin position: prefer the shared course-wide / per-round
+                // pin override; fall back to the OSM green coord. This is
+                // the geographic spot the ball is in once "Made" is
+                // tapped, so use it as the made putt's end position. With
+                // an end coord set, the shot shows up in shotEndPoints
+                // and renders as the next numbered dot on the map — every
+                // shot is visible after hole-out.
+                const pinLng =
+                  pinOverride?.[0] ?? layoutQuery.data?.hole.green_lng ?? null;
+                const pinLat =
+                  pinOverride?.[1] ?? layoutQuery.data?.hole.green_lat ?? null;
+                // Use the last shot's end position as the putt's start
+                // (the ball was sitting there before the putt). Gives the
+                // putt a real start→end pair so any GPS-aware downstream
+                // analytics still works.
+                const startLng = lastShot?.endLng ?? null;
+                const startLat = lastShot?.endLat ?? null;
+                const calculatedDistanceM =
+                  pinLng != null && pinLat != null && startLng != null && startLat != null
+                    ? haversineMeters(
+                        { lat: startLat, lng: startLng, accuracyM: 0, timestamp: 0 },
+                        { lat: pinLat, lng: pinLng, accuracyM: 0, timestamp: 0 }
+                      )
+                    : null;
                 void onSubmitShot({
                   clubId: putter.clubId,
                   clubCategory: 'putter',
@@ -1428,11 +1479,11 @@ export function HoleTrackingPage() {
                   penaltyType: null,
                   derivedShotResult: 'made_putt',
                   notes: null,
-                  startLat: null,
-                  startLng: null,
-                  endLat: null,
-                  endLng: null,
-                  calculatedDistance: null
+                  startLat,
+                  startLng,
+                  endLat: pinLat,
+                  endLng: pinLng,
+                  calculatedDistance: calculatedDistanceM
                 });
               }}
               sx={{
