@@ -642,16 +642,16 @@ function classifyTap(
   const along = dx * Math.sin(br) + dy * Math.cos(br);
   const across = dx * Math.cos(br) - dy * Math.sin(br);
 
-  // A tap on the target's own surface counts as a hit. Otherwise classify the
-  // miss by direction relative to the green. For fairway-target shots (tee
-  // shot on par 4/5) the tee box also counts — both register as lie='fairway'
-  // via the priority list above.
-  const targetMatched =
-    (targetType === 'green' && lie === 'green') ||
-    (targetType === 'fairway' && lie === 'fairway');
-
+  // Any tap on the green counts as a 'hit', regardless of what the player
+  // was actually aiming at — landing on the green is the same outcome
+  // whether the intended target was the green or the fairway (e.g.
+  // driveable par 4 / mishit short par 5). Tee polygons report as
+  // lie='fairway', so a tee-shot tap on the tee box of a par-4/5 also
+  // counts as a fairway hit. Anything else → directional miss vs the pin.
   let targetResult: TargetResult | null;
-  if (targetMatched) {
+  if (lie === 'green') {
+    targetResult = 'hit';
+  } else if (targetType === 'fairway' && lie === 'fairway') {
     targetResult = 'hit';
   } else if (Math.abs(along) > Math.abs(across)) {
     targetResult = along > 0 ? 'long' : 'short';

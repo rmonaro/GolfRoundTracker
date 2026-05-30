@@ -86,7 +86,14 @@ export function StartRoundPage() {
               zip: zip.trim() || null
             },
         holesPlayed,
-        playedAt: localDateInputToIso(roundDate)
+        // For TODAY's date: pass null so useStartRound uses Date.now() —
+        // a live round should start at the actual current time, not noon.
+        // For BACKDATED rounds (past day): pass the noon-anchored ISO so
+        // the calendar day is unambiguous across timezones.
+        playedAt:
+          roundDate === toLocalDateInput(new Date())
+            ? null
+            : localDateInputToIso(roundDate)
       };
 
       if (!payload.course.name) {
@@ -423,13 +430,33 @@ function CoursePicker({
         </Box>
       ) : (
         <Stack spacing={1}>
-          {filtered.map((c) => {
-            const isApi = c.source === 'api';
-            const isSelected = c.id === value;
-            const subtitle = [c.club_name, [c.city, c.state].filter(Boolean).join(', ')]
-              .filter(Boolean)
-              .join(' · ');
-            return (
+          {/* Cap the visible list at 4 rows; anything beyond scrolls inside
+              this Box without growing the page. Each course card is ~72px
+              tall incl. the 8px Stack gap, so 4 rows ≈ 304px. Disabled when
+              there are 4 or fewer courses so short lists don't get a
+              redundant scrollbar. */}
+          <Box
+            sx={
+              filtered.length > 4
+                ? {
+                    maxHeight: 304,
+                    overflowY: 'auto',
+                    WebkitOverflowScrolling: 'touch',
+                    // Tiny right padding so the scrollbar gutter doesn't
+                    // clip the card border.
+                    pr: 0.5
+                  }
+                : undefined
+            }
+          >
+            <Stack spacing={1}>
+              {filtered.map((c) => {
+                const isApi = c.source === 'api';
+                const isSelected = c.id === value;
+                const subtitle = [c.club_name, [c.city, c.state].filter(Boolean).join(', ')]
+                  .filter(Boolean)
+                  .join(' · ');
+                return (
               <Card
                 key={c.id}
                 elevation={0}
@@ -475,7 +502,9 @@ function CoursePicker({
                 </CardActionArea>
               </Card>
             );
-          })}
+              })}
+            </Stack>
+          </Box>
           {search.trim() && (
             <Button
               variant="text"

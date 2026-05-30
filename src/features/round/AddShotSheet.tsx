@@ -214,6 +214,10 @@ function deriveShotResult(
   if (targetType === 'putt') {
     return targetResult === 'made' ? 'made_putt' : 'putt';
   }
+  // Lie wins: a ball sitting on the green is a green-result shot no
+  // matter what the player was aiming at. Otherwise fall back to the
+  // target-type-aware mapping.
+  if (lie === 'green') return 'green';
   if (targetType === 'green') {
     if (targetResult === 'hit') return 'green';
     return targetResult as ShotResult;
@@ -354,17 +358,21 @@ export function AddShotSheet({
   }, [selectedClub]);
 
   // When the user taps the ideal target, sync the lie to match — fairway-hit
-  // → fairway, green-hit → green, putt-made → green. This fires whenever the
-  // user changes their target pick, so re-tapping fairway after manually
-  // setting lie to 'rough' still updates lie back to 'fairway'. `lie` is
-  // NOT in the deps — that way, a user edit to the lie selector AFTER the
-  // auto-set sticks (we don't re-fire on every lie change and overwrite it).
+  // → fairway, green-hit → green, putt-made → green. Only sets the lie when
+  // it's still unset, so an already-chosen value (whether the player picked
+  // it manually OR it came from the map-tap inferred lie) wins. Critical
+  // for the "tee shot finds the green" case: classifyTap seeds lie='green'
+  // + result='hit'; without this guard the effect would override lie back
+  // to 'fairway' because the intended target was the fairway.
   useEffect(() => {
     if (!targetResult) return;
-    if (targetType === 'green' && targetResult === 'hit') setLie('green');
-    else if (targetType === 'fairway' && targetResult === 'hit') setLie('fairway');
-    else if (targetType === 'putt' && targetResult === 'made') setLie('green');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setLie((current) => {
+      if (current != null) return current;
+      if (targetType === 'green' && targetResult === 'hit') return 'green';
+      if (targetType === 'fairway' && targetResult === 'hit') return 'fairway';
+      if (targetType === 'putt' && targetResult === 'made') return 'green';
+      return current;
+    });
   }, [targetResult, targetType]);
 
   const distanceNumber = distance.trim() === '' ? null : Number(distance);
