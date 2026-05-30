@@ -98,15 +98,22 @@ export function HomePage() {
                     </Typography>
                   </Box>
                   <Box textAlign="right">
-                    <Typography variant="h4" sx={{ fontWeight: 700 }}>
-                      {lastRound.score}
-                    </Typography>
+                    {/* Headline = score-to-par (E / +N / -N). Raw stroke
+                        total drops to the secondary line — matches the
+                        Round Summary final-score treatment. */}
                     <Typography
-                      variant="body2"
-                      sx={{ fontWeight: 600 }}
+                      variant="h4"
+                      sx={{ fontWeight: 700 }}
                       color={lastRound.score_vs_par <= 0 ? 'primary' : 'warning.main'}
                     >
                       {scoreVsPar(lastRound.score, lastRound.par)}
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ fontWeight: 600 }}
+                    >
+                      {lastRound.score} strokes
                     </Typography>
                   </Box>
                 </Stack>

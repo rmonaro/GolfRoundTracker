@@ -81,6 +81,13 @@ export function StatsPage() {
   const holesByRound = holesQuery.data ?? new Map();
   const stats = aggregateRoundStats(rounds, holesByRound);
 
+  // Trend charts only become useful once there's a meaningful sample.
+  // Hide the score trend, differential trend, and recent-differentials
+  // strip until the user has logged at least 5 completed rounds — before
+  // that the lines wobble per-round and the chart reads as noise.
+  const MIN_ROUNDS_FOR_TRENDS = 5;
+  const showTrends = completedIds.length >= MIN_ROUNDS_FOR_TRENDS;
+
   // Top used clubs across all logged shots.
   const clubUsage = new Map<string, number>();
   for (const s of shotsQuery.data ?? []) {
@@ -143,7 +150,14 @@ export function StatsPage() {
           <StatCard label="Avg vs Par" value={fmtVsPar(stats.averageScoreVsPar)} />
         </Box>
 
-        {stats.recentScores.length > 0 && (
+        {!showTrends && completedIds.length > 0 && (
+          <Alert severity="info" variant="outlined">
+            Score and differential trends unlock after {MIN_ROUNDS_FOR_TRENDS} completed rounds — {' '}
+            {MIN_ROUNDS_FOR_TRENDS - completedIds.length} to go.
+          </Alert>
+        )}
+
+        {showTrends && stats.recentScores.length > 0 && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
@@ -161,7 +175,7 @@ export function StatsPage() {
           </Card>
         )}
 
-        {stats.handicapTrend.length > 0 && (
+        {showTrends && stats.handicapTrend.length > 0 && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
@@ -203,7 +217,7 @@ export function StatsPage() {
           </Card>
         )}
 
-        {stats.recentDifferentials.length > 0 && (
+        {showTrends && stats.recentDifferentials.length > 0 && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>

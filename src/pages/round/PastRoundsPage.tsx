@@ -133,15 +133,22 @@ export function PastRoundsPage() {
                       </Stack>
                     </Box>
                     <Box sx={{ textAlign: 'right' }}>
-                      <Typography variant="h4" sx={{ fontWeight: 700 }}>
-                        {r.score}
+                      {/* Headline = score-to-par; raw stroke total below.
+                          Matches the HomePage Last Round card and the
+                          Round Summary final-score treatment. */}
+                      <Typography
+                        variant="h4"
+                        sx={{ fontWeight: 700 }}
+                        color={r.score_vs_par <= 0 ? 'primary' : 'warning.main'}
+                      >
+                        {scoreVsPar(r.score, r.par)}
                       </Typography>
                       <Typography
                         variant="body2"
-                        color={r.score_vs_par <= 0 ? 'primary' : 'warning.main'}
+                        color="text.secondary"
                         sx={{ fontWeight: 600 }}
                       >
-                        {scoreVsPar(r.score, r.par)}
+                        {r.score} strokes
                       </Typography>
                     </Box>
                   </Stack>
