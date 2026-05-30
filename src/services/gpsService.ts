@@ -75,6 +75,65 @@ export async function getCurrentPosition(
   return normalize(pos);
 }
 
+export interface WatchOptions {
+  enableHighAccuracy?: boolean;
+  /** Drop fixes worse than this accuracy radius (meters). Default 25. */
+  maxAccuracyM?: number;
+  /** Minimum time between forwarded fixes (ms). De-bounces rapid-fire providers. Default 800. */
+  minIntervalMs?: number;
+}
+
+/**
+ * Continuous-watch wrapper. Forwards each accepted fix to `onFix`. Returns
+ * an unsubscribe function safe to call before the watch even starts.
+ *
+ * Filters applied before forwarding:
+ *   • Drop fixes with accuracy radius > `maxAccuracyM`.
+ *   • Coalesce bursts to 1 fix per `minIntervalMs`.
+ */
+export function watchPosition(
+  onFix: (point: GpsPoint) => void,
+  options?: WatchOptions
+): () => void {
+  let watchId: string | null = null;
+  let cancelled = false;
+  let lastEmittedMs = 0;
+  const maxAccuracy = options?.maxAccuracyM ?? 25;
+  const minInterval = options?.minIntervalMs ?? 800;
+
+  Geolocation.watchPosition(
+    {
+      enableHighAccuracy: options?.enableHighAccuracy ?? true,
+      timeout: 15_000,
+      maximumAge: 0
+    },
+    (pos, err) => {
+      if (cancelled || err || !pos) return;
+      const fix = normalize(pos);
+      if (fix.accuracyM > maxAccuracy) return;
+      const now = Date.now();
+      if (now - lastEmittedMs < minInterval) return;
+      lastEmittedMs = now;
+      onFix(fix);
+    }
+  )
+    .then((id) => {
+      if (cancelled) {
+        Geolocation.clearWatch({ id }).catch(() => undefined);
+        return;
+      }
+      watchId = id;
+    })
+    .catch(() => undefined);
+
+  return () => {
+    cancelled = true;
+    if (watchId) {
+      Geolocation.clearWatch({ id: watchId }).catch(() => undefined);
+    }
+  };
+}
+
 /**
  * Haversine distance in meters between two GPS points. Mirrors the shared
  * helper in the edge function so client + server numbers match.

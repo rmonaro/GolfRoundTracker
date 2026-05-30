@@ -35,6 +35,7 @@ import {
   haversineMeters,
   isGpsAvailable
 } from '@/services/gpsService';
+import { useAutoTrack } from '@/features/round/useAutoTrack';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
@@ -124,7 +125,12 @@ export function HoleTrackingPage() {
     return { distM, atCourse: distM < 2000 };
   })();
 
-  const [tracking, setTracking] = useState<{ lat: number; lng: number } | null>(null);
+  // Auto-track mode: when ON, a continuous GPS watch + state machine
+  // detects shots automatically by spotting "walked >10m then stopped for
+  // 8s" patterns. See useAutoTrack for the heuristic. The manual
+  // start/stop tracking flow has been retired; the GPS FAB now toggles
+  // auto-track instead.
+  const [autoTrackEnabled, setAutoTrackEnabled] = useState(false);
   const [trackingBusy, setTrackingBusy] = useState(false);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   // Club pre-selection: the user picks a club on the main screen so the next
@@ -150,7 +156,15 @@ export function HoleTrackingPage() {
     inferredTargetResult?: import('@/models').TargetResult | null;
   } | null>(null);
 
-  const onStartTracking = async () => {
+  // Toggle auto-tracking on/off. On enable: check GPS availability +
+  // permission + at-course, then arm the state machine. On disable: the
+  // useAutoTrack hook tears down its watch via the enabled=false branch.
+  const onToggleAutoTrack = async () => {
+    if (autoTrackEnabled) {
+      setAutoTrackEnabled(false);
+      setTrackingError(null);
+      return;
+    }
     if (!isGpsAvailable()) {
       setTrackingError('GPS not available on this device');
       return;
@@ -164,10 +178,8 @@ export function HoleTrackingPage() {
         return;
       }
       const pt = await getCurrentPosition();
-
-      // Refuse to start tracking when the user clearly isn't at the course.
-      // Skips the check when the course doesn't have lat/lng (can't verify).
-      // 2 km threshold matches the at-course chip in the header.
+      // Bail if the user is far from the course — auto-track is pointless
+      // unless they're actually playing. 2km matches the at-course chip.
       const cLat = courseQuery.data?.lat;
       const cLng = courseQuery.data?.lng;
       if (cLat != null && cLng != null) {
@@ -180,48 +192,19 @@ export function HoleTrackingPage() {
           setTrackingError(
             `You're ${miles} mi from ${active?.courseName ?? 'the course'} — tracking won't start.`
           );
-          // Keep the fresh fix in userLoc so the header chip reflects reality.
           setUserLoc({ lat: pt.lat, lng: pt.lng });
           return;
         }
       }
-
       setUserLoc({ lat: pt.lat, lng: pt.lng });
-      setTracking({ lat: pt.lat, lng: pt.lng });
+      setAutoTrackEnabled(true);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Could not get start location';
+      const msg = err instanceof Error ? err.message : 'Could not get current location';
       setTrackingError(
         /denied|permission/i.test(msg)
           ? 'Location permission denied. Enable it in device Settings.'
           : msg
       );
-    } finally {
-      setTrackingBusy(false);
-    }
-  };
-
-  const onStopTracking = async () => {
-    if (!tracking) return;
-    setTrackingBusy(true);
-    setTrackingError(null);
-    try {
-      const pt = await getCurrentPosition();
-      const distM = haversineMeters(
-        { ...tracking, accuracyM: 0, timestamp: 0 },
-        { lat: pt.lat, lng: pt.lng, accuracyM: 0, timestamp: 0 }
-      );
-      setPendingGps({
-        startLat: tracking.lat,
-        startLng: tracking.lng,
-        endLat: pt.lat,
-        endLng: pt.lng,
-        calculatedDistanceM: distM
-      });
-      setTracking(null);
-      setEditingShot(null);
-      setShotSheet(true);
-    } catch (err) {
-      setTrackingError(err instanceof Error ? err.message : 'Could not get end location');
     } finally {
       setTrackingBusy(false);
     }
@@ -510,6 +493,49 @@ export function HoleTrackingPage() {
       : upcomingShotNumber === 1 && (displayPar ?? hole.par) !== 3
         ? 'fairway'
         : 'green';
+
+  // Last shot end (used to seed auto-track's "ball is here" anchor). When
+  // there's no last shot, useAutoTrack bootstraps from the first GPS fix
+  // — fine for shot 1 since the user is at the tee.
+  const lastShotForAutoTrack = hole.shots[hole.shots.length - 1];
+  const autoTrackInitialBallPos = useMemo<{ lat: number; lng: number } | null>(() => {
+    if (lastShotForAutoTrack?.endLat != null && lastShotForAutoTrack?.endLng != null) {
+      return { lat: lastShotForAutoTrack.endLat, lng: lastShotForAutoTrack.endLng };
+    }
+    return null;
+  }, [lastShotForAutoTrack?.endLat, lastShotForAutoTrack?.endLng]);
+
+  const autoTrack = useAutoTrack({
+    enabled: autoTrackEnabled,
+    initialBallPos: autoTrackInitialBallPos,
+    onShotDetected: (shot) => {
+      // Open the existing AddShotSheet pre-filled via pendingGps so all the
+      // inferred-lie/result work and existing UX still applies. The state
+      // machine sits in ARRIVED until the user confirms (submit) or
+      // cancels (close) the sheet — handled by the effect below.
+      setPendingGps({
+        startLat: shot.startLat,
+        startLng: shot.startLng,
+        endLat: shot.endLat,
+        endLng: shot.endLng,
+        calculatedDistanceM: shot.distanceM
+      });
+      setEditingShot(null);
+      setShotSheet(true);
+    }
+  });
+
+  // Keep the auto-track ball anchor in sync with the latest persisted shot.
+  // Without this, a shot saved via the normal Add Shot flow (or Made) would
+  // leave the auto-tracker still anchored at the OLD ball position, and the
+  // next walk would compute distance from there.
+  useEffect(() => {
+    if (!autoTrackEnabled) return;
+    if (autoTrackInitialBallPos) autoTrack.setBallPos(autoTrackInitialBallPos);
+    // setBallPos is stable (useCallback in the hook); excluding it keeps
+    // this effect's identity matched to actual ball-pos changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoTrackEnabled, autoTrackInitialBallPos?.lat, autoTrackInitialBallPos?.lng]);
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
@@ -1386,14 +1412,15 @@ export function HoleTrackingPage() {
           </Button>
         )}
 
-        {/* Track GPS — only visible when GPS is enabled in Settings. Secondary
-            FAB to the left of Add Shot. Toggles start-capture / stop-capture;
-            on stop opens AddShotSheet pre-filled with the GPS distance. */}
+        {/* Auto-track GPS FAB. Only when GPS is enabled in Settings. Tap to
+            arm continuous tracking; the state machine in useAutoTrack
+            detects "walked then stopped" patterns and opens the Add Shot
+            sheet pre-filled when a shot lands. Tap again to disarm. */}
         {gpsEnabled && (
           <Fab
-            color={tracking ? 'error' : 'default'}
-            aria-label={tracking ? 'stop tracking' : 'track shot with gps'}
-            onClick={tracking ? onStopTracking : onStartTracking}
+            color={autoTrackEnabled ? 'error' : 'default'}
+            aria-label={autoTrackEnabled ? 'stop auto-tracking' : 'start auto-tracking'}
+            onClick={onToggleAutoTrack}
             disabled={trackingBusy}
             size="medium"
             sx={{
@@ -1404,10 +1431,10 @@ export function HoleTrackingPage() {
               boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
             }}
           >
-            {tracking ? <StopCircleRoundedIcon /> : <MyLocationRoundedIcon />}
+            {autoTrackEnabled ? <StopCircleRoundedIcon /> : <MyLocationRoundedIcon />}
           </Fab>
         )}
-        {gpsEnabled && (tracking || trackingError) && (
+        {gpsEnabled && (autoTrackEnabled || trackingError) && (
           <Box
             sx={{
               position: 'absolute',
@@ -1421,11 +1448,16 @@ export function HoleTrackingPage() {
               borderRadius: 1,
               fontSize: '0.7rem',
               fontWeight: 600,
-              maxWidth: 200,
+              maxWidth: 220,
               textAlign: 'right'
             }}
           >
-            {trackingError ?? 'Tracking… tap stop at ball'}
+            {trackingError ??
+              (autoTrack.state === 'moving'
+                ? 'Auto-track: walking to ball…'
+                : autoTrack.state === 'arrived'
+                  ? 'Shot detected — confirming…'
+                  : 'Auto-track ON — at ball')}
           </Box>
         )}
 
@@ -1785,6 +1817,13 @@ export function HoleTrackingPage() {
         onClose={() => {
           setShotSheet(false);
           setEditingShot(null);
+          // If the sheet was opened by an auto-track detection that the
+          // user is now cancelling, treat the detection as a false
+          // positive: re-arm the tracker anchored at the current location
+          // (the cancelled "end" is presumed to be where the user is now).
+          if (autoTrack.state === 'arrived' && pendingGps) {
+            autoTrack.dismissShot();
+          }
           setPendingGps(null);
         }}
         onSubmit={onSubmitShot}
