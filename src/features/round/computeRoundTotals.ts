@@ -58,9 +58,12 @@ export function computeRoundStats(holes: LocalHole[]): RoundSnapshotStats {
   };
 
   for (const h of holes) {
-    if (h.strokes > 0) stats.holesPlayed++;
+    const played = h.strokes > 0 || (h.penaltyStrokes ?? 0) > 0;
+    if (played) stats.holesPlayed++;
     stats.totalScore += holeTotalScore(h);
-    stats.totalPar += h.par || 0;
+    // Only count par for holes that have been started. Unplayed holes
+    // would otherwise push score-vs-par negative on a partial round.
+    if (played) stats.totalPar += h.par || 0;
     stats.putts += h.putts || 0;
     stats.penaltyStrokes += h.penaltyStrokes || 0;
     if (h.gir) stats.greensInRegulation++;

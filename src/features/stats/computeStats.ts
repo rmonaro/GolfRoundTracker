@@ -156,7 +156,11 @@ export function detailRoundStats(
   let right = 0;
   for (const h of holes) {
     totalScore += h.strokes + h.penalty_strokes;
-    totalPar += h.par;
+    // Only add par for holes the player has actually started. Otherwise a
+    // mid-round summary on a par-27 course shows "-24" after one E-par
+    // hole because the unplayed holes' par drags the diff toward huge
+    // under-par. Matches the in-round HUD's totalRoundPar logic.
+    if (h.strokes > 0 || h.penalty_strokes > 0) totalPar += h.par;
     putts += h.putts;
     if (h.sand) sandShots++;
     if (h.gir) greensInRegulation++;
