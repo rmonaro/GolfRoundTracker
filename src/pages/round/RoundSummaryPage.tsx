@@ -29,6 +29,7 @@ import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
 import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import dayjs from 'dayjs';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
 import { useRoundDetails } from '@/features/stats/useRounds';
@@ -99,7 +100,11 @@ export function RoundSummaryPage() {
         pt: 'calc(env(safe-area-inset-top) + 4px)'
       }}
     >
-      <PageHeader title="Round Summary" subtitle={round.course_name} back="/round" />
+      <PageHeader
+        title="Round Summary"
+        subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
+        back="/round"
+      />
 
       {/* Tab nav — Overview (existing content) / Holes (per-hole detail) /
           Game Stats (placeholder). Sits between the header and the page
