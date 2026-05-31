@@ -349,7 +349,8 @@ function Legend({ holes }: { holes: ScorecardHole[] }) {
     { count: counts.eagle, sub: 'Eagle', color: SCORE_COLORS.eagle },
     { count: counts.birdie, sub: 'Birdie', color: SCORE_COLORS.birdie },
     { count: counts.par, sub: 'Par', color: SCORE_COLORS.par },
-    { count: counts.bogey, sub: 'Bogey', color: SCORE_COLORS.bogey }
+    { count: counts.bogey, sub: 'Bogey', color: SCORE_COLORS.bogey },
+    { count: counts.doublePlus, sub: 'Double', color: SCORE_COLORS.doublePlus }
   ];
   return (
     <Stack
