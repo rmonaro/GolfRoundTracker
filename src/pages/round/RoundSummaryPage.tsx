@@ -5,7 +5,10 @@ import {
   Card,
   CardContent,
   CircularProgress,
+  LinearProgress,
   Stack,
+  Tab,
+  Tabs,
   Typography,
   Button,
   Chip,
@@ -19,6 +22,11 @@ import {
 import HomeRoundedIcon from '@mui/icons-material/HomeRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
+import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
+import GpsFixedRoundedIcon from '@mui/icons-material/GpsFixedRounded';
+import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
+import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -31,7 +39,8 @@ import { useRoundStore } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { useAuthStore } from '@/stores/authStore';
 import { toAppError } from '@/services/errors';
-import { pct, scoreVsPar, durationLabel } from '@/utils/format';
+import { pct, scoreVsPar, durationLabel, fullName } from '@/utils/format';
+import { Scorecard } from '@/components/Scorecard';
 import type { Round, RoundHole } from '@/models';
 
 export function RoundSummaryPage() {
@@ -40,7 +49,9 @@ export function RoundSummaryPage() {
   const detail = useRoundDetails(roundId);
   const reset = useRoundStore((s) => s.reset);
   const bag = useBagStore((s) => s.clubs);
+  const profile = useAuthStore((s) => s.profile);
   const [editOpen, setEditOpen] = useState(false);
+  const [tab, setTab] = useState<'overview' | 'holes' | 'game'>('overview');
 
   useEffect(() => {
     if (!detail.data?.round) return;
@@ -89,8 +100,43 @@ export function RoundSummaryPage() {
       }}
     >
       <PageHeader title="Round Summary" subtitle={round.course_name} back="/round" />
-      <Stack spacing={2} px={2} pb={4}>
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+
+      {/* Tab nav — Overview (existing content) / Holes (per-hole detail) /
+          Game Stats (placeholder). Sits between the header and the page
+          body so the rest of the page can swap in place. */}
+      <Box sx={{ px: 2, mt: 1 }}>
+        <Tabs
+          value={tab}
+          onChange={(_, v) => setTab(v)}
+          variant="fullWidth"
+          sx={{
+            minHeight: 40,
+            bgcolor: 'background.paper',
+            borderRadius: '5px',
+            border: 1,
+            borderColor: 'divider',
+            '& .MuiTabs-indicator': { display: 'none' },
+            '& .MuiTab-root': {
+              minHeight: 40,
+              textTransform: 'none',
+              fontWeight: 700,
+              borderRadius: '5px',
+              color: 'text.secondary'
+            },
+            '& .Mui-selected': {
+              bgcolor: 'rgba(22,163,74,0.18)',
+              color: 'common.white'
+            }
+          }}
+        >
+          <Tab label="Overview" value="overview" />
+          <Tab label="Holes" value="holes" />
+        </Tabs>
+      </Box>
+
+      {tab === 'overview' && (
+      <Stack spacing={2} px={2} pb={4} mt={2}>
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Stack direction="row" justifyContent="space-between" alignItems="center">
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
@@ -127,12 +173,10 @@ export function RoundSummaryPage() {
           </CardContent>
         </Card>
 
-        <ScoreCard
+        <Scorecard
+          playerName={fullName(profile?.first_name, profile?.last_name)}
+          handicap={round.handicap_differential != null ? Math.round(round.handicap_differential) : null}
           holes={holes}
-          frontTotal={frontTotal}
-          frontPar={frontPar}
-          backTotal={backTotal}
-          backPar={backPar}
         />
 
         <Box
@@ -153,7 +197,7 @@ export function RoundSummaryPage() {
         </Box>
 
         {stats.clubsUsed.size > 0 && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
                 Clubs Used
@@ -182,6 +226,9 @@ export function RoundSummaryPage() {
           Estimated handicap only. Not an official USGA handicap.
         </Typography>
       </Stack>
+      )}
+
+      {tab === 'holes' && <HolesTab holes={holes} shots={shots} bag={bag} />}
 
       <EditRoundDialog
         open={editOpen}
@@ -345,6 +392,7 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
       fullWidth
       maxWidth="sm"
       scroll="paper"
+      PaperProps={{ sx: { borderRadius: '5px' } }}
     >
       <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pr: 1 }}>
         Edit Round
@@ -541,7 +589,7 @@ function ScoreCard({ holes, frontTotal, frontPar, backTotal, backPar }: ScoreCar
   const back = holes.filter((h) => h.hole_number > 9);
 
   return (
-    <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+    <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
       <CardContent>
         <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
           Scorecard
@@ -631,4 +679,522 @@ function scoreColor(strokes: number, par: number): string {
   if (diff === 0) return '#4caf50';
   if (diff === 1) return '#ef6c00';
   return '#c62828';
+}
+
+// ---------------------------------------------------------------------------
+// Holes tab — horizontal hole picker + per-hole detail card. Mirrors the
+// layout from the design reference (IMG_6204): scrollable hole strip at the
+// top, big "Hole N" header with the played score on the right, then a
+// "Score Distribution" row (single-round semantics: the actual outcome
+// shows 100%, other categories 0%), and a 4-card Hole Stats grid.
+// ---------------------------------------------------------------------------
+
+type HoleCategory = 'birdiePlus' | 'par' | 'bogey' | 'doublePlus';
+const CATEGORY_COLORS: Record<HoleCategory, string> = {
+  birdiePlus: '#3b82f6',
+  par: '#6b7280',
+  bogey: '#ef6c00',
+  doublePlus: '#c62828'
+};
+const CATEGORY_LABELS: Record<HoleCategory, string> = {
+  birdiePlus: 'Birdie+',
+  par: 'Par',
+  bogey: 'Bogey',
+  doublePlus: 'Double+'
+};
+
+function categoryFor(score: number, par: number): HoleCategory | null {
+  if (score === 0) return null;
+  const diff = score - par;
+  if (diff <= -1) return 'birdiePlus';
+  if (diff === 0) return 'par';
+  if (diff === 1) return 'bogey';
+  return 'doublePlus';
+}
+
+function HolesTab({
+  holes,
+  shots,
+  bag
+}: {
+  holes: Array<{
+    id: string;
+    hole_number: number;
+    par: number;
+    strokes: number;
+    putts: number;
+    sand: boolean;
+    gir: boolean;
+    penalty_strokes: number;
+    fairway_result: string | null;
+  }>;
+  shots: Array<{
+    id: string;
+    hole_id: string;
+    shot_number: number;
+    club_id: string | null;
+    target_type: string | null;
+    target_result: string | null;
+    lie: string | null;
+    penalty_type: string | null;
+    distance: number | null;
+    distance_unit: string | null;
+    notes: string | null;
+  }>;
+  bag: Array<{ clubId: string; name: string; customName: string | null }>;
+}) {
+  const sorted = useMemo(
+    () => [...holes].sort((a, b) => a.hole_number - b.hole_number),
+    [holes]
+  );
+
+  // Unique clubs used per hole, in the order they were first hit. Looks
+  // each up in the player's bag for the display name; falls back to
+  // "Club" for orphan ids (deleted from the bag after the round).
+  const clubsByHole = useMemo(() => {
+    const out = new Map<string, string[]>();
+    for (const s of shots) {
+      if (!s.club_id) continue;
+      const arr = out.get(s.hole_id) ?? [];
+      if (!arr.includes(s.club_id)) arr.push(s.club_id);
+      out.set(s.hole_id, arr);
+    }
+    return out;
+  }, [shots]);
+
+  // Full shot list per hole, sorted by shot_number so the rendered list
+  // mirrors the chronological order they were played in.
+  const shotsByHole = useMemo(() => {
+    const out = new Map<string, typeof shots>();
+    for (const s of shots) {
+      const arr = out.get(s.hole_id) ?? [];
+      arr.push(s);
+      out.set(s.hole_id, arr);
+    }
+    for (const arr of out.values()) {
+      arr.sort((a, b) => a.shot_number - b.shot_number);
+    }
+    return out;
+  }, [shots]);
+
+  const nameForClubId = (id: string): string => {
+    const c = bag.find((b) => b.clubId === id);
+    return c ? c.customName || c.name : 'Club';
+  };
+  // Default to the first played hole; fall back to hole 1.
+  const firstPlayedIdx = sorted.findIndex((h) => h.strokes > 0);
+  const [selectedHoleNumber, setSelectedHoleNumber] = useState<number>(
+    sorted[firstPlayedIdx >= 0 ? firstPlayedIdx : 0]?.hole_number ?? 1
+  );
+
+  const selected =
+    sorted.find((h) => h.hole_number === selectedHoleNumber) ?? sorted[0];
+  if (!selected) {
+    return (
+      <Box px={2} mt={2}>
+        <Alert severity="info" variant="outlined">
+          No holes recorded for this round.
+        </Alert>
+      </Box>
+    );
+  }
+
+  const score = selected.strokes + selected.penalty_strokes;
+  const diff = score - selected.par;
+  const played = score > 0;
+  const cat = categoryFor(score, selected.par);
+
+  return (
+    <Stack spacing={2} px={2} pb={4} mt={2}>
+      {/* Horizontal hole strip — tap a card to switch the detail view. */}
+      <Box
+        sx={{
+          display: 'flex',
+          gap: 1,
+          overflowX: 'auto',
+          pb: 1,
+          WebkitOverflowScrolling: 'touch'
+        }}
+      >
+        {sorted.map((h) => {
+          const hScore = h.strokes + h.penalty_strokes;
+          const isSelected = h.hole_number === selectedHoleNumber;
+          return (
+            <Box
+              key={h.hole_number}
+              onClick={() => setSelectedHoleNumber(h.hole_number)}
+              role="button"
+              sx={{
+                minWidth: 64,
+                px: 1,
+                py: 0.75,
+                borderRadius: '5px',
+                bgcolor: isSelected ? 'rgba(22,163,74,0.22)' : 'background.paper',
+                border: 1,
+                borderColor: isSelected ? '#16a34a' : 'divider',
+                textAlign: 'center',
+                cursor: 'pointer',
+                flexShrink: 0
+              }}
+            >
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: 'block', lineHeight: 1 }}
+              >
+                Hole
+              </Typography>
+              <Typography variant="h6" sx={{ fontWeight: 800, lineHeight: 1.1 }}>
+                {h.hole_number}
+              </Typography>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: 'block', lineHeight: 1 }}
+              >
+                Par {h.par || '—'}
+                {hScore > 0 ? ` · ${hScore}` : ''}
+              </Typography>
+            </Box>
+          );
+        })}
+      </Box>
+
+      {/* Hole header — number / par on the left, score on right. Score is
+          rendered as a plain integer (no decimal) since a single round
+          can only yield a whole-stroke total per hole. */}
+      <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+        <CardContent>
+          <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+            <Box>
+              <Typography variant="h5" sx={{ fontWeight: 800 }}>
+                Hole {selected.hole_number}
+              </Typography>
+              <Typography variant="body2" color="text.secondary">
+                Par {selected.par || '—'}
+              </Typography>
+            </Box>
+            <Box textAlign="right">
+              <Typography variant="h4" sx={{ fontWeight: 800 }}>
+                {played ? score : '—'}
+              </Typography>
+              {played && (
+                <Typography
+                  variant="body2"
+                  sx={{ fontWeight: 700 }}
+                  color={diff <= 0 ? 'primary' : 'warning.main'}
+                >
+                  {diff === 0 ? 'E' : diff > 0 ? `+${diff}` : `${diff}`}
+                </Typography>
+              )}
+            </Box>
+          </Stack>
+        </CardContent>
+      </Card>
+
+      {/* Hole Stats — Putts / GIR / Fairway (3 across). The 4th slot used
+          to be Score; the section below replaces it with a full-width
+          Clubs Used card listing each club hit on this hole. */}
+      <Stack direction="row" alignItems="center" spacing={1}>
+        <FlagRoundedIcon fontSize="small" color="primary" />
+        <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+          Hole Stats
+        </Typography>
+      </Stack>
+      <Box
+        sx={{
+          display: 'grid',
+          gridTemplateColumns: 'repeat(3, 1fr)',
+          gap: 1.5
+        }}
+      >
+        <HoleStatCard
+          icon={<SportsGolfRoundedIcon fontSize="small" />}
+          value={played ? String(selected.putts) : '—'}
+          label="Putts"
+        />
+        <HoleStatCard
+          icon={<GpsFixedRoundedIcon fontSize="small" />}
+          value={played ? (selected.gir ? 'Yes' : 'No') : '—'}
+          label="GIR"
+        />
+        <HoleStatCard
+          icon={<FlagRoundedIcon fontSize="small" />}
+          value={fairwayDisplay(selected.par, selected.fairway_result)}
+          label="Fairway"
+        />
+      </Box>
+
+      {/* Clubs Used — every distinct club that contributed a shot on this
+          hole, in the order it was first hit. Pulled from the shots list
+          filtered by hole_id. */}
+      <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+        <CardContent>
+          <Stack direction="row" alignItems="center" spacing={1} mb={1}>
+            <SportsGolfRoundedIcon fontSize="small" color="primary" />
+            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+              Clubs Used
+            </Typography>
+          </Stack>
+          {(() => {
+            const clubIds = clubsByHole.get(selected.id) ?? [];
+            if (clubIds.length === 0) {
+              return (
+                <Typography variant="body2" color="text.secondary">
+                  No clubs recorded for this hole.
+                </Typography>
+              );
+            }
+            return (
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+                {clubIds.map((id) => (
+                  <Chip key={id} label={nameForClubId(id)} size="small" />
+                ))}
+              </Box>
+            );
+          })()}
+        </CardContent>
+      </Card>
+
+      {/* Shots — every recorded shot on this hole, in play order. Each row
+          shows shot #, club, distance, outcome (target_result + lie), and
+          any penalty / notes. Sourced from the shots list filtered by
+          hole_id (see shotsByHole above). */}
+      <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+        <CardContent>
+          <Stack direction="row" alignItems="center" spacing={1} mb={1}>
+            <FlagRoundedIcon fontSize="small" color="primary" />
+            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+              Shots
+            </Typography>
+          </Stack>
+          {(() => {
+            const list = shotsByHole.get(selected.id) ?? [];
+            if (list.length === 0) {
+              return (
+                <Typography variant="body2" color="text.secondary">
+                  No shots recorded for this hole.
+                </Typography>
+              );
+            }
+            return (
+              <Stack spacing={1}>
+                {list.map((s) => {
+                  const clubLabel = s.club_id ? nameForClubId(s.club_id) : 'No club';
+                  const dist = formatShotDistance(s.distance, s.distance_unit);
+                  const outcome = formatShotOutcome(s.target_type, s.target_result, s.lie);
+                  const penalty = formatPenalty(s.penalty_type);
+                  return (
+                    <Box
+                      key={s.id}
+                      sx={{
+                        display: 'grid',
+                        gridTemplateColumns: '32px 1fr auto',
+                        alignItems: 'center',
+                        columnGap: 1,
+                        rowGap: 0.25,
+                        py: 0.75,
+                        borderBottom: 1,
+                        borderColor: 'divider',
+                        '&:last-of-type': { borderBottom: 'none' }
+                      }}
+                    >
+                      <Typography
+                        variant="caption"
+                        sx={{ fontWeight: 800, color: 'text.secondary' }}
+                      >
+                        #{s.shot_number}
+                      </Typography>
+                      <Box sx={{ minWidth: 0 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 700 }} noWrap>
+                          {clubLabel}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" noWrap>
+                          {[outcome, penalty].filter(Boolean).join(' · ') || '—'}
+                          {s.notes ? ` · ${s.notes}` : ''}
+                        </Typography>
+                      </Box>
+                      <Typography
+                        variant="body2"
+                        sx={{ fontWeight: 700, textAlign: 'right' }}
+                      >
+                        {dist}
+                      </Typography>
+                    </Box>
+                  );
+                })}
+              </Stack>
+            );
+          })()}
+        </CardContent>
+      </Card>
+    </Stack>
+  );
+}
+
+// Pretty-prints distance + unit; returns "—" when distance isn't set.
+function formatShotDistance(
+  distance: number | null,
+  unit: string | null | undefined
+): string {
+  if (distance == null) return '—';
+  const u = unit === 'feet' ? 'ft' : 'yds';
+  return `${distance} ${u}`;
+}
+
+// Human label for the shot outcome combining target + result + lie. Keeps
+// the result-driven phrasing front-of-mind (Hit fairway / Missed left)
+// and only mentions the lie when it adds info (penalty / sand / fringe).
+function formatShotOutcome(
+  targetType: string | null,
+  targetResult: string | null,
+  lie: string | null
+): string {
+  // Putts use their own vocabulary — "Made", "Missed", or directional miss.
+  if (targetType === 'putt') {
+    if (targetResult === 'made') return 'Made putt';
+    if (!targetResult) return 'Putt';
+    return `Putt ${capitalize(targetResult)}`;
+  }
+  // Non-putts: hit/miss vs the target, with the lie tacked on if it's
+  // something noteworthy.
+  let outcome = '';
+  if (targetResult === 'hit') {
+    outcome = targetType === 'green' ? 'Green' : targetType === 'fairway' ? 'Fairway' : 'Hit';
+  } else if (targetResult) {
+    outcome = `Missed ${targetResult}`;
+  }
+  // Lie suffix: only call it out if it diverges from "the obvious"
+  // (green/fairway for a hit shot — already implied above).
+  const liesToCallOut: Record<string, string> = {
+    rough: 'rough',
+    bunker: 'bunker',
+    fringe: 'fringe',
+    penalty: 'penalty',
+    green: 'green'
+  };
+  const lieLabel = lie ? liesToCallOut[lie] : null;
+  if (lieLabel && lieLabel !== outcome.toLowerCase()) {
+    outcome = outcome ? `${outcome} (${lieLabel})` : capitalize(lieLabel);
+  }
+  return outcome || '—';
+}
+
+function formatPenalty(penalty: string | null): string {
+  if (!penalty) return '';
+  const labels: Record<string, string> = {
+    ob: 'OB',
+    water: 'Water',
+    lost_ball: 'Lost ball',
+    unplayable: 'Unplayable',
+    wrong_ball: 'Wrong ball',
+    bunker: 'Bunker'
+  };
+  return labels[penalty] ?? penalty;
+}
+
+function capitalize(s: string): string {
+  return s.length > 0 ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+function fairwayDisplay(par: number, result: string | null): string {
+  if (par < 4) return '—';
+  if (result === 'hit') return '100%';
+  if (result === 'left' || result === 'right' || result === 'short' || result === 'long') {
+    return '0%';
+  }
+  return '—';
+}
+
+function DistributionRow({
+  label,
+  color,
+  pct,
+  count
+}: {
+  label: string;
+  color: string;
+  pct: number;
+  count: number;
+}) {
+  return (
+    <Stack direction="row" alignItems="center" spacing={1}>
+      <Box
+        sx={{
+          width: 10,
+          height: 10,
+          borderRadius: '50%',
+          bgcolor: color,
+          flexShrink: 0
+        }}
+      />
+      <Typography variant="body2" sx={{ width: 70, color: 'text.secondary' }}>
+        {label}
+      </Typography>
+      <LinearProgress
+        variant="determinate"
+        value={pct}
+        sx={{
+          flex: 1,
+          height: 6,
+          borderRadius: '5px',
+          bgcolor: 'rgba(255,255,255,0.08)',
+          '& .MuiLinearProgress-bar': { bgcolor: color, borderRadius: '5px' }
+        }}
+      />
+      <Typography
+        variant="body2"
+        sx={{ width: 36, textAlign: 'right', fontWeight: 700 }}
+      >
+        {count}
+      </Typography>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        sx={{ width: 46, textAlign: 'right' }}
+      >
+        {pct.toFixed(1)}%
+      </Typography>
+    </Stack>
+  );
+}
+
+function HoleStatCard({
+  icon,
+  value,
+  label
+}: {
+  icon: React.ReactNode;
+  value: string;
+  label: string;
+}) {
+  return (
+    <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+      <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+        <Stack direction="row" alignItems="center" spacing={1.25}>
+          <Box
+            sx={{
+              width: 32,
+              height: 32,
+              borderRadius: '50%',
+              display: 'grid',
+              placeItems: 'center',
+              bgcolor: 'rgba(22,163,74,0.18)',
+              color: '#16a34a'
+            }}
+          >
+            {icon}
+          </Box>
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 800, lineHeight: 1 }}>
+              {value}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {label}
+            </Typography>
+          </Box>
+        </Stack>
+      </CardContent>
+    </Card>
+  );
 }
