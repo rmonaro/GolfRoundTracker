@@ -379,11 +379,26 @@ export function HoleTrackingPage() {
       ? Math.max(0, Math.round(displayYardsEarly - ballDistanceYdsEarly))
       : null;
 
+  // Strict "ball is actually on the putting surface" check — used only for
+  // the putter auto-select below. Excludes the "within ~30 yds of the pin"
+  // heuristic that `lastShotOnGreen` includes for the broader UI (zoom,
+  // aim suppression); chips from the fringe or rough should suggest a
+  // wedge, not a putter, even when you're close to the pin.
+  //   • last shot's lie was explicitly green
+  //   • last shot was a putt (you were on the green when it was taken)
+  //   • last shot was an approach to the green tagged as a hit
+  //   • the user already picked the putter for the next shot
+  const ballOnGreen =
+    lastShot?.lie === 'green' ||
+    lastShotWasPutt ||
+    (lastShot?.targetType === 'green' && lastShot?.targetResult === 'hit') ||
+    userPickedPutter;
+
   // Pre-select the user's putter when on the green. Uses the first putter in
   // the bag (most users have only one). The user-driven `selectedClubId`
   // overrides this auto-pick, but when the user already picked the putter
   // this just re-affirms it.
-  const putterAutoClubId = lastShotOnGreen
+  const putterAutoClubId = ballOnGreen
     ? bagClubs.find((c) => c.category === 'putter')?.clubId ?? null
     : null;
   // Auto-recommend club based on remaining distance to the pin. Only fires
@@ -402,7 +417,7 @@ export function HoleTrackingPage() {
     remainingYardsEarly != null &&
     remainingYardsEarly > 200;
   const recommendedClubId =
-    !lastShotOnGreen && remainingYardsEarly != null && remainingYardsEarly > 0
+    !ballOnGreen && remainingYardsEarly != null && remainingYardsEarly > 0
       ? recommendClub(bagClubs, remainingYardsEarly, {
           excludeDriver: excludeDriverForRec
         })?.clubId ?? null
