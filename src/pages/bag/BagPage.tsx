@@ -140,7 +140,7 @@ export function BagPage() {
             title="Your bag is empty"
             description="Add the clubs you actually carry. We won't assume — you're in control."
           />
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Stack spacing={1.5}>
                 <Button
@@ -568,7 +568,7 @@ function ClubFormDialog({ mode, skillLevel, gender, open, initial, onClose, onSu
   };
 
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs">
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs" PaperProps={{ sx: { borderRadius: '5px' } }}>
       <DialogTitle>{mode === 'add' ? 'Add club' : 'Edit club'}</DialogTitle>
       <DialogContent>
         <Stack spacing={2} mt={1}>
@@ -611,7 +611,7 @@ function ClubFormDialog({ mode, skillLevel, gender, open, initial, onClose, onSu
                 gap: 0.75,
                 '& .MuiToggleButton-root': {
                   minHeight: 52,
-                  borderRadius: 2,
+                  borderRadius: '5px',
                   textTransform: 'none',
                   fontWeight: 600,
                   border: '1px solid',
@@ -729,7 +729,7 @@ function ClubFormDialog({ mode, skillLevel, gender, open, initial, onClose, onSu
           {/* Live name preview */}
           <Box
             sx={{
-              borderRadius: 2,
+              borderRadius: '5px',
               border: '1px dashed',
               borderColor: 'divider',
               p: 1.5,
@@ -809,7 +809,7 @@ function NumberBoxes({
               minHeight: 56,
               fontSize: '1.25rem',
               fontWeight: 800,
-              borderRadius: 2,
+              borderRadius: '5px',
               p: 0
             }}
           >
@@ -864,6 +864,7 @@ function QuickAddDialog({ open, existing, onClose, onSubmit }: QuickAddDialogPro
       fullWidth
       maxWidth="sm"
       TransitionProps={{ onExited: () => setSelected(new Set()) }}
+      PaperProps={{ sx: { borderRadius: '5px' } }}
     >
       <DialogTitle>Quick add clubs</DialogTitle>
       <DialogContent>
@@ -925,7 +926,7 @@ interface ConfirmDialogProps {
 
 function ConfirmDialog({ open, title, body, confirmLabel, onClose, onConfirm }: ConfirmDialogProps) {
   return (
-    <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs">
+    <Dialog open={open} onClose={onClose} fullWidth maxWidth="xs" PaperProps={{ sx: { borderRadius: '5px' } }}>
       <DialogTitle>{title}</DialogTitle>
       <DialogContent>
         <Typography variant="body2" color="text.secondary">

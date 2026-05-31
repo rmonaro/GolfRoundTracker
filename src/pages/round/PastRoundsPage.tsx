@@ -76,7 +76,7 @@ export function PastRoundsPage() {
             <Card
               key={r.id}
               elevation={0}
-              sx={{ bgcolor: 'background.paper', position: 'relative' }}
+              sx={{ bgcolor: 'background.paper', position: 'relative', borderRadius: '5px' }}
             >
               {/* Delete affordance — absolute-positioned over the card so it
                   stays a separate tap target from the CardActionArea (which
@@ -167,6 +167,7 @@ export function PastRoundsPage() {
         }}
         fullWidth
         maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: '5px' } }}
       >
         <DialogTitle>Delete round?</DialogTitle>
         <DialogContent>

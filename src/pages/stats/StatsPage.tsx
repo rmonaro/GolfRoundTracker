@@ -112,7 +112,8 @@ export function StatsPage() {
         <Card
           elevation={0}
           sx={{
-            background: 'linear-gradient(135deg, rgba(46,125,50,0.4), rgba(76,175,80,0.25))'
+            background: 'linear-gradient(135deg, rgba(46,125,50,0.4), rgba(76,175,80,0.25))',
+            borderRadius: '5px'
           }}
         >
           <CardContent>
@@ -158,7 +159,7 @@ export function StatsPage() {
         )}
 
         {showTrends && stats.recentScores.length > 0 && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
                 Score Trend
@@ -176,7 +177,7 @@ export function StatsPage() {
         )}
 
         {showTrends && stats.handicapTrend.length > 0 && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
                 Handicap Differential Trend
@@ -200,7 +201,7 @@ export function StatsPage() {
         )}
 
         {topClubs.length > 0 && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
                 Most Used Clubs
@@ -218,7 +219,7 @@ export function StatsPage() {
         )}
 
         {showTrends && stats.recentDifferentials.length > 0 && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
                 Recent Differentials

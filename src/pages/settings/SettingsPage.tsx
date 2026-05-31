@@ -110,8 +110,19 @@ export function SettingsPage() {
   return (
     <Box>
       <PageHeader title="Settings" />
-      <Stack spacing={2} px={2} pb={4}>
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+      <Stack
+        spacing={2}
+        px={2}
+        pb={4}
+        sx={{
+          // Unify input + button corners with the cards on this page.
+          // Targets every MUI TextField (outlined input root) and every
+          // Button rendered anywhere inside the settings stack.
+          '& .MuiOutlinedInput-root': { borderRadius: '5px' },
+          '& .MuiButtonBase-root.MuiButton-root': { borderRadius: '5px' }
+        }}
+      >
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
               Profile
@@ -183,7 +194,7 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
               Appearance
@@ -197,7 +208,7 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
               Companion
@@ -219,7 +230,7 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
               GPS
@@ -239,7 +250,7 @@ export function SettingsPage() {
         </Card>
 
         {isAdmin && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Typography
                 variant="caption"

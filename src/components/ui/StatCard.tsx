@@ -12,7 +12,7 @@ export function StatCard({ label, value, hint, accent = 'default' }: StatCardPro
   const color =
     accent === 'default' ? 'text.primary' : (`${accent}.main` as `${typeof accent}.main`);
   return (
-    <Card elevation={0} sx={{ bgcolor: 'background.paper', height: '100%' }}>
+    <Card elevation={0} sx={{ bgcolor: 'background.paper', height: '100%', borderRadius: '5px' }}>
       <CardContent sx={{ p: 2 }}>
         <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>
           {label}

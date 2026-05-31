@@ -57,7 +57,8 @@ export function RoundHomePage() {
               bgcolor: 'background.paper',
               border: '1px solid',
               borderColor: 'primary.main',
-              position: 'relative'
+              position: 'relative',
+              borderRadius: '5px'
             }}
           >
             {/* Delete affordance — absolute-positioned over the card so the
@@ -107,7 +108,7 @@ export function RoundHomePage() {
           </Card>
         )}
 
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Stack alignItems="center" spacing={1.5} py={2}>
               <Box

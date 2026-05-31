@@ -36,7 +36,8 @@ export function HomePage() {
           <Card
             elevation={0}
             sx={{
-              background: 'linear-gradient(135deg, rgba(46,125,50,0.55), rgba(76,175,80,0.35))'
+              background: 'linear-gradient(135deg, rgba(46,125,50,0.55), rgba(76,175,80,0.35))',
+              borderRadius: '5px'
             }}
           >
             <CardActionArea onClick={() => navigate('/round/play')}>
@@ -56,7 +57,7 @@ export function HomePage() {
             variant="contained"
             size="large"
             startIcon={<PlayArrowRoundedIcon />}
-            sx={{ minHeight: 72, fontSize: '1.15rem', borderRadius: 4 }}
+            sx={{ minHeight: 72, fontSize: '1.15rem', borderRadius: '5px' }}
             onClick={() => navigate('/round/start')}
           >
             Start a Round
@@ -78,7 +79,7 @@ export function HomePage() {
         </Box>
 
         {lastRound && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardActionArea onClick={() => navigate(`/round/summary/${lastRound.id}`)}>
               <CardContent>
                 <Typography
@@ -142,7 +143,7 @@ function QuickAction({
   onClick: () => void;
 }) {
   return (
-    <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+    <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
       <CardActionArea onClick={onClick} sx={{ p: 1.5 }}>
         <Stack alignItems="center" spacing={0.5}>
           <Box sx={{ color: 'primary.main', display: 'flex' }}>{icon}</Box>
