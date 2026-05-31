@@ -1418,6 +1418,7 @@ export function HoleTrackingPage() {
             sheet pre-filled when a shot lands. Tap again to disarm. */}
         {gpsEnabled && (
           <Fab
+            variant="extended"
             color={autoTrackEnabled ? 'error' : 'default'}
             aria-label={autoTrackEnabled ? 'stop auto-tracking' : 'start auto-tracking'}
             onClick={onToggleAutoTrack}
@@ -1428,10 +1429,22 @@ export function HoleTrackingPage() {
               bottom: 'calc(16px + env(safe-area-inset-bottom))',
               right: 88,
               zIndex: 4,
-              boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+              // Pill shape with a clear outline so the labeled button reads
+              // as a distinct control rather than blending into the map.
+              borderRadius: '5px',
+              border: '1.5px solid #fbbf24',
+              textTransform: 'none',
+              fontWeight: 800,
+              px: 1.5
             }}
           >
-            {autoTrackEnabled ? <StopCircleRoundedIcon /> : <MyLocationRoundedIcon />}
+            {autoTrackEnabled ? (
+              <StopCircleRoundedIcon sx={{ mr: 0.75 }} />
+            ) : (
+              <MyLocationRoundedIcon sx={{ mr: 0.75 }} />
+            )}
+            Track
           </Fab>
         )}
         {gpsEnabled && (autoTrackEnabled || trackingError) && (
