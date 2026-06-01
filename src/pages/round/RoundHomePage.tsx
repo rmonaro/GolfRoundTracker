@@ -1,9 +1,11 @@
 import { useState } from 'react';
+import dayjs from 'dayjs';
 import {
   Alert,
   Box,
   Button,
   Card,
+  CardActionArea,
   CardContent,
   Dialog,
   DialogActions,
@@ -15,12 +17,14 @@ import {
 } from '@mui/material';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
+import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useRoundStore } from '@/stores/roundStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useRounds } from '@/features/stats/useRounds';
 import { scoreVsPar } from '@/utils/format';
 import { computeTotalScore } from '@/features/round/computeRoundTotals';
 import { roundRepo } from '@/services/roundRepo';
@@ -31,6 +35,8 @@ export function RoundHomePage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const userId = useAuthStore((s) => s.session?.user.id);
+  const { data: rounds } = useRounds();
+  const lastRound = (rounds ?? []).filter((r) => r.completed_at)[0];
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   // Tombstones the active round: deletes the row in Supabase (schema cascade
@@ -140,6 +146,59 @@ export function RoundHomePage() {
             </Stack>
           </CardContent>
         </Card>
+
+        {lastRound && (
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+            <CardActionArea onClick={() => navigate(`/round/summary/${lastRound.id}`)}>
+              <CardContent>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+                >
+                  Last Round
+                </Typography>
+                <Stack direction="row" justifyContent="space-between" alignItems="flex-end" mt={0.5}>
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="h6" noWrap>
+                      {lastRound.course_name}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {dayjs(lastRound.started_at).format('MMM D, YYYY')}
+                    </Typography>
+                  </Box>
+                  <Box textAlign="right">
+                    <Typography
+                      variant="h4"
+                      sx={{ fontWeight: 700 }}
+                      color={lastRound.score_vs_par <= 0 ? 'primary' : 'warning.main'}
+                    >
+                      {scoreVsPar(lastRound.score, lastRound.par)}
+                    </Typography>
+                    <Typography
+                      variant="body2"
+                      color="text.secondary"
+                      sx={{ fontWeight: 600 }}
+                    >
+                      {lastRound.score} strokes
+                    </Typography>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </CardActionArea>
+          </Card>
+        )}
+
+        <Button
+          variant="outlined"
+          size="large"
+          fullWidth
+          startIcon={<HistoryRoundedIcon />}
+          onClick={() => navigate('/round/history')}
+          sx={{ minHeight: 56, borderRadius: '5px' }}
+        >
+          View All Past Rounds
+        </Button>
       </Stack>
 
       <Dialog
