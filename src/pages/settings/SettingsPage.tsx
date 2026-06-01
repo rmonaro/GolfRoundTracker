@@ -208,27 +208,29 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
-        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-          <CardContent>
-            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              Companion
-            </Typography>
-            <Stack mt={1} spacing={1}>
-              <FormControlLabel
-                control={<Switch checked={watchModeEnabled} onChange={(e) => setWatchMode(e.target.checked)} />}
-                label="Enable watch UI preview"
-              />
-              <Button
-                startIcon={<WatchRoundedIcon />}
-                variant="outlined"
-                onClick={() => navigate('/watch')}
-                disabled={!watchModeEnabled}
-              >
-                Open Watch Preview
-              </Button>
-            </Stack>
-          </CardContent>
-        </Card>
+        {isAdmin && (
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+            <CardContent>
+              <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                Companion
+              </Typography>
+              <Stack mt={1} spacing={1}>
+                <FormControlLabel
+                  control={<Switch checked={watchModeEnabled} onChange={(e) => setWatchMode(e.target.checked)} />}
+                  label="Enable watch UI preview"
+                />
+                <Button
+                  startIcon={<WatchRoundedIcon />}
+                  variant="outlined"
+                  onClick={() => navigate('/watch')}
+                  disabled={!watchModeEnabled}
+                >
+                  Open Watch Preview
+                </Button>
+              </Stack>
+            </CardContent>
+          </Card>
+        )}
 
         <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>

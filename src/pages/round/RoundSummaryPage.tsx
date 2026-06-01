@@ -91,15 +91,7 @@ export function RoundSummaryPage() {
   const backPar = back.reduce((s, h) => s + h.par, 0);
 
   return (
-    <Box
-      sx={{
-        // 20px below the iOS status bar / device top (the route renders
-        // outside MobileShell, so the page has to handle safe-area-inset
-        // itself). PageHeader contributes its own 16px (pt: 2); the
-        // remaining 4px comes from this wrapper.
-        pt: 'calc(env(safe-area-inset-top) + 4px)'
-      }}
-    >
+    <Box>
       <PageHeader
         title="Round Summary"
         subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}

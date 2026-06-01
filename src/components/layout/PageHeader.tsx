@@ -1,6 +1,7 @@
 import { Box, IconButton, Typography } from '@mui/material';
 import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded';
 import { useNavigate } from 'react-router-dom';
+import { Capacitor } from '@capacitor/core';
 import type { ReactNode } from 'react';
 
 interface PageHeaderProps {
@@ -9,6 +10,12 @@ interface PageHeaderProps {
   back?: boolean | string;
   action?: ReactNode;
 }
+
+// On the Capacitor native shell the webview goes edge-to-edge (contentInset:
+// 'never'), so the title would otherwise sit under the iOS status bar / time.
+// Push it below the safe area + a small gap so it clears the time on every
+// device. Web build keeps the default `pt: 2`.
+const isNative = Capacitor.isNativePlatform();
 
 export function PageHeader({ title, subtitle, back, action }: PageHeaderProps) {
   const navigate = useNavigate();
@@ -19,7 +26,7 @@ export function PageHeader({ title, subtitle, back, action }: PageHeaderProps) {
         alignItems: 'center',
         gap: 1,
         px: 2,
-        pt: 2,
+        pt: isNative ? 'calc(env(safe-area-inset-top) + 1px)' : 2,
         pb: 1
       }}
     >
