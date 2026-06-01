@@ -5,7 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { useRoundStore } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { roundRepo } from '@/services/roundRepo';
-import { computeTotalScore } from '@/features/round/computeRoundTotals';
+import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
 import type { ClubCategory } from '@/models';
 
@@ -45,7 +45,13 @@ export function WatchPage() {
 
   const idx = Math.max(0, Math.min(active.holes.length - 1, active.currentHoleIndex));
   const hole = active.holes[idx];
-  const total = computeTotalScore(active.holes);
+  // Running totals across completed holes only — matches the iOS watch
+  // display ("--" until the first hole is finalized).
+  const runningTotals = computeCompletedTotals(active);
+  const scoreLabel =
+    runningTotals.completedCount === 0
+      ? '-- · --'
+      : `${runningTotals.score} · ${scoreVsPar(runningTotals.score, runningTotals.par)}`;
 
   const onAddShotForCategory = async (category: ClubCategory) => {
     const club = bag.find((c) => c.category === category);
@@ -108,7 +114,7 @@ export function WatchPage() {
               Hole
             </Typography>
             <Typography variant="caption" sx={{ opacity: 0.7 }}>
-              {total} · {scoreVsPar(total, active.totalPar)}
+              {scoreLabel}
             </Typography>
           </Stack>
           <Stack direction="row" justifyContent="space-between" alignItems="baseline">

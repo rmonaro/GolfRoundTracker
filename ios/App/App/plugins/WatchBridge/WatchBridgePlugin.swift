@@ -2,6 +2,19 @@ import Foundation
 import Capacitor
 import WatchConnectivity
 
+/// Custom bridge controller — required so the in-app `WatchBridgePlugin`
+/// (which lives in the App target rather than a Pod / SPM module) gets
+/// registered with Capacitor's plugin registry. Without this the JS side
+/// gets `UNIMPLEMENTED` when it calls any WatchBridge method.
+///
+/// Wired into `Main.storyboard` via customClass + customModule="App".
+@objc(BridgeViewController)
+public class BridgeViewController: CAPBridgeViewController {
+    public override func capacitorDidLoad() {
+        bridge?.registerPluginInstance(WatchBridgePlugin())
+    }
+}
+
 /// Capacitor plugin that bridges the JS side of the iOS app to the paired
 /// Apple Watch via WatchConnectivity.
 ///
@@ -30,6 +43,14 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         CAPPluginMethod(name: "isReachable", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise)
     ]
+
+    /// Latest snapshot received from JS while the session was still
+    /// activating. WCSession.activate() is async — the JS layer can (and
+    /// does) fire sendState during the activation window. Latest-wins:
+    /// we only need the most recent context to flush once activation
+    /// completes, since `updateApplicationContext` itself coalesces.
+    private var pendingState: [String: Any]?
+    private let queueLock = NSLock()
 
     /// Activate the WCSession. Idempotent — safe to call from JS on every
     /// app launch. No-ops if WatchConnectivity isn't supported (iPad, etc).
@@ -63,19 +84,59 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
     /// Send the latest round-state snapshot to the watch. Uses
     /// `updateApplicationContext` so only the most recent state is delivered
     /// (Apple coalesces queued contexts).
+    ///
+    /// If the session hasn't finished activating yet, the state is stashed
+    /// and flushed from `activationDidCompleteWith` instead of rejected.
+    /// This keeps the JS side simple — it can fire-and-forget without
+    /// worrying about the activation race.
     @objc func sendState(_ call: CAPPluginCall) {
         guard let state = call.getObject("state") else {
             call.reject("Missing required `state` object")
             return
         }
-        guard WCSession.isSupported(),
-              WCSession.default.activationState == .activated else {
-            call.reject("WCSession not activated")
+        guard WCSession.isSupported() else {
+            // No watch hardware (iPad). Resolve quietly so JS doesn't log.
+            call.resolve(["delivered": false, "reason": "unsupported"])
+            return
+        }
+        let session = WCSession.default
+        // Make sure activation is in flight if nothing called activate() yet.
+        if session.delegate == nil {
+            session.delegate = self
+        }
+        if session.activationState == .notActivated {
+            session.activate()
+        }
+        if session.activationState != .activated {
+            queueLock.lock()
+            pendingState = state
+            queueLock.unlock()
+            call.resolve(["delivered": false, "reason": "activating"])
+            return
+        }
+        // No paired watch (common: no watch sim attached, or user has no
+        // Apple Watch). Stash the snapshot in case pairing happens later
+        // and resolve cleanly — rejecting here would spam the JS console
+        // every time the round state changes.
+        guard session.isPaired else {
+            queueLock.lock()
+            pendingState = state
+            queueLock.unlock()
+            call.resolve(["delivered": false, "reason": "unpaired"])
+            return
+        }
+        // Watch is paired but the companion app isn't installed yet.
+        // Same treatment — no error, just hold the latest snapshot.
+        guard session.isWatchAppInstalled else {
+            queueLock.lock()
+            pendingState = state
+            queueLock.unlock()
+            call.resolve(["delivered": false, "reason": "watchAppNotInstalled"])
             return
         }
         do {
-            try WCSession.default.updateApplicationContext(state)
-            call.resolve()
+            try session.updateApplicationContext(state)
+            call.resolve(["delivered": true])
         } catch {
             call.reject("updateApplicationContext failed: \(error.localizedDescription)")
         }
@@ -92,6 +153,27 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
             "activationState": activationState.rawValue,
             "error": error?.localizedDescription ?? NSNull()
         ])
+        // Flush any state that JS pushed while activation was still in
+        // flight. Latest-wins: only the most recent pending snapshot is
+        // applied, matching updateApplicationContext's own coalescing.
+        if activationState == .activated {
+            queueLock.lock()
+            let toFlush = pendingState
+            pendingState = nil
+            queueLock.unlock()
+            if let pending = toFlush {
+                do {
+                    try session.updateApplicationContext(pending)
+                } catch {
+                    // Surface to JS via the activation event so the user
+                    // can see what went wrong in the console.
+                    notifyListeners("activationDidComplete", data: [
+                        "activationState": activationState.rawValue,
+                        "error": "pending flush failed: \(error.localizedDescription)"
+                    ])
+                }
+            }
+        }
     }
 
     public func sessionDidBecomeInactive(_ session: WCSession) {

@@ -16,13 +16,19 @@ struct WatchRoundState: Equatable {
     let distanceFeet: Int?
     let scoreVsPar: String?
     let shotsThisHole: Int?
+    let puttsThisHole: Int?
+    let suggestedClubId: String?
+    let selectedClubId: String?
+    let recordingShot: Bool
     let bag: [WatchClub]
 
     static let empty = WatchRoundState(
         active: false,
         courseName: nil, holeNumber: nil, holesPlayed: nil, par: nil,
         distanceYards: nil, distanceFeet: nil, scoreVsPar: nil,
-        shotsThisHole: nil, bag: []
+        shotsThisHole: nil, puttsThisHole: nil,
+        suggestedClubId: nil, selectedClubId: nil,
+        recordingShot: false, bag: []
     )
 
     init(
@@ -35,6 +41,10 @@ struct WatchRoundState: Equatable {
         distanceFeet: Int? = nil,
         scoreVsPar: String? = nil,
         shotsThisHole: Int? = nil,
+        puttsThisHole: Int? = nil,
+        suggestedClubId: String? = nil,
+        selectedClubId: String? = nil,
+        recordingShot: Bool = false,
         bag: [WatchClub] = []
     ) {
         self.active = active
@@ -46,6 +56,10 @@ struct WatchRoundState: Equatable {
         self.distanceFeet = distanceFeet
         self.scoreVsPar = scoreVsPar
         self.shotsThisHole = shotsThisHole
+        self.puttsThisHole = puttsThisHole
+        self.suggestedClubId = suggestedClubId
+        self.selectedClubId = selectedClubId
+        self.recordingShot = recordingShot
         self.bag = bag
     }
 
@@ -61,6 +75,10 @@ struct WatchRoundState: Equatable {
         self.distanceFeet = dict["distanceFeet"] as? Int
         self.scoreVsPar = dict["scoreVsPar"] as? String
         self.shotsThisHole = dict["shotsThisHole"] as? Int
+        self.puttsThisHole = dict["puttsThisHole"] as? Int
+        self.suggestedClubId = dict["suggestedClubId"] as? String
+        self.selectedClubId = dict["selectedClubId"] as? String
+        self.recordingShot = (dict["recordingShot"] as? Bool) ?? false
         if let rawBag = dict["bag"] as? [[String: Any]] {
             self.bag = rawBag.compactMap { WatchClub(dict: $0) }
         } else {

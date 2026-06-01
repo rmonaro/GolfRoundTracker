@@ -26,7 +26,7 @@ import { useRoundStore } from '@/stores/roundStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useRounds } from '@/features/stats/useRounds';
 import { scoreVsPar } from '@/utils/format';
-import { computeTotalScore } from '@/features/round/computeRoundTotals';
+import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
 import { roundRepo } from '@/services/roundRepo';
 
 export function RoundHomePage() {
@@ -95,11 +95,24 @@ export function RoundHomePage() {
               <Typography variant="h5" sx={{ mt: 0.5 }}>
                 {active.courseName}
               </Typography>
-              <Stack direction="row" spacing={3} mt={1}>
-                <Stat label="Holes" value={`${active.holesPlayed}`} />
-                <Stat label="Score" value={`${computeTotalScore(active.holes)}`} />
-                <Stat label="vs Par" value={scoreVsPar(computeTotalScore(active.holes), active.totalPar)} />
-              </Stack>
+              {(() => {
+                // Running totals across completed holes only. The current
+                // (in-progress) hole is excluded so partial strokes don't
+                // skew the round-wide read. Shows "--" until the first
+                // hole is finalized.
+                const t = computeCompletedTotals(active);
+                const hasComplete = t.completedCount > 0;
+                return (
+                  <Stack direction="row" spacing={3} mt={1}>
+                    <Stat label="Holes" value={`${active.holesPlayed}`} />
+                    <Stat label="Score" value={hasComplete ? `${t.score}` : '--'} />
+                    <Stat
+                      label="vs Par"
+                      value={hasComplete ? scoreVsPar(t.score, t.par) : '--'}
+                    />
+                  </Stack>
+                );
+              })()}
               <Button
                 variant="contained"
                 size="large"

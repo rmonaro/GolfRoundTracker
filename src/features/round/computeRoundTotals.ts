@@ -22,6 +22,26 @@ export function computeTotalPar(holes: LocalHole[]): number {
   return holes.reduce((sum, h) => sum + (h.par || 0), 0);
 }
 
+/**
+ * Running totals across only *completed* holes — holes the user has
+ * navigated past (`idx < currentHoleIndex`). The current hole is
+ * excluded so the score on the in-progress hole doesn't move the
+ * round-wide total mid-shot.
+ *
+ * `completedCount === 0` means no holes have been finished yet —
+ * display sites should render "--" instead of "E" in that case so
+ * the user doesn't see a false "even with par" reading at the start.
+ */
+export function computeCompletedTotals(active: {
+  holes: LocalHole[];
+  currentHoleIndex: number;
+}): { score: number; par: number; completedCount: number } {
+  const completed = active.holes.slice(0, active.currentHoleIndex);
+  const score = completed.reduce((s, h) => s + holeTotalScore(h), 0);
+  const par = completed.reduce((s, h) => s + (h.par || 0), 0);
+  return { score, par, completedCount: completed.length };
+}
+
 export interface RoundSnapshotStats {
   totalScore: number;
   totalPar: number;

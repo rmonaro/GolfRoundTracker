@@ -6,11 +6,24 @@ import CoreLocation
 struct ShotRecordFlow: View {
     @EnvironmentObject var session: WatchSession
     @Binding var isPresented: Bool
+    /// Optional pre-selected club id (passed by HoleHomeView so the watch
+    /// opens the flow already on the phone's suggested/selected club).
+    /// Nil falls back to the legacy two-step flow that starts on the
+    /// picker.
+    let initialClubId: String?
 
     @State private var step: Step = .pickClub
     @State private var selectedClubId: String?
 
     enum Step { case pickClub, pickResult }
+
+    init(isPresented: Binding<Bool>, initialClubId: String? = nil) {
+        self._isPresented = isPresented
+        self.initialClubId = initialClubId
+        // Seed the state from the prop so .onAppear isn't required.
+        self._selectedClubId = State(initialValue: initialClubId)
+        self._step = State(initialValue: initialClubId != nil ? .pickResult : .pickClub)
+    }
 
     var body: some View {
         NavigationStack {

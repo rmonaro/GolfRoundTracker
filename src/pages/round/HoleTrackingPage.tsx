@@ -40,6 +40,7 @@ import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
 import {
   AddShotSheet,
@@ -55,7 +56,7 @@ import { useHoleLayout } from '@/features/course/useHoleLayout';
 import { metersToYards } from '@/features/course/distance';
 import { recommendClub } from '@/features/course/HoleLayout';
 import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
-import { computeTotalScore } from '@/features/round/computeRoundTotals';
+import { computeCompletedTotals, computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
 import { roundRepo } from '@/services/roundRepo';
 import { bagRepo } from '@/services/bagRepo';
@@ -231,16 +232,16 @@ export function HoleTrackingPage() {
 
   const holeScore = strokes + penaltyStrokes;
 
-  // Round-wide totals for the Score pill in the map overlay. Pulls strokes +
-  // penalties across every hole played so far. Par sums only holes with at
-  // least one recorded shot — so an unplayed hole 18 doesn't drag the diff
-  // toward "huge under par" early in the round. `scoreVsPar` returns "+3",
-  // "-2", "E".
-  const totalRoundScore = computeTotalScore(active.holes);
-  const totalRoundPar = active.holes
-    .filter((h) => h.shots.length > 0)
-    .reduce((s, h) => s + h.par, 0);
-  const totalRoundDiff = scoreVsPar(totalRoundScore, totalRoundPar);
+  // Round-wide totals for the Score pill in the map overlay. Only counts
+  // holes the user has navigated past — the in-progress hole's running
+  // strokes don't move the round total. Displays "--" until the first
+  // hole is finished so the user doesn't see a misleading "E" at the
+  // very start.
+  const completedTotals = computeCompletedTotals(active);
+  const totalRoundDiff =
+    completedTotals.completedCount === 0
+      ? '--'
+      : scoreVsPar(completedTotals.score, completedTotals.par);
 
   // Cumulative distance traveled along the playing line. Used by HoleLayout's
   // aim mode to project the ball's current position along the centerline so
@@ -425,6 +426,19 @@ export function HoleTrackingPage() {
   const defaultClubId = selectedClubId ?? putterAutoClubId ?? recommendedClubId;
   const selectedClub = bagClubs.find((c) => c.clubId === defaultClubId) ?? null;
 
+  // Mirror the phone's local UI state into the watch hints store so the
+  // root-level useWatchSync can include it in the next snapshot push.
+  // `recordingShot` flips true whenever the user has either staged a landing
+  // point (pendingGps) or opened the shot-record sheet — those are the two
+  // states where the watch should switch to "Recording: <club>" mode.
+  const setWatchSelectedClubId = useWatchHintsStore((s) => s.setSelectedClubId);
+  const setWatchRecordingShot = useWatchHintsStore((s) => s.setRecordingShot);
+  useEffect(() => {
+    setWatchSelectedClubId(defaultClubId ?? null);
+  }, [defaultClubId, setWatchSelectedClubId]);
+  useEffect(() => {
+    setWatchRecordingShot(shotSheet || pendingGps != null);
+  }, [shotSheet, pendingGps, setWatchRecordingShot]);
   // Reset the user club pick whenever the hole changes — each new hole starts
   // with a blank slate so the picker doesn't carry e.g. a wedge over to a tee
   // shot on the next hole.

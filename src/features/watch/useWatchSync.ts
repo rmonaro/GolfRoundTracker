@@ -1,11 +1,13 @@
 import { useEffect, useRef } from 'react';
 import { useRoundStore } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
+import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { useHoleLayout } from '@/features/course/useHoleLayout';
 import { metersToYards } from '@/features/course/distance';
 import { scoreVsPar } from '@/utils/format';
+import { recommendClub } from '@/features/course/HoleLayout';
 import { watchBridge, type WatchRoundState } from '@/services/watchBridge';
-import { computeTotalScore } from '@/features/round/computeRoundTotals';
+import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
 
 /**
  * Subscribe the watch to the current round. Activates WCSession on mount and
@@ -21,6 +23,8 @@ import { computeTotalScore } from '@/features/round/computeRoundTotals';
 export function useWatchSync() {
   const active = useRoundStore((s) => s.active);
   const bag = useBagStore((s) => s.clubs);
+  const selectedClubId = useWatchHintsStore((s) => s.selectedClubId);
+  const recordingShot = useWatchHintsStore((s) => s.recordingShot);
 
   // Layout query for the current hole — gives us the OSM par + centerline
   // distance for the distance-to-pin reading. Skips when there's no round.
@@ -53,7 +57,9 @@ export function useWatchSync() {
         layoutQuery.data?.hole.centerline_distance_m != null
           ? Math.round(metersToYards(layoutQuery.data.hole.centerline_distance_m))
           : null,
-      bag
+      bag,
+      selectedClubId,
+      recordingShot
     });
     const serialized = JSON.stringify(snapshot);
     if (serialized === lastSentRef.current) return;
@@ -61,7 +67,7 @@ export function useWatchSync() {
     watchBridge.sendState(snapshot).catch((err) => {
       console.warn('[watch-sync] sendState failed', err);
     });
-  }, [active, currentHole, layoutQuery.data, bag]);
+  }, [active, currentHole, layoutQuery.data, bag, selectedClubId, recordingShot]);
 }
 
 interface SnapshotInputs {
@@ -74,6 +80,8 @@ interface SnapshotInputs {
   osmPar: number | null;
   osmYards: number | null;
   bag: ReturnType<typeof useBagStore.getState>['clubs'];
+  selectedClubId: string | null;
+  recordingShot: boolean;
 }
 
 function buildSnapshot({
@@ -81,7 +89,9 @@ function buildSnapshot({
   currentHole,
   osmPar,
   osmYards,
-  bag
+  bag,
+  selectedClubId,
+  recordingShot
 }: SnapshotInputs): WatchRoundState {
   if (!active || !currentHole) {
     return { active: false };
@@ -99,11 +109,14 @@ function buildSnapshot({
   const distanceYards =
     displayYards != null ? Math.max(0, Math.round(displayYards - ballDistanceYds)) : null;
 
-  // Round-wide par vs score (matches the phone's Score pill formatting).
-  const totalScore = computeTotalScore(active.holes);
-  const totalPar = active.holes
-    .filter((h) => h.shots.length > 0)
-    .reduce((s, h) => s + h.par, 0);
+  // Round-wide par vs score, completed-holes-only so the watch matches
+  // the phone's running Score pill. Shows "--" until the first hole is
+  // finalized.
+  const completedTotals = computeCompletedTotals(active);
+  const watchScore =
+    completedTotals.completedCount === 0
+      ? '--'
+      : scoreVsPar(completedTotals.score, completedTotals.par);
 
   // Slim the bag down to what the watch UI actually renders.
   const slimBag = bag.map((c) => ({
@@ -112,6 +125,21 @@ function buildSnapshot({
     isPutter: c.category === 'putter',
     typicalYards: c.typicalDistanceYards ?? null
   }));
+
+  // Putts on this hole — same heuristic the phone uses for the Score card.
+  const puttsThisHole = currentHole.shots.filter((s) => s.targetType === 'putt').length;
+
+  // Suggested club — mirrors the phone's recommender. Skipped when there's
+  // no distance to work with or when the last shot landed on the green
+  // (the phone hides the suggestion in that case too).
+  const lastShot = currentHole.shots[currentHole.shots.length - 1];
+  const ballOnGreen = lastShot?.lie === 'green';
+  const suggested =
+    distanceYards != null && distanceYards > 0 && !ballOnGreen
+      ? recommendClub(bag, distanceYards, {
+          excludeDriver: ballDistanceM > 0 && distanceYards > 200
+        })
+      : null;
 
   return {
     active: true,
@@ -124,8 +152,12 @@ function buildSnapshot({
     // watch app to compute or omit. (Phone-side logic relies on lastShot GPS
     // which isn't always populated.)
     distanceFeet: null,
-    scoreVsPar: scoreVsPar(totalScore, totalPar),
+    scoreVsPar: watchScore,
     shotsThisHole: currentHole.shots.length,
+    puttsThisHole,
+    suggestedClubId: suggested?.clubId ?? null,
+    selectedClubId,
+    recordingShot,
     bag: slimBag
   };
 }

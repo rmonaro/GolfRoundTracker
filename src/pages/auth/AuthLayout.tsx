@@ -1,5 +1,6 @@
 import { Box, Stack, Typography } from '@mui/material';
 import { Outlet } from 'react-router-dom';
+import appIconUrl from '@/app/assets/AppIcon.png';
 
 export function AuthLayout() {
   return (
@@ -18,20 +19,17 @@ export function AuthLayout() {
     >
       <Stack alignItems="center" spacing={1} mt={2}>
         <Box
+          component="img"
+          src={appIconUrl}
+          alt="Golf Round Tracker"
           sx={{
             width: 64,
             height: 64,
             borderRadius: 4,
-            display: 'grid',
-            placeItems: 'center',
-            bgcolor: 'primary.main',
-            color: 'primary.contrastText',
-            fontWeight: 800,
-            fontSize: 28
+            objectFit: 'cover',
+            display: 'block'
           }}
-        >
-          GT
-        </Box>
+        />
         <Typography variant="h5">Golf Round Tracker</Typography>
         <Typography variant="body2" color="text.secondary">
           Score, shot, and handicap in one place.

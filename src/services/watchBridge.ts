@@ -19,6 +19,18 @@ export interface WatchRoundState {
   /** "+1", "-2", "E" — the same string shown in the phone's Score pill. */
   scoreVsPar?: string;
   shotsThisHole?: number;
+  /** Number of putts already taken on the current hole. */
+  puttsThisHole?: number;
+  /** Club the phone's recommender would suggest for the remaining yardage. */
+  suggestedClubId?: string | null;
+  /** Currently-selected club on the phone (overrides suggestion if set). */
+  selectedClubId?: string | null;
+  /**
+   * True when the phone has its record-shot sheet open or a pending landing
+   * point staged. Switches the watch into "recording" mode showing just the
+   * selected club big with tap-to-change.
+   */
+  recordingShot?: boolean;
   /**
    * Slim club list the watch can render. Putters land in their own bucket on
    * the watch UI so we mark them; everything else is just name + (optional)
@@ -74,6 +86,29 @@ interface WatchBridgeRawPlugin {
 const Raw = registerPlugin<WatchBridgeRawPlugin>('WatchBridge');
 
 /**
+ * Recursively drop keys whose values are null or undefined. WatchConnectivity
+ * rejects any payload containing NSNull, so we filter before crossing the
+ * bridge. Arrays are mapped through (their cleaned elements are kept even
+ * if a sibling key was dropped); plain objects have null/undefined fields
+ * removed. Non-object scalars pass through untouched.
+ */
+function stripNulls<T>(value: T): T {
+  if (value === null || value === undefined) return value;
+  if (Array.isArray(value)) {
+    return value.map((v) => stripNulls(v)) as unknown as T;
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      if (v === null || v === undefined) continue;
+      out[k] = stripNulls(v);
+    }
+    return out as unknown as T;
+  }
+  return value;
+}
+
+/**
  * Web/Android no-op fallback. Lets the same code paths run in browser dev
  * without crashing — calls resolve as if there's no watch present.
  */
@@ -95,7 +130,13 @@ export const watchBridge = {
   /** Push the latest round snapshot to the watch (latest-wins coalescing). */
   async sendState(state: WatchRoundState) {
     if (!isIOSNative) return;
-    await Raw.sendState({ state });
+    // WCSession.updateApplicationContext rejects payloads containing
+    // unsupported types — and JS `null` bridges to Swift `NSNull`, which
+    // counts as unsupported. Strip null/undefined recursively so the
+    // watch sees missing keys (which its dict decoder already handles
+    // via `dict["x"] as? T` returning nil).
+    const cleaned = stripNulls(state) as WatchRoundState;
+    await Raw.sendState({ state: cleaned });
   },
 
   /**
