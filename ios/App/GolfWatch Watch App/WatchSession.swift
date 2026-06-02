@@ -198,11 +198,53 @@ final class WatchSession: NSObject, ObservableObject {
     /// so a stop-shot doesn't kill the live distance display.
     private var continuousLocationActive: Bool = false
 
+    /// Rolling buffer of recent acceptable GPS fixes. Used to pick the
+    /// most accurate one at capture time instead of trusting whatever
+    /// happened to land in `lastLocation` at the exact moment the user
+    /// tapped — a single noisy fix arriving on tap can throw the
+    /// recorded shot position by 100m+.
+    private var recentFixes: [CLLocation] = []
+
+    /// Hard accuracy floor for accepting a fix into `lastLocation` /
+    /// `recentFixes`. Anything worse than this on a watch GPS is no
+    /// better than guessing — drop the fix entirely. Negative values
+    /// (Core Location's "invalid fix" signal) are also dropped.
+    private static let MAX_ACCURACY_M: CLLocationAccuracy = 30
+    /// How far back to look when picking the best fix at capture. Older
+    /// fixes are dropped from the buffer so a stale "good" fix from
+    /// 30 seconds ago can't outvote a fresh one.
+    private static let FIX_WINDOW_S: TimeInterval = 5
+
     override init() {
         super.init()
         locationManager.delegate = self
         locationManager.desiredAccuracy = kCLLocationAccuracyBest
+        // Get every fix the OS produces so the buffer can pick the
+        // most accurate one. Default `distanceFilter` would drop
+        // fixes that haven't moved enough — at golf walking speed
+        // that's most of them.
+        locationManager.distanceFilter = kCLDistanceFilterNone
         locationAuthStatus = locationManager.authorizationStatus
+    }
+
+    /// Pick the best fix from the rolling buffer (lowest horizontal
+    /// accuracy in the recent window). Falls back to `lastLocation`
+    /// when the buffer is empty, then to nil. This is what gets
+    /// recorded as the shot's start / end position.
+    @MainActor
+    private func bestRecentFix() -> CLLocation? {
+        pruneRecentFixes()
+        if let best = recentFixes.min(by: { $0.horizontalAccuracy < $1.horizontalAccuracy }) {
+            return best
+        }
+        return lastLocation
+    }
+
+    /// Trim fixes older than FIX_WINDOW_S from the buffer.
+    @MainActor
+    private func pruneRecentFixes() {
+        let cutoff = Date().addingTimeInterval(-Self.FIX_WINDOW_S)
+        recentFixes.removeAll { $0.timestamp < cutoff }
     }
 
     func activate() {
@@ -270,17 +312,26 @@ final class WatchSession: NSObject, ObservableObject {
     }
 
     /// Capture a single high-accuracy GPS fix and stash it as the pending
-    /// shot start. Caller should pair this with `captureEndAndSend(...)`.
+    /// shot start. Pulls the most accurate recent fix rather than just
+    /// whatever happened to be in `lastLocation` at the exact moment of
+    /// tap — that pattern was causing wild start/end positions when a
+    /// noisy fix arrived on the click.
     func captureShotStart() {
-        pendingShotStart = lastLocation
+        pendingShotStart = bestRecentFix()
         locationManager.startUpdatingLocation()
     }
 
-    /// Stop GPS updates and emit a `recordShot` with the current location as
-    /// the end. Clears the pending start so the next shot starts fresh.
+    /// Stop GPS updates and emit a `recordShot` with the best recent
+    /// fix as the end position. Clears the pending start so the next
+    /// shot starts fresh.
     func captureEndAndSend(clubId: String?, targetType: String, targetResult: String) {
-        locationManager.stopUpdatingLocation()
-        let end = lastLocation
+        let end = bestRecentFix()
+        // Don't stop continuous updates if a separate caller (live
+        // distance-to-pin) is still using them. The continuous-tracking
+        // toggle handles its own teardown.
+        if !continuousLocationActive {
+            locationManager.stopUpdatingLocation()
+        }
         let start = pendingShotStart
         pendingShotStart = nil
         send(.recordShot(
@@ -334,8 +385,26 @@ extension WatchSession: CLLocationManagerDelegate {
         didUpdateLocations locations: [CLLocation]
     ) {
         guard let fix = locations.last else { return }
+        // Drop fixes that Core Location couldn't trust: negative
+        // accuracy = "no valid fix", and anything worse than
+        // MAX_ACCURACY_M is too noisy to use as a shot position at
+        // golf yardages. This is the line that stops a single bad
+        // fix from overwriting `lastLocation` right when the user
+        // taps Track / End Shot.
+        if fix.horizontalAccuracy < 0 { return }
+        if fix.horizontalAccuracy > WatchSession.MAX_ACCURACY_M { return }
+        // Also drop ancient fixes the OS might be replaying (e.g.,
+        // after a long background pause).
+        if fix.timestamp.timeIntervalSinceNow < -10 { return }
         Task { @MainActor in
             self.lastLocation = fix
+            self.recentFixes.append(fix)
+            // Cap the buffer so it can't grow unbounded if the OS
+            // floods updates faster than we prune.
+            if self.recentFixes.count > 30 {
+                self.recentFixes.removeFirst(self.recentFixes.count - 30)
+            }
+            self.pruneRecentFixes()
         }
     }
 
