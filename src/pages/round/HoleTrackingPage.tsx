@@ -899,8 +899,7 @@ export function HoleTrackingPage() {
           return;
         }
         if (msg.type === 'recordShot') {
-          // Lie auto-fill mirrors AddShotSheet's logic. Distance left null —
-          // the user can backfill on the phone if they care. GPS pair flows
+          // Lie auto-fill mirrors AddShotSheet's logic. GPS pair flows
           // through so the next aim line + lastShotEndDistFromGreen reads
           // the actual landing position.
           const club = bagClubsRef.current.find((c) => c.clubId === msg.clubId) ?? null;
@@ -926,12 +925,40 @@ export function HoleTrackingPage() {
                 : (msg.targetResult as import('@/models').ShotResult);
           }
 
+          // Compute the shot distance from the watch's GPS pair so the
+          // Hole Overview shows real yardage (or feet, for putts) instead
+          // of "—". The watch already sends start_lat/lng + end_lat/lng
+          // when it captures a shot via the club picker; do the haversine
+          // here so the saved row mirrors what the phone-tap flow stores.
+          let watchDistance: number | null = null;
+          let watchDistanceUnit: import('@/models').DistanceUnit | null = null;
+          let watchCalculatedDistanceM: number | null = null;
+          if (
+            msg.startLat != null &&
+            msg.startLng != null &&
+            msg.endLat != null &&
+            msg.endLng != null
+          ) {
+            watchCalculatedDistanceM = haversineMeters(
+              { lat: msg.startLat, lng: msg.startLng, accuracyM: 0, timestamp: 0 },
+              { lat: msg.endLat, lng: msg.endLng, accuracyM: 0, timestamp: 0 }
+            );
+            if (msg.targetType === 'putt') {
+              // Putts in feet — matches the rest of the app's convention.
+              watchDistance = Math.round(watchCalculatedDistanceM * 3.28084);
+              watchDistanceUnit = 'feet';
+            } else {
+              watchDistance = Math.round(watchCalculatedDistanceM * 1.0936133);
+              watchDistanceUnit = 'yards';
+            }
+          }
+
           onSubmitShotRef
             .current({
               clubId: msg.clubId,
               clubCategory: club?.category ?? null,
-              distance: null,
-              distanceUnit: null,
+              distance: watchDistance,
+              distanceUnit: watchDistanceUnit,
               targetType: msg.targetType,
               targetResult: msg.targetResult,
               lie,
@@ -942,7 +969,7 @@ export function HoleTrackingPage() {
               startLng: msg.startLng ?? null,
               endLat: msg.endLat ?? null,
               endLng: msg.endLng ?? null,
-              calculatedDistance: null
+              calculatedDistance: watchCalculatedDistanceM
             })
             .catch((err) => {
               console.error('[watch] recordShot from watch failed', err);

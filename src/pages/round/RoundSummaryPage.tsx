@@ -42,7 +42,39 @@ import { useAuthStore } from '@/stores/authStore';
 import { toAppError } from '@/services/errors';
 import { pct, scoreVsPar, durationLabel, fullName } from '@/utils/format';
 import { Scorecard } from '@/components/Scorecard';
-import type { Round, RoundHole } from '@/models';
+import { AddShotSheet, type ShotEditDraft } from '@/features/round/AddShotSheet';
+import type {
+  Round,
+  RoundHole,
+  BagClub,
+  DistanceUnit,
+  Lie,
+  PenaltyType,
+  TargetResult,
+  TargetType
+} from '@/models';
+
+/** Shape of a shot row as it flows through HolesTab. Mirrors the
+ *  Supabase ShotRow but typed as plain interface so the parent doesn't
+ *  need to import the DB types. */
+interface HolesTabShot {
+  id: string;
+  hole_id: string;
+  shot_number: number;
+  club_id: string | null;
+  target_type: string | null;
+  target_result: string | null;
+  lie: string | null;
+  penalty_type: string | null;
+  distance: number | null;
+  distance_unit: string | null;
+  notes: string | null;
+  start_lat: number | null;
+  start_lng: number | null;
+  end_lat: number | null;
+  end_lng: number | null;
+  calculated_distance: number | null;
+}
 
 export function RoundSummaryPage() {
   const { roundId } = useParams<{ roundId: string }>();
@@ -225,7 +257,9 @@ export function RoundSummaryPage() {
       </Stack>
       )}
 
-      {tab === 'holes' && <HolesTab holes={holes} shots={shots} bag={bag} />}
+      {tab === 'holes' && (
+        <HolesTab roundId={round.id} holes={holes} shots={shots} bag={bag} />
+      )}
 
       <EditRoundDialog
         open={editOpen}
@@ -710,10 +744,12 @@ function categoryFor(score: number, par: number): HoleCategory | null {
 }
 
 function HolesTab({
+  roundId,
   holes,
   shots,
   bag
 }: {
+  roundId: string;
   holes: Array<{
     id: string;
     hole_number: number;
@@ -725,21 +761,78 @@ function HolesTab({
     penalty_strokes: number;
     fairway_result: string | null;
   }>;
-  shots: Array<{
-    id: string;
-    hole_id: string;
-    shot_number: number;
-    club_id: string | null;
-    target_type: string | null;
-    target_result: string | null;
-    lie: string | null;
-    penalty_type: string | null;
-    distance: number | null;
-    distance_unit: string | null;
-    notes: string | null;
-  }>;
-  bag: Array<{ clubId: string; name: string; customName: string | null }>;
+  shots: Array<HolesTabShot>;
+  bag: BagClub[];
 }) {
+  const queryClient = useQueryClient();
+  const [editingShot, setEditingShot] = useState<HolesTabShot | null>(null);
+
+  const editingDraft: ShotEditDraft | null = useMemo(() => {
+    if (!editingShot) return null;
+    return {
+      clubId: editingShot.club_id,
+      distance: editingShot.distance,
+      distanceUnit: editingShot.distance_unit as DistanceUnit | null,
+      targetType: editingShot.target_type as TargetType | null,
+      targetResult: editingShot.target_result as TargetResult | null,
+      lie: editingShot.lie as Lie | null,
+      penaltyType: editingShot.penalty_type as PenaltyType | null,
+      notes: editingShot.notes,
+      startLat: editingShot.start_lat ?? null,
+      startLng: editingShot.start_lng ?? null,
+      endLat: editingShot.end_lat ?? null,
+      endLng: editingShot.end_lng ?? null,
+      calculatedDistance: editingShot.calculated_distance ?? null
+    };
+  }, [editingShot]);
+
+  const editingHolePar = useMemo(() => {
+    if (!editingShot) return 4;
+    return holes.find((h) => h.id === editingShot.hole_id)?.par ?? 4;
+  }, [editingShot, holes]);
+
+  const onSubmitEdit = async (payload: {
+    clubId: string | null;
+    distance: number | null;
+    distanceUnit: DistanceUnit | null;
+    targetType: TargetType;
+    targetResult: TargetResult;
+    lie: Lie | null;
+    penaltyType: PenaltyType | null;
+    derivedShotResult: import('@/models').ShotResult;
+    notes: string | null;
+    startLat: number | null;
+    startLng: number | null;
+    endLat: number | null;
+    endLng: number | null;
+    calculatedDistance: number | null;
+  }) => {
+    if (!editingShot) return;
+    try {
+      await roundRepo.updateShot(editingShot.id, {
+        club_id: payload.clubId,
+        shot_result: payload.derivedShotResult,
+        target_type: payload.targetType,
+        target_result: payload.targetResult,
+        lie: payload.lie,
+        penalty_type: payload.penaltyType,
+        distance: payload.distance,
+        distance_unit: payload.distanceUnit,
+        notes: payload.notes,
+        start_lat: payload.startLat,
+        start_lng: payload.startLng,
+        end_lat: payload.endLat,
+        end_lng: payload.endLng,
+        calculated_distance: payload.calculatedDistance
+      });
+      // Refresh the summary data so the edited row re-renders with the
+      // new values + any downstream cards (Scorecard, stats) recompute.
+      queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      setEditingShot(null);
+    } catch (err) {
+      console.error('[summary] shot edit failed', err);
+    }
+  };
   const sorted = useMemo(
     () => [...holes].sort((a, b) => a.hole_number - b.hole_number),
     [holes]
@@ -984,15 +1077,36 @@ function HolesTab({
                   return (
                     <Box
                       key={s.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setEditingShot(s)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault();
+                          setEditingShot(s);
+                        }
+                      }}
                       sx={{
                         display: 'grid',
-                        gridTemplateColumns: '32px 1fr auto',
+                        // 4 columns now: shot#, body, distance, edit icon.
+                        // The edit icon is the visible tap affordance — the
+                        // whole row stays clickable so the user can tap
+                        // anywhere on the row to edit.
+                        gridTemplateColumns: '32px 1fr auto 24px',
                         alignItems: 'center',
                         columnGap: 1,
                         rowGap: 0.25,
                         py: 0.75,
+                        px: 0.5,
                         borderBottom: 1,
                         borderColor: 'divider',
+                        borderRadius: '5px',
+                        cursor: 'pointer',
+                        '&:hover': {
+                          bgcolor: 'rgba(255,255,255,0.04)',
+                          '& .shot-edit-icon': { opacity: 1 }
+                        },
+                        '&:active': { bgcolor: 'rgba(255,255,255,0.06)' },
                         '&:last-of-type': { borderBottom: 'none' }
                       }}
                     >
@@ -1017,6 +1131,19 @@ function HolesTab({
                       >
                         {dist}
                       </Typography>
+                      <EditRoundedIcon
+                        className="shot-edit-icon"
+                        sx={{
+                          fontSize: 18,
+                          color: 'text.secondary',
+                          // 60% opacity baseline so the affordance is
+                          // visible at a glance on phone (no hover) but
+                          // not loud enough to compete with the shot
+                          // content. Lifts to full on hover.
+                          opacity: 0.6,
+                          transition: 'opacity 120ms ease'
+                        }}
+                      />
                     </Box>
                   );
                 })}
@@ -1025,6 +1152,16 @@ function HolesTab({
           })()}
         </CardContent>
       </Card>
+
+      <AddShotSheet
+        open={editingShot !== null}
+        shotNumber={editingShot?.shot_number ?? 1}
+        editing={editingDraft}
+        holePar={editingHolePar}
+        bagClubs={bag}
+        onClose={() => setEditingShot(null)}
+        onSubmit={onSubmitEdit}
+      />
     </Stack>
   );
 }
