@@ -86,6 +86,14 @@ export function HoleTrackingPage() {
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
+  /** Phone-side mirror of the watch's tracking state. Set true when the
+   *  watch sends trackingShot(active:true) and false on (active:false)
+   *  or when a recordShot arrives (the shot is now saved). */
+  const [watchTracking, setWatchTracking] = useState<{
+    active: boolean;
+    startLat: number | null;
+    startLng: number | null;
+  }>({ active: false, startLat: null, startLng: null });
   // GPS shot tracking — capture start on tap, stop captures end + opens
   // AddShotSheet pre-filled with the calculated distance.
   // GPS opt-in. Off by default so we don't prompt non-GPS users for location.
@@ -538,16 +546,16 @@ export function HoleTrackingPage() {
     enabled: autoTrackEnabled,
     initialBallPos: autoTrackInitialBallPos,
     onShotDetected: (shot) => {
-      // Stage the detected landing position into the same `pendingGps`
-      // slot the manual-tap flow uses. The "Ball Landed" bar appears on
-      // the map; from there the user can:
-      //   • tap elsewhere on the map to fine-tune the spot
-      //     (onShotLanded just overwrites pendingGps)
-      //   • tap X to dismiss (false-positive cart ride etc.)
-      //   • tap Record to open the AddShotSheet
-      // The state machine stays in ARRIVED throughout — confirmShot is
-      // implicit via setBallPos when the manual save lands a new ball
-      // position; dismissShot fires from the X button handler.
+      // 8s-stationary detection has fired — record the shot immediately
+      // by staging pendingGps AND opening the AddShotSheet pre-filled
+      // with the captured GPS pair + calculated distance. The user
+      // picks club + result and submits; the shot saves with full GPS.
+      //
+      // To reposition the auto-detected landing point: cancel the
+      // sheet → the Ball Landed bar (managed by pendingGps) still
+      // appears so the user can tap the map elsewhere or hit Record
+      // again to reopen the sheet. (Cancel calls autoTrack.dismissShot
+      // via the sheet's onClose handler, re-anchoring the tracker.)
       setPendingGps({
         startLat: shot.startLat,
         startLng: shot.startLng,
@@ -556,6 +564,7 @@ export function HoleTrackingPage() {
         calculatedDistanceM: shot.distanceM
       });
       setEditingShot(null);
+      setShotSheet(true);
     }
   });
 
@@ -898,7 +907,23 @@ export function HoleTrackingPage() {
           else if (msg.direction === 'next') goNextRef.current();
           return;
         }
+        if (msg.type === 'trackingShot') {
+          // Mirror the watch's tracking state on the phone so the user
+          // can see at a glance that a shot is being tracked from the
+          // wrist. Includes the captured start position when present —
+          // useful for rendering an indicator on the map.
+          setWatchTracking({
+            active: msg.active,
+            startLat: msg.startLat ?? null,
+            startLng: msg.startLng ?? null
+          });
+          return;
+        }
         if (msg.type === 'recordShot') {
+          // The watch finished a shot — if a tracking session was open,
+          // it's done now. Clear the indicator before processing the
+          // shot save below.
+          setWatchTracking({ active: false, startLat: null, startLng: null });
           // Lie auto-fill mirrors AddShotSheet's logic. GPS pair flows
           // through so the next aim line + lastShotEndDistFromGreen reads
           // the actual landing position.
@@ -1194,6 +1219,14 @@ export function HoleTrackingPage() {
           showYardageMarkers={showYardageMarkers}
           pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
+          // Live "you are here" dot during auto-track sessions. Only
+          // rendered while auto-track is on so we don't show a stale
+          // phantom location when the user has turned tracking off.
+          currentLocation={
+            autoTrackEnabled && autoTrack.latestFix
+              ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
+              : null
+          }
           onShotLanded={
             holeComplete
               ? undefined
@@ -1532,6 +1565,51 @@ export function HoleTrackingPage() {
                 : autoTrack.state === 'arrived'
                   ? 'Shot detected — confirming…'
                   : 'Auto-track ON — at ball')}
+          </Box>
+        )}
+
+        {/* Watch is tracking a shot — separate from phone-side auto-track.
+            Lives at the top of the map so it doesn't compete with the
+            auto-track indicator at the bottom-right. The amber border
+            mirrors the watch's Track button color. */}
+        {watchTracking.active && (
+          <Box
+            sx={{
+              position: 'absolute',
+              top: 'calc(env(safe-area-inset-top) + 8px)',
+              left: 16,
+              right: 16,
+              zIndex: 5,
+              bgcolor: 'rgba(11,20,16,0.92)',
+              border: '1.5px solid #fbbf24',
+              borderRadius: '5px',
+              px: 1.25,
+              py: 0.75,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 1,
+              boxShadow: '0 4px 12px rgba(0,0,0,0.45)'
+            }}
+          >
+            <MyLocationRoundedIcon sx={{ color: '#fbbf24', fontSize: 18 }} />
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Typography
+                variant="caption"
+                sx={{
+                  display: 'block',
+                  fontSize: '0.65rem',
+                  fontWeight: 700,
+                  letterSpacing: 0.5,
+                  color: '#fbbf24',
+                  textTransform: 'uppercase'
+                }}
+              >
+                Watch
+              </Typography>
+              <Typography sx={{ color: 'common.white', fontSize: '0.8rem', fontWeight: 600 }}>
+                Tracking shot — tap End Shot on the watch when at ball
+              </Typography>
+            </Box>
           </Box>
         )}
 

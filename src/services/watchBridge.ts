@@ -64,7 +64,15 @@ export type WatchInboundMessage =
       endLat?: number | null;
       endLng?: number | null;
     }
-  | { type: 'navigateHole'; direction: 'prev' | 'next' };
+  | { type: 'navigateHole'; direction: 'prev' | 'next' }
+  | {
+      /** Watch user tapped the Track button — start position captured.
+       *  active=true on tap; active=false when ended/cancelled. */
+      type: 'trackingShot';
+      active: boolean;
+      startLat?: number | null;
+      startLng?: number | null;
+    };
 
 interface WatchBridgeRawPlugin {
   activate(): Promise<{

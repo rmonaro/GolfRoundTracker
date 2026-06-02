@@ -132,6 +132,11 @@ enum WatchOutboundMessage {
     case recordShot(clubId: String?, targetType: String, targetResult: String,
                     start: CLLocation?, end: CLLocation?)
     case navigateHole(direction: String) // "prev" | "next"
+    /// Watch user toggled the Track-shot button. `active=true` when the
+    /// user starts tracking (after captureShotStart), false when they
+    /// end or cancel. The phone uses this to render a "Watch tracking
+    /// shot…" indicator and to stage the start position on the map.
+    case trackingShot(active: Bool, start: CLLocation?)
 
     var payload: [String: Any] {
         switch self {
@@ -153,6 +158,16 @@ enum WatchOutboundMessage {
             return d
         case .navigateHole(let direction):
             return ["type": "navigateHole", "direction": direction]
+        case .trackingShot(let active, let start):
+            var d: [String: Any] = [
+                "type": "trackingShot",
+                "active": active
+            ]
+            if let s = start {
+                d["startLat"] = s.coordinate.latitude
+                d["startLng"] = s.coordinate.longitude
+            }
+            return d
         }
     }
 }

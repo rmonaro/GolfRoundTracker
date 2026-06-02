@@ -30,7 +30,17 @@ struct HoleHomeView: View {
                         startAlreadyCaptured: isTrackingShot
                     )
                         .environmentObject(session)
-                        .onDisappear { isTrackingShot = false }
+                        .onDisappear {
+                            // Notify the phone that the watch is no
+                            // longer tracking. After a successful submit
+                            // the phone already got a recordShot — this
+                            // is then redundant-but-harmless. After a
+                            // cancel it's the only end signal.
+                            if isTrackingShot {
+                                session.send(.trackingShot(active: false, start: nil))
+                            }
+                            isTrackingShot = false
+                        }
                 }
         } else {
             idleView(s)
@@ -41,7 +51,17 @@ struct HoleHomeView: View {
                         startAlreadyCaptured: isTrackingShot
                     )
                         .environmentObject(session)
-                        .onDisappear { isTrackingShot = false }
+                        .onDisappear {
+                            // Notify the phone that the watch is no
+                            // longer tracking. After a successful submit
+                            // the phone already got a recordShot — this
+                            // is then redundant-but-harmless. After a
+                            // cancel it's the only end signal.
+                            if isTrackingShot {
+                                session.send(.trackingShot(active: false, start: nil))
+                            }
+                            isTrackingShot = false
+                        }
                 }
         }
     }
@@ -201,6 +221,12 @@ struct HoleHomeView: View {
                     // ball; "End Shot" then opens the record flow.
                     session.captureShotStart()
                     isTrackingShot = true
+                    // Tell the phone the watch is now tracking so it can
+                    // show a banner + stage the start position on the map.
+                    session.send(.trackingShot(
+                        active: true,
+                        start: session.pendingShotStart
+                    ))
                 } label: {
                     Image(systemName: "location.fill")
                         .font(.system(size: 12, weight: .bold))

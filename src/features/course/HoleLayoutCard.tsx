@@ -49,6 +49,8 @@ interface HoleLayoutCardProps {
   targetType?: TargetType;
   /** Toggle the 100/150/200/250 centerline yardage markers in aim mode. */
   showYardageMarkers?: boolean;
+  /** Live user position [lng, lat] for the auto-track "you are here" dot. */
+  currentLocation?: [number, number] | null;
 }
 
 export function HoleLayoutCard({
@@ -68,7 +70,8 @@ export function HoleLayoutCard({
   pinOverride = null,
   maxAimDistanceFromBallM,
   targetType,
-  showYardageMarkers = false
+  showYardageMarkers = false,
+  currentLocation = null
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -108,6 +111,7 @@ export function HoleLayoutCard({
             maxAimDistanceFromBallM={maxAimDistanceFromBallM}
             targetType={targetType}
             showYardageMarkers={showYardageMarkers}
+            currentLocation={currentLocation}
           />
         </Box>
       </Card>

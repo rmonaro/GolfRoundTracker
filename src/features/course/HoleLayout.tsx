@@ -131,6 +131,13 @@ interface HoleLayoutProps {
    * aim mode stays uncluttered until the player toggles them.
    */
   showYardageMarkers?: boolean;
+  /**
+   * Live user position [lng, lat] from continuous GPS. Renders a pulsing
+   * blue "you are here" dot on the map that updates as fixes arrive — the
+   * primary feedback during auto-track sessions so the player can see
+   * that GPS is firing as they walk. Null = no live position to show.
+   */
+  currentLocation?: [number, number] | null;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -680,7 +687,8 @@ export function HoleLayout({
   pinOverride = null,
   maxAimDistanceFromBallM,
   targetType = 'green',
-  showYardageMarkers = false
+  showYardageMarkers = false,
+  currentLocation = null
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -702,6 +710,7 @@ export function HoleLayout({
   // map-creation effect no longer re-fires when the user taps to record.
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const landingMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  const userMarkerRef = useRef<mapboxgl.Marker | null>(null);
   // Keep the latest onShotLanded reachable from the (stable) click handler
   // without having to put it in the effect's deps. Inline arrow functions on
   // the parent get a fresh identity every render — including them as a dep
@@ -1603,6 +1612,55 @@ export function HoleLayout({
       .setLngLat(landingPoint)
       .addTo(map);
   }, [landingPoint, useMapbox]);
+
+  // Live user-position marker — pulsing blue dot that tracks the player's
+  // current GPS fix. Renders only when `currentLocation` is supplied; the
+  // parent toggles it on during auto-track sessions. Modeled on the
+  // landing-point effect above so adding/moving the marker doesn't
+  // trigger a full map rebuild.
+  useEffect(() => {
+    if (!useMapbox) return;
+    const map = mapRef.current;
+    if (!map) return;
+    if (!currentLocation) {
+      userMarkerRef.current?.remove();
+      userMarkerRef.current = null;
+      return;
+    }
+    if (userMarkerRef.current) {
+      userMarkerRef.current.setLngLat(currentLocation);
+      return;
+    }
+    // Inject the keyframe once (cheap dedupe — the style tag carries
+    // its own id so re-running the effect doesn't pile up tags).
+    const styleId = 'hole-layout-user-pulse-style';
+    if (!document.getElementById(styleId)) {
+      const styleEl = document.createElement('style');
+      styleEl.id = styleId;
+      styleEl.textContent = `
+        @keyframes hole-layout-user-pulse {
+          0%   { box-shadow: 0 0 0 0 rgba(33,150,243,0.6); }
+          70%  { box-shadow: 0 0 0 16px rgba(33,150,243,0); }
+          100% { box-shadow: 0 0 0 0 rgba(33,150,243,0); }
+        }
+      `;
+      document.head.appendChild(styleEl);
+    }
+    const el = document.createElement('div');
+    Object.assign(el.style, {
+      width: '16px',
+      height: '16px',
+      borderRadius: '50%',
+      background: '#2196f3',
+      border: '3px solid #ffffff',
+      boxShadow: '0 2px 6px rgba(0,0,0,0.6)',
+      animation: 'hole-layout-user-pulse 1.6s ease-out infinite',
+      pointerEvents: 'none'
+    } as Partial<CSSStyleDeclaration>);
+    userMarkerRef.current = new mapboxgl.Marker({ element: el, anchor: 'center' })
+      .setLngLat(currentLocation)
+      .addTo(map);
+  }, [currentLocation, useMapbox]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with
   // a 0×0 canvas at construction time. Matches HoleLayoutCard's wrapper.
