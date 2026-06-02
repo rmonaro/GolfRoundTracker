@@ -1369,16 +1369,29 @@ function HoleMapDialog({
   }, [open]);
   const hole = holes.find((h) => h.hole_number === holeNumber) ?? null;
 
-  // Ordered list of shots-with-GPS for this hole. Kept aligned with
-  // shotEndPoints so the dot's index in the array maps back to the
-  // shot row that needs updating on drag-end.
-  const orderedShots = useMemo(() => {
+  // All shots for this hole in play order — used to discover the
+  // "next unmapped shot" the tap-to-add flow assigns to.
+  const allShotsForHole = useMemo(() => {
     if (!hole) return [] as HolesTabShot[];
     return shots
       .filter((s) => s.hole_id === hole.id)
-      .sort((a, b) => a.shot_number - b.shot_number)
-      .filter((s) => s.end_lat != null && s.end_lng != null);
+      .sort((a, b) => a.shot_number - b.shot_number);
   }, [shots, hole]);
+
+  // Ordered list of shots-with-GPS for this hole. Kept aligned with
+  // shotEndPoints so the dot's index in the array maps back to the
+  // shot row that needs updating on drag-end.
+  const orderedShots = useMemo(
+    () => allShotsForHole.filter((s) => s.end_lat != null && s.end_lng != null),
+    [allShotsForHole]
+  );
+
+  // Shots on this hole missing GPS coords. Next-tap-while-editing
+  // pins a position onto the FIRST of these in shot-number order.
+  const unmappedShots = useMemo(
+    () => allShotsForHole.filter((s) => s.end_lat == null || s.end_lng == null),
+    [allShotsForHole]
+  );
 
   const shotEndPoints = useMemo<Array<[number, number]>>(
     () =>
@@ -1436,6 +1449,33 @@ function HoleMapDialog({
     };
   }, [editMode, orderedShots, queryClient, roundId]);
 
+  /// In edit mode, tapping the map assigns the position to the next
+  /// shot that's missing GPS coords (shot-number order). Lets the
+  /// player retro-populate shots they logged without tapping a
+  /// landing point. Each tap consumes one shot from `unmappedShots`;
+  /// once empty the callback is undefined (no-op tap).
+  const onShotLanded = useMemo(() => {
+    if (!editMode || unmappedShots.length === 0) return undefined;
+    return async (data: {
+      start: [number, number];
+      end: [number, number];
+      calculatedDistanceM: number;
+    }) => {
+      const target = unmappedShots[0];
+      if (!target) return;
+      try {
+        await roundRepo.updateShot(target.id, {
+          end_lat: data.end[1],
+          end_lng: data.end[0],
+          calculated_distance: data.calculatedDistanceM
+        });
+        queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      } catch (err) {
+        console.error('[summary] add shot position failed', err);
+      }
+    };
+  }, [editMode, unmappedShots, queryClient, roundId]);
+
   return (
     <Dialog
       open={open}
@@ -1462,14 +1502,20 @@ function HoleMapDialog({
             <Typography variant="caption" color="text.secondary">
               Par {hole.par} · {shotEndPoints.length}{' '}
               {shotEndPoints.length === 1 ? 'tracked shot' : 'tracked shots'}
+              {unmappedShots.length > 0
+                ? ` · ${unmappedShots.length} untracked`
+                : ''}
             </Typography>
           )}
         </Box>
         <Stack direction="row" spacing={1} alignItems="center">
           {/* Edit toggle — makes the numbered shot dots draggable so
-              the user can correct mis-recorded positions. Drag-end
-              hits Supabase and invalidates the round-detail query. */}
-          {orderedShots.length > 0 && (
+              the user can correct mis-recorded positions, AND lets
+              taps on the map assign positions to shots that don't
+              have GPS yet. Shows whenever the hole has ANY shots
+              (mapped or unmapped) so a hole with all-untracked shots
+              still gets the tap-to-add affordance. */}
+          {(orderedShots.length > 0 || unmappedShots.length > 0) && (
             <Button
               variant={editMode ? 'contained' : 'outlined'}
               size="small"
@@ -1491,7 +1537,13 @@ function HoleMapDialog({
       {editMode && (
         <Box sx={{ px: 2, pb: 0.5 }}>
           <Typography variant="caption" color="text.secondary">
-            Drag any numbered dot to move that shot's landing position.
+            Drag any numbered dot to move it.
+            {unmappedShots.length > 0 && (
+              <> Tap anywhere on the map to set the position for shot #
+                {unmappedShots[0].shot_number}
+                {unmappedShots.length > 1 ? ` (+${unmappedShots.length - 1} more)` : ''}.
+              </>
+            )}
           </Typography>
         </Box>
       )}
@@ -1508,6 +1560,10 @@ function HoleMapDialog({
             // markers off so the map reads as visualization.
             hideAim
             onShotEndPointMoved={onShotEndPointMoved}
+            // Edit-mode tap-to-add: assigns each tap to the next
+            // unmapped shot in shot-number order. Disabled (undefined)
+            // when not editing or when all shots already have GPS.
+            onShotLanded={onShotLanded}
           />
         )}
       </Box>
