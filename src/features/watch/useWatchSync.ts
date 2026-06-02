@@ -49,17 +49,26 @@ export function useWatchSync() {
   // ~1KB and the comparison is microseconds vs. the cost of a watch wake.
   const lastSentRef = useRef<string>('');
   useEffect(() => {
+    // Pin position for the current hole: per-round override wins over
+    // the green centroid. Pushed to the watch so it can compute live
+    // distance against its own GPS fix.
+    const holeRow = layoutQuery.data?.hole;
+    const pinLat = holeRow?.pin_lat ?? holeRow?.green_lat ?? null;
+    const pinLng = holeRow?.pin_lng ?? holeRow?.green_lng ?? null;
+
     const snapshot = buildSnapshot({
       active,
       currentHole,
-      osmPar: layoutQuery.data?.hole.par ?? null,
+      osmPar: holeRow?.par ?? null,
       osmYards:
-        layoutQuery.data?.hole.centerline_distance_m != null
-          ? Math.round(metersToYards(layoutQuery.data.hole.centerline_distance_m))
+        holeRow?.centerline_distance_m != null
+          ? Math.round(metersToYards(holeRow.centerline_distance_m))
           : null,
       bag,
       selectedClubId,
-      recordingShot
+      recordingShot,
+      pinLat,
+      pinLng
     });
     const serialized = JSON.stringify(snapshot);
     if (serialized === lastSentRef.current) return;
@@ -82,6 +91,8 @@ interface SnapshotInputs {
   bag: ReturnType<typeof useBagStore.getState>['clubs'];
   selectedClubId: string | null;
   recordingShot: boolean;
+  pinLat: number | null;
+  pinLng: number | null;
 }
 
 function buildSnapshot({
@@ -91,7 +102,9 @@ function buildSnapshot({
   osmYards,
   bag,
   selectedClubId,
-  recordingShot
+  recordingShot,
+  pinLat,
+  pinLng
 }: SnapshotInputs): WatchRoundState {
   if (!active || !currentHole) {
     return { active: false };
@@ -158,6 +171,8 @@ function buildSnapshot({
     suggestedClubId: suggested?.clubId ?? null,
     selectedClubId,
     recordingShot,
+    pinLat,
+    pinLng,
     bag: slimBag
   };
 }

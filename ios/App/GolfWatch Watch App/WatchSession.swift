@@ -20,6 +20,8 @@ struct WatchRoundState: Equatable {
     let suggestedClubId: String?
     let selectedClubId: String?
     let recordingShot: Bool
+    let pinLat: Double?
+    let pinLng: Double?
     let bag: [WatchClub]
 
     static let empty = WatchRoundState(
@@ -28,7 +30,7 @@ struct WatchRoundState: Equatable {
         distanceYards: nil, distanceFeet: nil, scoreVsPar: nil,
         shotsThisHole: nil, puttsThisHole: nil,
         suggestedClubId: nil, selectedClubId: nil,
-        recordingShot: false, bag: []
+        recordingShot: false, pinLat: nil, pinLng: nil, bag: []
     )
 
     init(
@@ -45,6 +47,8 @@ struct WatchRoundState: Equatable {
         suggestedClubId: String? = nil,
         selectedClubId: String? = nil,
         recordingShot: Bool = false,
+        pinLat: Double? = nil,
+        pinLng: Double? = nil,
         bag: [WatchClub] = []
     ) {
         self.active = active
@@ -60,6 +64,8 @@ struct WatchRoundState: Equatable {
         self.suggestedClubId = suggestedClubId
         self.selectedClubId = selectedClubId
         self.recordingShot = recordingShot
+        self.pinLat = pinLat
+        self.pinLng = pinLng
         self.bag = bag
     }
 
@@ -79,6 +85,8 @@ struct WatchRoundState: Equatable {
         self.suggestedClubId = dict["suggestedClubId"] as? String
         self.selectedClubId = dict["selectedClubId"] as? String
         self.recordingShot = (dict["recordingShot"] as? Bool) ?? false
+        self.pinLat = dict["pinLat"] as? Double
+        self.pinLng = dict["pinLng"] as? Double
         if let rawBag = dict["bag"] as? [[String: Any]] {
             self.bag = rawBag.compactMap { WatchClub(dict: $0) }
         } else {
@@ -170,6 +178,11 @@ final class WatchSession: NSObject, ObservableObject {
     /// position is captured at submit time.
     private(set) var pendingShotStart: CLLocation?
 
+    /// True while we're keeping the GPS feed open between shots for live
+    /// distance-to-pin. Separate from `pendingShotStart`-driven updates
+    /// so a stop-shot doesn't kill the live distance display.
+    private var continuousLocationActive: Bool = false
+
     override init() {
         super.init()
         locationManager.delegate = self
@@ -185,6 +198,44 @@ final class WatchSession: NSObject, ObservableObject {
             session.activate()
         }
         reachable = session.isReachable
+    }
+
+    // MARK: - Continuous GPS (for live distance-to-pin)
+
+    /// Start keeping the GPS feed open. Idempotent. Caller should pair
+    /// with `stopContinuousLocation()` when the round ends or the user
+    /// backgrounds the app — leaving CLLocationManager running burns
+    /// the watch battery fast.
+    func startContinuousLocation() {
+        guard !continuousLocationActive else { return }
+        continuousLocationActive = true
+        locationManager.startUpdatingLocation()
+    }
+
+    func stopContinuousLocation() {
+        guard continuousLocationActive else { return }
+        continuousLocationActive = false
+        // Only call stop if no pending shot capture is also using it.
+        if pendingShotStart == nil {
+            locationManager.stopUpdatingLocation()
+        }
+    }
+
+    /// Live distance from the watch's current GPS fix to the pin, in
+    /// yards. Returns nil when GPS or pin isn't available — caller
+    /// falls back to the static distance from the phone snapshot.
+    func liveDistanceToPinYards() -> Double? {
+        guard let loc = lastLocation else { return nil }
+        guard let plat = state.pinLat, let plng = state.pinLng else { return nil }
+        // Reject ancient fixes (>30s) — phone went out of sight, sat in
+        // a bag, etc. A stale fix would lie about your distance.
+        if loc.timestamp.timeIntervalSinceNow < -30 { return nil }
+        // Reject very inaccurate fixes (>50m). At golf yardages this is
+        // worse than just showing the phone-snapshot number.
+        if loc.horizontalAccuracy < 0 || loc.horizontalAccuracy > 50 { return nil }
+        let pin = CLLocation(latitude: plat, longitude: plng)
+        let meters = loc.distance(from: pin)
+        return meters * 1.0936133
     }
 
     // MARK: - Outbound

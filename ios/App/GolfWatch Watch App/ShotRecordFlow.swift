@@ -11,15 +11,24 @@ struct ShotRecordFlow: View {
     /// Nil falls back to the legacy two-step flow that starts on the
     /// picker.
     let initialClubId: String?
+    /// When true, the GPS start position was already captured before the
+    /// modal opened (Track button flow) — don't call `captureShotStart`
+    /// a second time in the club picker.
+    let startAlreadyCaptured: Bool
 
     @State private var step: Step = .pickClub
     @State private var selectedClubId: String?
 
     enum Step { case pickClub, pickResult }
 
-    init(isPresented: Binding<Bool>, initialClubId: String? = nil) {
+    init(
+        isPresented: Binding<Bool>,
+        initialClubId: String? = nil,
+        startAlreadyCaptured: Bool = false
+    ) {
         self._isPresented = isPresented
         self.initialClubId = initialClubId
+        self.startAlreadyCaptured = startAlreadyCaptured
         // Seed the state from the prop so .onAppear isn't required.
         self._selectedClubId = State(initialValue: initialClubId)
         self._step = State(initialValue: initialClubId != nil ? .pickResult : .pickClub)
@@ -35,7 +44,13 @@ struct ShotRecordFlow: View {
                         onCancel: dismiss,
                         onPick: { id in
                             selectedClubId = id
-                            session.captureShotStart()
+                            // Track-button flow already grabbed the start —
+                            // calling again would overwrite it with a later
+                            // (= closer to the ball) GPS fix and erase the
+                            // shot's actual starting position.
+                            if !startAlreadyCaptured {
+                                session.captureShotStart()
+                            }
                             step = .pickResult
                         }
                     )

@@ -538,10 +538,16 @@ export function HoleTrackingPage() {
     enabled: autoTrackEnabled,
     initialBallPos: autoTrackInitialBallPos,
     onShotDetected: (shot) => {
-      // Open the existing AddShotSheet pre-filled via pendingGps so all the
-      // inferred-lie/result work and existing UX still applies. The state
-      // machine sits in ARRIVED until the user confirms (submit) or
-      // cancels (close) the sheet — handled by the effect below.
+      // Stage the detected landing position into the same `pendingGps`
+      // slot the manual-tap flow uses. The "Ball Landed" bar appears on
+      // the map; from there the user can:
+      //   • tap elsewhere on the map to fine-tune the spot
+      //     (onShotLanded just overwrites pendingGps)
+      //   • tap X to dismiss (false-positive cart ride etc.)
+      //   • tap Record to open the AddShotSheet
+      // The state machine stays in ARRIVED throughout — confirmShot is
+      // implicit via setBallPos when the manual save lands a new ball
+      // position; dismissShot fires from the X button handler.
       setPendingGps({
         startLat: shot.startLat,
         startLng: shot.startLng,
@@ -550,7 +556,6 @@ export function HoleTrackingPage() {
         calculatedDistanceM: shot.distanceM
       });
       setEditingShot(null);
-      setShotSheet(true);
     }
   });
 
@@ -1734,7 +1739,17 @@ export function HoleTrackingPage() {
             </Button>
             <IconButton
               aria-label="cancel landing point"
-              onClick={() => setPendingGps(null)}
+              onClick={() => {
+                // If this pendingGps came from an auto-track detection
+                // (state machine in 'arrived'), tell the tracker the
+                // detection was a false positive so it re-anchors and
+                // resumes detecting. Manual-tap pendingGps never sets
+                // 'arrived' so this guard is safe.
+                if (autoTrack.state === 'arrived') {
+                  autoTrack.dismissShot();
+                }
+                setPendingGps(null);
+              }}
               size="small"
               sx={{ color: 'common.white' }}
             >

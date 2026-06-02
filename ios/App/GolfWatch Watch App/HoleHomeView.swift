@@ -13,6 +13,10 @@ struct HoleHomeView: View {
     @EnvironmentObject var session: WatchSession
     @State private var showingShotFlow = false
     @State private var shotFlowStartingClubId: String?
+    /// True while the user has tapped Track but not yet ended the shot.
+    /// Drives the bottom-controls swap to "tracking" UI + the next-tap
+    /// behavior (end → open shot record flow with start preserved).
+    @State private var isTrackingShot = false
 
     var body: some View {
         let s = session.state
@@ -22,18 +26,22 @@ struct HoleHomeView: View {
                 .sheet(isPresented: $showingShotFlow) {
                     ShotRecordFlow(
                         isPresented: $showingShotFlow,
-                        initialClubId: shotFlowStartingClubId
+                        initialClubId: shotFlowStartingClubId,
+                        startAlreadyCaptured: isTrackingShot
                     )
                         .environmentObject(session)
+                        .onDisappear { isTrackingShot = false }
                 }
         } else {
             idleView(s)
                 .sheet(isPresented: $showingShotFlow) {
                     ShotRecordFlow(
                         isPresented: $showingShotFlow,
-                        initialClubId: shotFlowStartingClubId
+                        initialClubId: shotFlowStartingClubId,
+                        startAlreadyCaptured: isTrackingShot
                     )
                         .environmentObject(session)
+                        .onDisappear { isTrackingShot = false }
                 }
         }
     }
@@ -68,37 +76,7 @@ struct HoleHomeView: View {
 
             Spacer(minLength: 2)
 
-            // Bottom controls — small chevrons + center "+" to start a shot.
-            HStack(spacing: 4) {
-                Button {
-                    session.send(.navigateHole(direction: "prev"))
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .controlSize(.mini)
-                .buttonStyle(.bordered)
-
-                Button {
-                    shotFlowStartingClubId = s.selectedClubId ?? s.suggestedClubId
-                    showingShotFlow = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.mini)
-                .tint(.green)
-
-                Button {
-                    session.send(.navigateHole(direction: "next"))
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .controlSize(.mini)
-                .buttonStyle(.bordered)
-            }
+            bottomControls(s)
 
             if !session.reachable {
                 Text("Phone offline — queued")
@@ -172,6 +150,87 @@ struct HoleHomeView: View {
     }
 
     // MARK: - Pieces
+
+    /// Bottom controls row. Two modes:
+    ///   • Idle      — prev / Track / Record (+) / next
+    ///   • Tracking  — "Walking…" indicator + End Shot button
+    ///
+    /// "Track" captures GPS start immediately and flips the local
+    /// isTrackingShot flag. The user walks to the ball and taps "End
+    /// Shot," which opens the shot record flow with the start
+    /// preserved (so the modal's club picker doesn't overwrite it).
+    /// "Record (+)" remains for the legacy at-ball workflow where the
+    /// user captures start when they pick a club.
+    @ViewBuilder
+    private func bottomControls(_ s: WatchRoundState) -> some View {
+        if isTrackingShot {
+            HStack(spacing: 6) {
+                HStack(spacing: 4) {
+                    Image(systemName: "figure.walk")
+                        .font(.system(size: 11))
+                        .foregroundColor(.yellow)
+                    Text("Walking…")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                Spacer()
+                Button {
+                    shotFlowStartingClubId = s.selectedClubId ?? s.suggestedClubId
+                    showingShotFlow = true
+                } label: {
+                    Text("End Shot")
+                        .font(.system(size: 11, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.mini)
+                .tint(.red)
+            }
+        } else {
+            HStack(spacing: 4) {
+                Button {
+                    session.send(.navigateHole(direction: "prev"))
+                } label: {
+                    Image(systemName: "chevron.left")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .controlSize(.mini)
+                .buttonStyle(.bordered)
+
+                Button {
+                    // Start GPS shot tracking. The user will walk to the
+                    // ball; "End Shot" then opens the record flow.
+                    session.captureShotStart()
+                    isTrackingShot = true
+                } label: {
+                    Image(systemName: "location.fill")
+                        .font(.system(size: 12, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.mini)
+                .tint(.yellow)
+
+                Button {
+                    shotFlowStartingClubId = s.selectedClubId ?? s.suggestedClubId
+                    showingShotFlow = true
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14, weight: .bold))
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.mini)
+                .tint(.green)
+
+                Button {
+                    session.send(.navigateHole(direction: "next"))
+                } label: {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+                .controlSize(.mini)
+                .buttonStyle(.bordered)
+            }
+        }
+    }
 
     /// LEFT column: big yards-to-pin readout above a small suggested-club button.
     @ViewBuilder
@@ -254,13 +313,23 @@ struct HoleHomeView: View {
         return .green
     }
 
+    /// Live GPS-derived yards-to-pin when available (watch has its own
+    /// fix + the snapshot includes pin coords), otherwise the static
+    /// distanceYards/distanceFeet pushed by the phone. Live wins so the
+    /// number updates as the user walks.
     private func distanceText(_ s: WatchRoundState) -> String {
+        if let live = session.liveDistanceToPinYards() {
+            return "\(Int(live.rounded()))"
+        }
         if let ft = s.distanceFeet { return "\(ft)" }
         if let yd = s.distanceYards { return "\(yd)" }
         return "—"
     }
 
     private func distanceUnit(_ s: WatchRoundState) -> String {
+        // Live distance is always reported in yards. Only use 'ft' when
+        // the phone explicitly pushed a feet reading (on the green).
+        if session.liveDistanceToPinYards() != nil { return "yds" }
         if s.distanceFeet != nil { return "ft" }
         return "yds"
     }

@@ -12,10 +12,17 @@ export interface WatchRoundState {
   holeNumber?: number;
   holesPlayed?: number;
   par?: number | null;
-  /** Yards from ball to pin (full hole on shot 1, remaining on later shots). */
+  /** Yards from ball to pin (full hole on shot 1, remaining on later shots).
+   *  Fallback for when the watch can't get its own GPS fix. */
   distanceYards?: number | null;
   /** Feet from ball to pin when on/near the green. */
   distanceFeet?: number | null;
+  /** Pin position for the current hole — lets the watch compute a live
+   *  distance-to-pin using its own GPS rather than waiting on phone
+   *  snapshots. Falls back to green centroid when no per-round pin
+   *  override is set; null when the course isn't OSM-synced. */
+  pinLat?: number | null;
+  pinLng?: number | null;
   /** "+1", "-2", "E" — the same string shown in the phone's Score pill. */
   scoreVsPar?: string;
   shotsThisHole?: number;
