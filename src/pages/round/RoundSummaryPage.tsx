@@ -27,6 +27,8 @@ import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import GpsFixedRoundedIcon from '@mui/icons-material/GpsFixedRounded';
 import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
 import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
+import MapRoundedIcon from '@mui/icons-material/MapRounded';
+import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
@@ -258,7 +260,13 @@ export function RoundSummaryPage() {
       )}
 
       {tab === 'holes' && (
-        <HolesTab roundId={round.id} holes={holes} shots={shots} bag={bag} />
+        <HolesTab
+          roundId={round.id}
+          courseId={round.course_id}
+          holes={holes}
+          shots={shots}
+          bag={bag}
+        />
       )}
 
       <EditRoundDialog
@@ -745,11 +753,13 @@ function categoryFor(score: number, par: number): HoleCategory | null {
 
 function HolesTab({
   roundId,
+  courseId,
   holes,
   shots,
   bag
 }: {
   roundId: string;
+  courseId: string;
   holes: Array<{
     id: string;
     hole_number: number;
@@ -766,6 +776,8 @@ function HolesTab({
 }) {
   const queryClient = useQueryClient();
   const [editingShot, setEditingShot] = useState<HolesTabShot | null>(null);
+  /** Currently-open map dialog (which hole's map to show). null = closed. */
+  const [mapHoleNumber, setMapHoleNumber] = useState<number | null>(null);
 
   const editingDraft: ShotEditDraft | null = useMemo(() => {
     if (!editingShot) return null;
@@ -982,6 +994,19 @@ function HolesTab({
         </CardContent>
       </Card>
 
+      {/* View Map — opens a dialog with the hole layout + every recorded
+          shot end position rendered as a numbered dot. Read-only (no
+          tap-to-record; hideAim suppresses the aim handle). */}
+      <Button
+        variant="outlined"
+        size="small"
+        startIcon={<MapRoundedIcon />}
+        onClick={() => setMapHoleNumber(selected.hole_number)}
+        sx={{ borderRadius: '5px', textTransform: 'none', alignSelf: 'flex-start' }}
+      >
+        View map
+      </Button>
+
       {/* Hole Stats — Putts / GIR / Fairway (3 across). The 4th slot used
           to be Score; the section below replaces it with a full-width
           Clubs Used card listing each club hit on this hole. */}
@@ -1162,7 +1187,108 @@ function HolesTab({
         onClose={() => setEditingShot(null)}
         onSubmit={onSubmitEdit}
       />
+
+      <HoleMapDialog
+        open={mapHoleNumber !== null}
+        courseId={courseId}
+        holeNumber={mapHoleNumber}
+        shots={shots}
+        holes={holes}
+        bag={bag}
+        onClose={() => setMapHoleNumber(null)}
+      />
     </Stack>
+  );
+}
+
+/**
+ * Read-only hole-map dialog launched from the Holes-tab "View map"
+ * button. Renders the existing HoleLayoutCard with the per-hole shot
+ * end positions as numbered dots and the aim UI suppressed.
+ *
+ * Defensive: any shot missing GPS coords is filtered out (the card
+ * doesn't fake positions). If no shots had GPS, the map still renders
+ * the hole geometry alone — useful as a refresher.
+ */
+function HoleMapDialog({
+  open,
+  courseId,
+  holeNumber,
+  shots,
+  holes,
+  bag,
+  onClose
+}: {
+  open: boolean;
+  courseId: string;
+  holeNumber: number | null;
+  shots: HolesTabShot[];
+  holes: Array<{ id: string; hole_number: number; par: number }>;
+  bag: BagClub[];
+  onClose: () => void;
+}) {
+  const hole = holes.find((h) => h.hole_number === holeNumber) ?? null;
+
+  // Recorded-shot end positions in chronological order, filtered to
+  // those with GPS coords. HoleLayout expects [lng, lat] tuples.
+  const shotEndPoints = useMemo<Array<[number, number]>>(() => {
+    if (!hole) return [];
+    return shots
+      .filter((s) => s.hole_id === hole.id)
+      .sort((a, b) => a.shot_number - b.shot_number)
+      .filter((s) => s.end_lat != null && s.end_lng != null)
+      .map((s) => [s.end_lng as number, s.end_lat as number]);
+  }, [shots, hole]);
+
+  return (
+    <Dialog
+      open={open}
+      onClose={onClose}
+      fullScreen
+      PaperProps={{ sx: { bgcolor: 'background.default' } }}
+    >
+      <Stack
+        direction="row"
+        alignItems="center"
+        justifyContent="space-between"
+        sx={{
+          // Clear the iOS status bar / time the same way PageHeader does.
+          pt: 'calc(env(safe-area-inset-top) + 8px)',
+          px: 2,
+          pb: 1
+        }}
+      >
+        <Box>
+          <Typography variant="h6" sx={{ fontWeight: 800 }}>
+            Hole {holeNumber ?? '—'} map
+          </Typography>
+          {hole && (
+            <Typography variant="caption" color="text.secondary">
+              Par {hole.par} · {shotEndPoints.length}{' '}
+              {shotEndPoints.length === 1 ? 'tracked shot' : 'tracked shots'}
+            </Typography>
+          )}
+        </Box>
+        <IconButton onClick={onClose} aria-label="close map">
+          <CloseRoundedIcon />
+        </IconButton>
+      </Stack>
+      <Box sx={{ flex: 1, minHeight: 0, px: 1, pb: 1 }}>
+        {holeNumber != null && (
+          <HoleLayoutCard
+            courseId={courseId}
+            holeNumber={holeNumber}
+            par={hole?.par ?? null}
+            shotEndPoints={shotEndPoints}
+            bagClubs={bag}
+            // Read-only: no tap-to-record handler, suppress the aim UI
+            // entirely so the layout reads as a visualization, not a
+            // planning tool.
+            hideAim
+          />
+        )}
+      </Box>
+    </Dialog>
   );
 }
 
