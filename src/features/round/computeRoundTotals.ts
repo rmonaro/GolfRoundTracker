@@ -23,10 +23,22 @@ export function computeTotalPar(holes: LocalHole[]): number {
 }
 
 /**
- * Running totals across only *completed* holes — holes the user has
- * navigated past (`idx < currentHoleIndex`). The current hole is
- * excluded so the score on the in-progress hole doesn't move the
- * round-wide total mid-shot.
+ * A hole is "complete" if either:
+ *   • The user has navigated past it (its index < currentHoleIndex), or
+ *   • Any shot on the hole was holed out (`targetResult === 'made'`).
+ *
+ * The second branch matters for the moment between holing out on the
+ * current hole and tapping "next" — the user expects the hole's score
+ * to show up immediately, not after the navigation gesture.
+ */
+function isHoleComplete(hole: LocalHole, holeIdx: number, currentHoleIndex: number): boolean {
+  if (holeIdx < currentHoleIndex) return true;
+  return hole.shots.some((s) => s.targetResult === 'made');
+}
+
+/**
+ * Running totals across only *completed* holes. The in-progress hole is
+ * excluded so partial strokes don't move the round-wide total mid-shot.
  *
  * `completedCount === 0` means no holes have been finished yet —
  * display sites should render "--" instead of "E" in that case so
@@ -36,7 +48,9 @@ export function computeCompletedTotals(active: {
   holes: LocalHole[];
   currentHoleIndex: number;
 }): { score: number; par: number; completedCount: number } {
-  const completed = active.holes.slice(0, active.currentHoleIndex);
+  const completed = active.holes.filter((h, idx) =>
+    isHoleComplete(h, idx, active.currentHoleIndex)
+  );
   const score = completed.reduce((s, h) => s + holeTotalScore(h), 0);
   const par = completed.reduce((s, h) => s + (h.par || 0), 0);
   return { score, par, completedCount: completed.length };
