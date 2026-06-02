@@ -138,6 +138,24 @@ interface HoleLayoutProps {
    * that GPS is firing as they walk. Null = no live position to show.
    */
   currentLocation?: [number, number] | null;
+  /**
+   * Opaque value the parent bumps when the cached user-drag aim should
+   * be discarded — e.g. the user just edited the hole's yardage / par
+   * and expects the aim to re-anchor at the new defaults. Same string/
+   * number across renders = cache persists; a different value = clear.
+   * Mainly intended for `${par}-${yardage}` style derived keys.
+   */
+  aimResetKey?: string | number | null;
+  /**
+   * Scaling factor applied to every yardage / feet number rendered on
+   * the map (aim handle label, walkback markers). When the player has
+   * overridden the hole's stored yardage to correct an OSM value, the
+   * physical pin position on the centerline doesn't move — but the
+   * *displayed* distance should reflect the override so the aim label
+   * matches the "TO PIN" panel on the parent. Defaults to 1.0 (no
+   * scaling). Typical value: user_yardage / osm_yardage.
+   */
+  yardageScale?: number;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -688,7 +706,9 @@ export function HoleLayout({
   maxAimDistanceFromBallM,
   targetType = 'green',
   showYardageMarkers = false,
-  currentLocation = null
+  currentLocation = null,
+  aimResetKey = null,
+  yardageScale = 1
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -711,6 +731,16 @@ export function HoleLayout({
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const landingMarkerRef = useRef<mapboxgl.Marker | null>(null);
   const userMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  // Persists the user's dragged aim-handle position across map-effect
+  // re-runs. Without this, any state change in deps (par/yardage edit,
+  // prop ripples) destroys the marker and the handle snaps back to its
+  // computed default. The "semantic-reset" refs below clear this only
+  // when the hole changes or a new shot is recorded — both cases where
+  // the aim *should* re-anchor.
+  const userAimPosRef = useRef<[number, number] | null>(null);
+  const aimResetLayoutIdRef = useRef<string | null>(null);
+  const aimResetBallDistRef = useRef<number>(-1);
+  const aimResetKeyRef = useRef<string | number | null>(null);
   // Keep the latest onShotLanded reachable from the (stable) click handler
   // without having to put it in the effect's deps. Inline arrow functions on
   // the parent get a fresh identity every render — including them as a dep
@@ -1017,12 +1047,40 @@ export function HoleLayout({
         const holeLenM = hole.centerline_distance_m;
         const isTeeShot = ballDistanceFromTeeM <= 0;
 
+        // Semantic-reset check: clear the cached user-aim and re-anchor
+        // at defaults when ANY of these change:
+        //   • the hole itself                 (different hole entirely)
+        //   • ballDistanceFromTeeM            (new shot recorded)
+        //   • aimResetKey                     (parent's signal that
+        //     stored par/yardage moved and the aim should reflect the
+        //     new geometry — without this the handle would stay stuck
+        //     at the player's last drag, which no longer reflects the
+        //     corrected hole length)
+        // Other re-renders (prop ripples that don't change the above)
+        // preserve whatever the player had dragged.
+        const currentLayoutId = layout.hole.id;
+        if (
+          aimResetLayoutIdRef.current !== currentLayoutId ||
+          aimResetBallDistRef.current !== ballDistanceFromTeeM ||
+          aimResetKeyRef.current !== aimResetKey
+        ) {
+          userAimPosRef.current = null;
+          aimResetLayoutIdRef.current = currentLayoutId;
+          aimResetBallDistRef.current = ballDistanceFromTeeM;
+          aimResetKeyRef.current = aimResetKey;
+        }
+
         // Default initial aim = pin (full remaining distance). For 3rd+ shots
         // not yet on the green, the caller passes `suggestedHandleDistanceM`
         // so the handle defaults to "ball + previous shot distance" along the
         // centerline — a smarter starting point for short approaches.
         let initialAim: [number, number];
-        if (suggestedHandleDistanceM != null) {
+        if (userAimPosRef.current) {
+          // User had already dragged the handle on this hole/shot —
+          // restore that position so a yardage / par edit (or any other
+          // spurious effect re-run) doesn't snap them back.
+          initialAim = userAimPosRef.current;
+        } else if (suggestedHandleDistanceM != null) {
           initialAim = pointAlongFromStart(centerlineCoords, suggestedHandleDistanceM) ?? pinLL;
         } else if (isTeeShot && holeLenM != null && holeLenM > teeDefaultCapM) {
           initialAim = pointAlongFromStart(centerlineCoords, teeDefaultCapM) ?? pinLL;
@@ -1223,10 +1281,14 @@ export function HoleLayout({
 
         const updateLabel = (aimPt: [number, number]) => {
           const dM = haversineMetersFE(aimStartLL, aimPt);
+          // Apply user's yardage override scale so the aim distance
+          // tracks the "TO PIN" panel when the player has corrected
+          // the hole length. yardageScale defaults to 1 (no scaling)
+          // when no override is in effect.
           if (puttingMode) {
-            labelText.textContent = `${Math.round(dM * 3.28084)} ft`;
+            labelText.textContent = `${Math.round(dM * 3.28084 * yardageScale)} ft`;
           } else {
-            labelText.textContent = `${Math.round(dM / YARDS_TO_METERS)} yds`;
+            labelText.textContent = `${Math.round((dM / YARDS_TO_METERS) * yardageScale)} yds`;
           }
         };
         updateLabel(initialAim);
@@ -1330,6 +1392,9 @@ export function HoleLayout({
             properties: {},
             geometry: { type: 'LineString', coordinates: [aimStartLL, aimPt] }
           });
+          // Cache the user's chosen aim so it survives the next map-
+          // effect re-run (par/yardage edits, prop ripples, etc.).
+          userAimPosRef.current = aimPt;
         };
         const onPointerEnd = (e: PointerEvent) => {
           if (e.pointerId !== activePointerId) return;
@@ -1579,7 +1644,8 @@ export function HoleLayout({
     pinOverride,
     maxAimDistanceFromBallM,
     targetType,
-    showYardageMarkers
+    showYardageMarkers,
+    aimResetKey
   ]);
 
   // Landing-point marker — add/move/remove imperatively on the live map so a

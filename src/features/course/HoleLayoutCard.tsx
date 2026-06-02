@@ -51,6 +51,13 @@ interface HoleLayoutCardProps {
   showYardageMarkers?: boolean;
   /** Live user position [lng, lat] for the auto-track "you are here" dot. */
   currentLocation?: [number, number] | null;
+  /** Opaque key whose change clears the cached drag aim — bumped by the
+   *  parent when stored par/yardage edits should re-anchor the handle. */
+  aimResetKey?: string | number | null;
+  /** Scales every yardage / feet display number on the map so the aim
+   *  handle label matches the "TO PIN" panel after a player-overridden
+   *  yardage. user_yardage / osm_yardage. */
+  yardageScale?: number;
 }
 
 export function HoleLayoutCard({
@@ -71,7 +78,9 @@ export function HoleLayoutCard({
   maxAimDistanceFromBallM,
   targetType,
   showYardageMarkers = false,
-  currentLocation = null
+  currentLocation = null,
+  aimResetKey = null,
+  yardageScale = 1
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -112,6 +121,8 @@ export function HoleLayoutCard({
             targetType={targetType}
             showYardageMarkers={showYardageMarkers}
             currentLocation={currentLocation}
+            aimResetKey={aimResetKey}
+            yardageScale={yardageScale}
           />
         </Box>
       </Card>

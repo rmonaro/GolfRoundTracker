@@ -1227,6 +1227,19 @@ export function HoleTrackingPage() {
               ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
               : null
           }
+          // Reset the cached aim drag whenever the player edits par or
+          // yardage. The handle re-anchors at the new defaults so the
+          // aim distance reflects the corrected hole length instead of
+          // staying stuck at the old drag position.
+          aimResetKey={`${hole.par ?? '-'}-${hole.yardage ?? '-'}`}
+          // Scale on-map yardage displays (aim label) so they match the
+          // player's overridden hole length. Falls back to 1.0 (no
+          // scaling) when no override is active or OSM data is missing.
+          yardageScale={
+            hole.yardage != null && osmYards != null && osmYards > 0
+              ? hole.yardage / osmYards
+              : 1
+          }
           onShotLanded={
             holeComplete
               ? undefined
