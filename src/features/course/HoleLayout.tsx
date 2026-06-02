@@ -156,6 +156,11 @@ interface HoleLayoutProps {
    * scaling). Typical value: user_yardage / osm_yardage.
    */
   yardageScale?: number;
+  /** When provided, each shot-end-point dot becomes draggable. The
+   *  callback fires with the shot's index and the new [lng, lat] when
+   *  the user releases the drag. Used by the Round Summary map dialog
+   *  so the player can correct mis-recorded shot positions. */
+  onShotEndPointMoved?: (index: number, newPos: [number, number]) => void;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -708,7 +713,8 @@ export function HoleLayout({
   showYardageMarkers = false,
   currentLocation = null,
   aimResetKey = null,
-  yardageScale = 1
+  yardageScale = 1,
+  onShotEndPointMoved
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -741,6 +747,12 @@ export function HoleLayout({
   const aimResetLayoutIdRef = useRef<string | null>(null);
   const aimResetBallDistRef = useRef<number>(-1);
   const aimResetKeyRef = useRef<string | number | null>(null);
+  // Stable ref so the parent can change the drag-end callback without
+  // re-firing the big map-creation effect.
+  const onShotEndPointMovedRef = useRef(onShotEndPointMoved);
+  useEffect(() => {
+    onShotEndPointMovedRef.current = onShotEndPointMoved;
+  }, [onShotEndPointMoved]);
   // Keep the latest onShotLanded reachable from the (stable) click handler
   // without having to put it in the effect's deps. Inline arrow functions on
   // the parent get a fresh identity every render — including them as a dep
@@ -1547,6 +1559,9 @@ export function HoleLayout({
     // via z-order isn't necessary — both are 14-18px sized and at the same
     // location. The shotEndPoints array is in chronological order, so index +
     // 1 is the shot number.
+    // Capture the callback as a local so the loop reads from the ref
+    // once (whether dots should be draggable is decided per-marker).
+    const moveCb = onShotEndPointMovedRef.current;
     for (let i = 0; i < shotEndPoints.length; i++) {
       const pt = shotEndPoints[i];
       const dot = document.createElement('div');
@@ -1562,13 +1577,28 @@ export function HoleLayout({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        pointerEvents: 'none',
+        // Default = pass-through taps. When draggable mode is on we
+        // need pointer events on so Mapbox can detect drag gestures
+        // on the dot itself.
+        pointerEvents: moveCb ? 'auto' : 'none',
+        cursor: moveCb ? 'grab' : 'default',
         lineHeight: '1'
       } as Partial<CSSStyleDeclaration>);
       dot.textContent = String(i + 1);
-      new mapboxgl.Marker({ element: dot, anchor: 'center' })
+      const marker = new mapboxgl.Marker({
+        element: dot,
+        anchor: 'center',
+        draggable: moveCb != null
+      })
         .setLngLat(pt)
         .addTo(map);
+      if (moveCb) {
+        const index = i;
+        marker.on('dragend', () => {
+          const ll = marker.getLngLat();
+          onShotEndPointMovedRef.current?.(index, [ll.lng, ll.lat]);
+        });
+      }
     }
 
     // Pending landing-point marker is managed by a separate effect below so
@@ -1645,7 +1675,12 @@ export function HoleLayout({
     maxAimDistanceFromBallM,
     targetType,
     showYardageMarkers,
-    aimResetKey
+    aimResetKey,
+    // Re-fires the map effect when the parent toggles drag-edit mode
+    // (callback flips from undefined ↔ defined) so the numbered shot
+    // dots get recreated with the correct `draggable` flag. Stable
+    // across renders within a mode via the ref above.
+    onShotEndPointMoved != null
   ]);
 
   // Landing-point marker — add/move/remove imperatively on the live map so a

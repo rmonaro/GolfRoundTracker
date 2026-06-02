@@ -1244,6 +1244,7 @@ function HolesTab({
 
       <HoleMapDialog
         open={mapHoleNumber !== null}
+        roundId={roundId}
         courseId={courseId}
         holeNumber={mapHoleNumber}
         shots={shots}
@@ -1266,6 +1267,7 @@ function HolesTab({
  */
 function HoleMapDialog({
   open,
+  roundId,
   courseId,
   holeNumber,
   shots,
@@ -1274,6 +1276,7 @@ function HoleMapDialog({
   onClose
 }: {
   open: boolean;
+  roundId: string;
   courseId: string | null;
   holeNumber: number | null;
   shots: HolesTabShot[];
@@ -1281,18 +1284,89 @@ function HoleMapDialog({
   bag: BagClub[];
   onClose: () => void;
 }) {
+  const queryClient = useQueryClient();
+  const [editMode, setEditMode] = useState(false);
+  // Optimistic per-shot drag positions, keyed by shot.id. Drag-end sets
+  // this immediately so the dot stays at the new spot even before the
+  // network round-trip completes — without it, leaving edit mode flips
+  // the boolean dep, the map effect re-runs, and the marker rebuilds
+  // from the prop's still-stale shotEndPoints (snap-back). Cleared on
+  // dialog close.
+  const [optimisticPositions, setOptimisticPositions] = useState<
+    Map<string, [number, number]>
+  >(new Map());
+  // Reset the overrides each time the dialog opens — fresh per session.
+  useEffect(() => {
+    if (!open) setOptimisticPositions(new Map());
+  }, [open]);
   const hole = holes.find((h) => h.hole_number === holeNumber) ?? null;
 
-  // Recorded-shot end positions in chronological order, filtered to
-  // those with GPS coords. HoleLayout expects [lng, lat] tuples.
-  const shotEndPoints = useMemo<Array<[number, number]>>(() => {
-    if (!hole) return [];
+  // Ordered list of shots-with-GPS for this hole. Kept aligned with
+  // shotEndPoints so the dot's index in the array maps back to the
+  // shot row that needs updating on drag-end.
+  const orderedShots = useMemo(() => {
+    if (!hole) return [] as HolesTabShot[];
     return shots
       .filter((s) => s.hole_id === hole.id)
       .sort((a, b) => a.shot_number - b.shot_number)
-      .filter((s) => s.end_lat != null && s.end_lng != null)
-      .map((s) => [s.end_lng as number, s.end_lat as number]);
+      .filter((s) => s.end_lat != null && s.end_lng != null);
   }, [shots, hole]);
+
+  const shotEndPoints = useMemo<Array<[number, number]>>(
+    () =>
+      orderedShots.map((s) => {
+        const opt = optimisticPositions.get(s.id);
+        if (opt) return opt;
+        return [s.end_lng as number, s.end_lat as number];
+      }),
+    [orderedShots, optimisticPositions]
+  );
+
+  // Drag-end handler. Looks up the shot by index, recomputes the
+  // GPS-calculated distance (haversine from start to the new end), and
+  // patches the row in Supabase. Round-detail query invalidates so
+  // every consumer (Scorecard, Shots list, dispersion stats) picks up
+  // the corrected position.
+  const onShotEndPointMoved = useMemo(() => {
+    if (!editMode) return undefined;
+    return async (index: number, newPos: [number, number]) => {
+      const s = orderedShots[index];
+      if (!s) return;
+      const [lng, lat] = newPos;
+      // Optimistically pin the dot to the dragged position so it
+      // doesn't snap back when edit mode toggles off or the map
+      // effect re-runs before the network round-trip finishes.
+      setOptimisticPositions((prev) => {
+        const next = new Map(prev);
+        next.set(s.id, [lng, lat]);
+        return next;
+      });
+      let calculated: number | null = null;
+      if (s.start_lat != null && s.start_lng != null) {
+        // Haversine in meters — same formula HoleLayout uses internally.
+        const toRad = (d: number) => (d * Math.PI) / 180;
+        const R = 6371000;
+        const dLat = toRad(lat - s.start_lat);
+        const dLng = toRad(lng - s.start_lng);
+        const a =
+          Math.sin(dLat / 2) ** 2 +
+          Math.cos(toRad(s.start_lat)) *
+            Math.cos(toRad(lat)) *
+            Math.sin(dLng / 2) ** 2;
+        calculated = 2 * R * Math.asin(Math.sqrt(a));
+      }
+      try {
+        await roundRepo.updateShot(s.id, {
+          end_lat: lat,
+          end_lng: lng,
+          calculated_distance: calculated
+        });
+        queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      } catch (err) {
+        console.error('[summary] shot reposition failed', err);
+      }
+    };
+  }, [editMode, orderedShots, queryClient, roundId]);
 
   return (
     <Dialog
@@ -1323,10 +1397,36 @@ function HoleMapDialog({
             </Typography>
           )}
         </Box>
-        <IconButton onClick={onClose} aria-label="close map">
-          <CloseRoundedIcon />
-        </IconButton>
+        <Stack direction="row" spacing={1} alignItems="center">
+          {/* Edit toggle — makes the numbered shot dots draggable so
+              the user can correct mis-recorded positions. Drag-end
+              hits Supabase and invalidates the round-detail query. */}
+          {orderedShots.length > 0 && (
+            <Button
+              variant={editMode ? 'contained' : 'outlined'}
+              size="small"
+              onClick={() => setEditMode((v) => !v)}
+              sx={{
+                borderRadius: '5px',
+                textTransform: 'none',
+                minWidth: 64
+              }}
+            >
+              {editMode ? 'Done' : 'Edit'}
+            </Button>
+          )}
+          <IconButton onClick={onClose} aria-label="close map">
+            <CloseRoundedIcon />
+          </IconButton>
+        </Stack>
       </Stack>
+      {editMode && (
+        <Box sx={{ px: 2, pb: 0.5 }}>
+          <Typography variant="caption" color="text.secondary">
+            Drag any numbered dot to move that shot's landing position.
+          </Typography>
+        </Box>
+      )}
       <Box sx={{ flex: 1, minHeight: 0, px: 1, pb: 1 }}>
         {holeNumber != null && (
           <HoleLayoutCard
@@ -1335,10 +1435,11 @@ function HoleMapDialog({
             par={hole?.par ?? null}
             shotEndPoints={shotEndPoints}
             bagClubs={bag}
-            // Read-only: no tap-to-record handler, suppress the aim UI
-            // entirely so the layout reads as a visualization, not a
-            // planning tool.
+            // Read-only view by default; opt into drag with the Edit
+            // toggle above. hideAim keeps the aim handle / yardage
+            // markers off so the map reads as visualization.
             hideAim
+            onShotEndPointMoved={onShotEndPointMoved}
           />
         )}
       </Box>

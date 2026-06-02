@@ -58,6 +58,9 @@ interface HoleLayoutCardProps {
    *  handle label matches the "TO PIN" panel after a player-overridden
    *  yardage. user_yardage / osm_yardage. */
   yardageScale?: number;
+  /** Enables drag-to-move on each numbered shot dot. Fires with the
+   *  index + new [lng, lat] on drag-end. */
+  onShotEndPointMoved?: (index: number, newPos: [number, number]) => void;
 }
 
 export function HoleLayoutCard({
@@ -80,7 +83,8 @@ export function HoleLayoutCard({
   showYardageMarkers = false,
   currentLocation = null,
   aimResetKey = null,
-  yardageScale = 1
+  yardageScale = 1,
+  onShotEndPointMoved
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -123,6 +127,7 @@ export function HoleLayoutCard({
             currentLocation={currentLocation}
             aimResetKey={aimResetKey}
             yardageScale={yardageScale}
+            onShotEndPointMoved={onShotEndPointMoved}
           />
         </Box>
       </Card>
