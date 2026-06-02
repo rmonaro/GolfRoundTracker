@@ -45,15 +45,16 @@ import { toAppError } from '@/services/errors';
 import { pct, scoreVsPar, durationLabel, fullName } from '@/utils/format';
 import { Scorecard } from '@/components/Scorecard';
 import { AddShotSheet, type ShotEditDraft } from '@/features/round/AddShotSheet';
-import type {
-  Round,
-  RoundHole,
-  BagClub,
-  DistanceUnit,
-  Lie,
-  PenaltyType,
-  TargetResult,
-  TargetType
+import {
+  STROKE_PENALTY_TYPES,
+  type Round,
+  type RoundHole,
+  type BagClub,
+  type DistanceUnit,
+  type Lie,
+  type PenaltyType,
+  type TargetResult,
+  type TargetType
 } from '@/models';
 
 /** Shape of a shot row as it flows through HolesTab. Mirrors the
@@ -90,11 +91,16 @@ export function RoundSummaryPage() {
 
   useEffect(() => {
     if (!detail.data?.round) return;
-    const { round, holes } = detail.data;
+    const { round, holes, shots } = detail.data;
     if (round.completed_at) {
-      // Compute differential once and persist if missing.
-      // strokes already counts every logged shot (incl. putts); add penalty strokes on top.
-      const score = holes.reduce((s, h) => s + h.strokes + h.penalty_strokes, 0);
+      // Compute differential once and persist if missing. Use the
+      // shots-list count (source of truth) per hole, NOT the cached
+      // round_holes.strokes column — that column can lag by a shot or
+      // two if the autosave debounce was clipped at round-finalize.
+      const score = holes.reduce((s, h) => {
+        const liveStrokes = shots.filter((sh) => sh.hole_id === h.id).length;
+        return s + liveStrokes + h.penalty_strokes;
+      }, 0);
       const diff = calculateDifferential(score, round.course_rating, round.slope_rating);
       if (diff != null && round.handicap_differential == null) {
         roundRepo.update(round.id, { handicap_differential: diff }).catch((err) => {
@@ -115,7 +121,34 @@ export function RoundSummaryPage() {
     );
   }
 
-  const { round, holes, shots } = detail.data;
+  const { round, holes: rawHoles, shots } = detail.data;
+
+  // Live-derive per-hole strokes / putts / penalty_strokes from the shot
+  // list rather than trusting the round_holes.strokes column. The column
+  // is a debounced cache written by the live tracking page; if a shot
+  // landed close to round-finalization (or via the watch outside the
+  // debounce window), the cache can be off by one or more. Shots are the
+  // source of truth — every shot row is durable.
+  const holes = rawHoles.map((h) => {
+    const holeShots = shots.filter((s) => s.hole_id === h.id);
+    const liveStrokes = holeShots.length;
+    const livePutts = holeShots.filter((s) => {
+      if (!s.club_id) return false;
+      const c = bag.find((b) => b.clubId === s.club_id);
+      return c?.category === 'putter';
+    }).length;
+    const livePenalty = holeShots.filter(
+      (s) =>
+        s.penalty_type != null &&
+        (STROKE_PENALTY_TYPES as readonly string[]).includes(s.penalty_type)
+    ).length;
+    return {
+      ...h,
+      strokes: liveStrokes,
+      putts: livePutts,
+      penalty_strokes: livePenalty
+    };
+  });
   const stats = detailRoundStats(round, holes, shots);
   const front = holes.filter((h) => h.hole_number <= 9);
   const back = holes.filter((h) => h.hole_number > 9);
