@@ -17,7 +17,13 @@ import { StatCard } from '@/components/ui/StatCard';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useRounds } from '@/features/stats/useRounds';
 import { aggregateRoundStats } from '@/features/stats/computeStats';
+import {
+  computeClubDispersion,
+  type AimTargetByHole
+} from '@/features/stats/computeDispersion';
+import { ClubDispersionCard } from '@/features/stats/ClubDispersionCard';
 import { roundRepo } from '@/services/roundRepo';
+import { supabase } from '@/lib/supabase';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useBagStore } from '@/stores/bagStore';
@@ -47,6 +53,28 @@ export function StatsPage() {
     queryFn: async () => {
       const all = await Promise.all(completedIds.map((id) => roundRepo.listShots(id)));
       return all.flat();
+    }
+  });
+
+  // Pull all course-level holes for the courses the user has played.
+  // We only need (course_id, hole_number, green_lat, green_lng, pin_lat,
+  // pin_lng) to compute aim-target lookups for the dispersion chart —
+  // each row is small so a single batch query is cheaper than fetching
+  // per-hole on demand.
+  const uniqueCourseIds = useMemo(
+    () => Array.from(new Set((rounds ?? []).map((r) => r.course_id))),
+    [rounds]
+  );
+  const courseHolesQuery = useQuery({
+    queryKey: ['stats-course-holes', uniqueCourseIds],
+    enabled: uniqueCourseIds.length > 0,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('holes')
+        .select('course_id, hole_number, green_lat, green_lng, pin_lat, pin_lng')
+        .in('course_id', uniqueCourseIds);
+      if (error) throw error;
+      return data ?? [];
     }
   });
 
@@ -101,6 +129,48 @@ export function StatsPage() {
       const club = bag.find((c) => c.clubId === clubId);
       return { label: club ? club.customName || club.name : 'Club', count };
     });
+
+  // Build a round_hole.id → green/pin position map for the dispersion
+  // chart. The shot's `hole_id` references the round_holes row; that row
+  // has its own hole_number, and the parent round has the course_id —
+  // we cross-reference back to the course-level holes table for the
+  // green/pin coordinates the user was aiming at.
+  const aimTargetByHole: AimTargetByHole = useMemo(() => {
+    const map: AimTargetByHole = new Map();
+    if (!courseHolesQuery.data || !rounds) return map;
+    const roundToCourse = new Map(rounds.map((r) => [r.id, r.course_id]));
+    const courseHoleKey = (courseId: string, holeNumber: number) =>
+      `${courseId}__${holeNumber}`;
+    const courseHoleMap = new Map<string, { lat: number; lng: number }>();
+    for (const ch of courseHolesQuery.data) {
+      // Prefer per-round pin if set, else the green centroid. Skip
+      // entirely when both are null (course not OSM-synced yet).
+      const lat = ch.pin_lat ?? ch.green_lat;
+      const lng = ch.pin_lng ?? ch.green_lng;
+      if (lat == null || lng == null) continue;
+      courseHoleMap.set(courseHoleKey(ch.course_id, ch.hole_number), { lat, lng });
+    }
+    for (const [roundId, holes] of holesByRound.entries()) {
+      const courseId = roundToCourse.get(roundId);
+      if (!courseId) continue;
+      for (const h of holes) {
+        const target = courseHoleMap.get(courseHoleKey(courseId, h.hole_number));
+        if (target) map.set(h.id, target);
+      }
+    }
+    return map;
+  }, [courseHolesQuery.data, holesByRound, rounds]);
+
+  // Per-club shot dispersion — distance variance + miss bias derived from
+  // every logged shot in the user's history. Putters are filtered out
+  // inside the helper. Real GPS-derived lateral offset is computed
+  // against the green centroid (or pin position when set) as the
+  // implied aim target.
+  const dispersionRows = computeClubDispersion(
+    shotsQuery.data ?? [],
+    bag,
+    aimTargetByHole
+  );
 
   return (
     <Box>
@@ -217,6 +287,8 @@ export function StatsPage() {
             </CardContent>
           </Card>
         )}
+
+        {dispersionRows.length > 0 && <ClubDispersionCard rows={dispersionRows} />}
 
         {showTrends && stats.recentDifferentials.length > 0 && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
