@@ -17,6 +17,10 @@ struct HoleHomeView: View {
     /// Drives the bottom-controls swap to "tracking" UI + the next-tap
     /// behavior (end → open shot record flow with start preserved).
     @State private var isTrackingShot = false
+    /// True while the modal is open in "club picker only" mode (user
+    /// tapped the suggested-club pill specifically to swap clubs, not
+    /// to record a shot). Resets via onDisappear.
+    @State private var isClubPickerOnly = false
 
     var body: some View {
         let s = session.state
@@ -27,7 +31,8 @@ struct HoleHomeView: View {
                     ShotRecordFlow(
                         isPresented: $showingShotFlow,
                         initialClubId: shotFlowStartingClubId,
-                        startAlreadyCaptured: isTrackingShot
+                        startAlreadyCaptured: isTrackingShot,
+                        clubPickerOnly: isClubPickerOnly
                     )
                         .environmentObject(session)
                         .onDisappear {
@@ -37,9 +42,15 @@ struct HoleHomeView: View {
                             // is then redundant-but-harmless. After a
                             // cancel it's the only end signal.
                             if isTrackingShot {
-                                session.send(.trackingShot(active: false, start: nil))
+                                session.send(.trackingShot(
+                                    active: false,
+                                    start: nil,
+                                    current: nil
+                                ))
+                                session.endShotTrackingSession()
                             }
                             isTrackingShot = false
+                            isClubPickerOnly = false
                         }
                 }
         } else {
@@ -48,7 +59,8 @@ struct HoleHomeView: View {
                     ShotRecordFlow(
                         isPresented: $showingShotFlow,
                         initialClubId: shotFlowStartingClubId,
-                        startAlreadyCaptured: isTrackingShot
+                        startAlreadyCaptured: isTrackingShot,
+                        clubPickerOnly: isClubPickerOnly
                     )
                         .environmentObject(session)
                         .onDisappear {
@@ -58,9 +70,15 @@ struct HoleHomeView: View {
                             // is then redundant-but-harmless. After a
                             // cancel it's the only end signal.
                             if isTrackingShot {
-                                session.send(.trackingShot(active: false, start: nil))
+                                session.send(.trackingShot(
+                                    active: false,
+                                    start: nil,
+                                    current: nil
+                                ))
+                                session.endShotTrackingSession()
                             }
                             isTrackingShot = false
+                            isClubPickerOnly = false
                         }
                 }
         }
@@ -113,8 +131,13 @@ struct HoleHomeView: View {
     /// club name, tap to change.
     @ViewBuilder
     private func recordingView(_ s: WatchRoundState) -> some View {
-        let club = s.bag.first(where: { $0.id == s.selectedClubId })
-            ?? s.bag.first(where: { $0.id == s.suggestedClubId })
+        // Same optimistic-local-override resolution as the home pill —
+        // the recording card's title should reflect any just-picked
+        // club without waiting for the phone snapshot.
+        let effectiveClubId = session.localSelectedClubId
+            ?? s.selectedClubId
+            ?? s.suggestedClubId
+        let club = s.bag.first(where: { $0.id == effectiveClubId })
 
         VStack(spacing: 8) {
             Text("Recording shot")
@@ -135,11 +158,16 @@ struct HoleHomeView: View {
 
     /// Big tap-to-change club button used in the recording view. Extracted
     /// out so SwiftUI's type-checker doesn't choke on the whole recording
-    /// body as one expression.
+    /// body as one expression. Tapping intentionally opens the shot
+    /// flow at the CLUB PICKER (not result) so the player can swap
+    /// clubs mid-tracking — "tap to change" reads as a club change,
+    /// not as "record this club's shot now."
     @ViewBuilder
     private func recordingClubButton(club: WatchClub?) -> some View {
         Button {
-            shotFlowStartingClubId = club?.id
+            shotFlowStartingClubId = nil
+            isClubPickerOnly = true
+            _ = club
             showingShotFlow = true
         } label: {
             VStack(spacing: 4) {
@@ -225,8 +253,13 @@ struct HoleHomeView: View {
                     // show a banner + stage the start position on the map.
                     session.send(.trackingShot(
                         active: true,
-                        start: session.pendingShotStart
+                        start: session.pendingShotStart,
+                        current: nil
                     ))
+                    // Activate live-position forwarding so the phone
+                    // can render a "you are here" dot at the watch
+                    // user's location as they walk.
+                    session.beginShotTrackingSession()
                 } label: {
                     Image(systemName: "location.fill")
                         .font(.system(size: 12, weight: .bold))
@@ -295,13 +328,28 @@ struct HoleHomeView: View {
     }
 
     /// Highlighted button showing the suggested club. Tapping opens the
-    /// shot-record flow pre-selected to this club (the watch user can
-    /// still change it mid-flow if they want a different one).
+    /// shot-record flow at the CLUB PICKER step (not result), so the
+    /// player can change clubs from the home view. The "+" record FAB
+    /// stays the quick-record path that skips straight to result with
+    /// the suggested club pre-selected.
     @ViewBuilder
     private func suggestedClubButton(_ s: WatchRoundState) -> some View {
-        let club = s.bag.first(where: { $0.id == (s.selectedClubId ?? s.suggestedClubId) })
+        // Optimistic local override wins over the snapshot's selectedClubId
+        // so a freshly-picked club on the watch shows up immediately —
+        // before the phone roundtrip has finished. Falls back to the
+        // snapshot when no override is set.
+        let effectiveClubId = session.localSelectedClubId
+            ?? s.selectedClubId
+            ?? s.suggestedClubId
+        let club = s.bag.first(where: { $0.id == effectiveClubId })
         Button {
-            shotFlowStartingClubId = club?.id
+            // Club-changer mode: open the picker, exit on pick (no
+            // shot record, no GPS capture). The new selection rides
+            // back to the phone via the `selectClub` message and the
+            // phone re-sends a snapshot so the home view updates.
+            shotFlowStartingClubId = nil
+            isClubPickerOnly = true
+            _ = club
             showingShotFlow = true
         } label: {
             HStack(spacing: 4) {

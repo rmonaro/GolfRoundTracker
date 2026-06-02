@@ -136,7 +136,13 @@ enum WatchOutboundMessage {
     /// user starts tracking (after captureShotStart), false when they
     /// end or cancel. The phone uses this to render a "Watch tracking
     /// shot…" indicator and to stage the start position on the map.
-    case trackingShot(active: Bool, start: CLLocation?)
+    /// `current` is also sent on periodic updates so the phone can
+    /// render a live "you are here" dot for the watch user.
+    case trackingShot(active: Bool, start: CLLocation?, current: CLLocation? = nil)
+    /// Watch user picked a club via the home-view club pill (NOT as
+    /// part of a shot record). Phone should update its `selectedClubId`
+    /// so the next suggestion / shot default reflects the change.
+    case selectClub(clubId: String)
 
     var payload: [String: Any] {
         switch self {
@@ -158,7 +164,7 @@ enum WatchOutboundMessage {
             return d
         case .navigateHole(let direction):
             return ["type": "navigateHole", "direction": direction]
-        case .trackingShot(let active, let start):
+        case .trackingShot(let active, let start, let current):
             var d: [String: Any] = [
                 "type": "trackingShot",
                 "active": active
@@ -167,7 +173,13 @@ enum WatchOutboundMessage {
                 d["startLat"] = s.coordinate.latitude
                 d["startLng"] = s.coordinate.longitude
             }
+            if let c = current {
+                d["currentLat"] = c.coordinate.latitude
+                d["currentLng"] = c.coordinate.longitude
+            }
             return d
+        case .selectClub(let clubId):
+            return ["type": "selectClub", "clubId": clubId]
         }
     }
 }
@@ -186,6 +198,13 @@ final class WatchSession: NSObject, ObservableObject {
     @Published private(set) var reachable: Bool = false
     @Published private(set) var lastLocation: CLLocation?
     @Published private(set) var locationAuthStatus: CLAuthorizationStatus = .notDetermined
+    /// Optimistic local override of the selected club. Set when the
+    /// watch user picks a new club via the home-view picker — the
+    /// home view reads this immediately so the UI updates without
+    /// waiting for the phone roundtrip (selectClub message → phone
+    /// state update → snapshot back). Cleared on the next snapshot
+    /// arrival, since by then the phone has confirmed the pick.
+    @Published private(set) var localSelectedClubId: String?
 
     private let locationManager = CLLocationManager()
     /// Latched start-position for the current "in-progress" shot. Captured
@@ -197,6 +216,17 @@ final class WatchSession: NSObject, ObservableObject {
     /// distance-to-pin. Separate from `pendingShotStart`-driven updates
     /// so a stop-shot doesn't kill the live distance display.
     private var continuousLocationActive: Bool = false
+
+    /// True while the watch user is in shot-tracking mode (between Track
+    /// tap and End Shot / cancel). Set by HoleHomeView via the helpers
+    /// below. While true, `didUpdateLocations` forwards each accepted
+    /// fix to the phone so it can render a live "you are here" dot for
+    /// the watch user — same way the phone-side Track does for its own
+    /// GPS. Rate-limited to ~1 update per second so we don't spam
+    /// transferUserInfo / sendMessage.
+    private var trackingShotActive: Bool = false
+    private var lastTrackingUpdateSent: Date = .distantPast
+    private static let TRACKING_UPDATE_INTERVAL_S: TimeInterval = 1.0
 
     /// Rolling buffer of recent acceptable GPS fixes. Used to pick the
     /// most accurate one at capture time instead of trusting whatever
@@ -297,12 +327,27 @@ final class WatchSession: NSObject, ObservableObject {
 
     // MARK: - Outbound
 
-    /// Send a message back to the phone. Uses `transferUserInfo` for
-    /// guaranteed delivery (queued, FIFO) — vital for `recordShot` which
-    /// can't be silently dropped.
+    /// Send a message back to the phone. Tries the real-time
+    /// `sendMessage` path first when both apps are reachable so
+    /// interactive events (selectClub, trackingShot) land in <100ms
+    /// instead of waiting on `transferUserInfo`'s queue. Falls back
+    /// to `transferUserInfo` (guaranteed, FIFO) when not reachable
+    /// OR if the live send errors out — that path still applies for
+    /// `recordShot` which must never be dropped.
     func send(_ message: WatchOutboundMessage) {
         guard WCSession.default.activationState == .activated else { return }
-        WCSession.default.transferUserInfo(message.payload)
+        let payload = message.payload
+        let session = WCSession.default
+        if session.isReachable {
+            session.sendMessage(payload, replyHandler: nil) { _ in
+                // Live send failed — queue for delivery instead so the
+                // event still lands eventually. The phone listener
+                // treats both delivery paths the same way.
+                WCSession.default.transferUserInfo(payload)
+            }
+        } else {
+            session.transferUserInfo(payload)
+        }
     }
 
     // MARK: - GPS
@@ -345,6 +390,29 @@ final class WatchSession: NSObject, ObservableObject {
         locationManager.stopUpdatingLocation()
         pendingShotStart = nil
     }
+
+    /// Set the optimistic local club override. Called when the watch
+    /// user picks a club via the home-view picker so the home view
+    /// shows the new club immediately. The next snapshot from the
+    /// phone clears the override.
+    func setLocalSelectedClub(_ clubId: String) {
+        localSelectedClubId = clubId
+    }
+
+    /// Mark a shot-tracking session as active. While active, each new
+    /// accepted GPS fix gets forwarded to the phone (rate-limited) so
+    /// the phone map can render a live "you are here" dot for the
+    /// watch user — same as the phone-side Track flow shows for its
+    /// own GPS.
+    func beginShotTrackingSession() {
+        trackingShotActive = true
+        lastTrackingUpdateSent = .distantPast
+    }
+
+    /// End the tracking session. Stops the live position forwarding.
+    func endShotTrackingSession() {
+        trackingShotActive = false
+    }
 }
 
 // MARK: - WCSessionDelegate
@@ -373,6 +441,14 @@ extension WatchSession: WCSessionDelegate {
         guard let snapshot = WatchRoundState(dict: applicationContext) else { return }
         Task { @MainActor in
             self.state = snapshot
+            // Phone has confirmed an updated state — drop any optimistic
+            // local override now that the snapshot reflects reality. If
+            // the snapshot still doesn't match (slow round-trip), the
+            // override stays — but the next snapshot will clear it.
+            if let local = self.localSelectedClubId,
+               snapshot.selectedClubId == local {
+                self.localSelectedClubId = nil
+            }
         }
     }
 }
@@ -405,6 +481,17 @@ extension WatchSession: CLLocationManagerDelegate {
                 self.recentFixes.removeFirst(self.recentFixes.count - 30)
             }
             self.pruneRecentFixes()
+            // Forward the live position to the phone while a watch
+            // tracking session is active. Rate-limited so we don't
+            // saturate the WCSession channel.
+            if self.trackingShotActive {
+                let now = Date()
+                if now.timeIntervalSince(self.lastTrackingUpdateSent)
+                    >= WatchSession.TRACKING_UPDATE_INTERVAL_S {
+                    self.lastTrackingUpdateSent = now
+                    self.send(.trackingShot(active: true, start: nil, current: fix))
+                }
+            }
         }
     }
 

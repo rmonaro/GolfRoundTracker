@@ -41,6 +41,7 @@ import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundSto
 import { useBagStore } from '@/stores/bagStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useWatchHintsStore } from '@/stores/watchHintsStore';
+import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
 import {
   AddShotSheet,
@@ -93,7 +94,15 @@ export function HoleTrackingPage() {
     active: boolean;
     startLat: number | null;
     startLng: number | null;
-  }>({ active: false, startLat: null, startLng: null });
+    currentLat: number | null;
+    currentLng: number | null;
+  }>({
+    active: false,
+    startLat: null,
+    startLng: null,
+    currentLat: null,
+    currentLng: null
+  });
   // GPS shot tracking — capture start on tap, stop captures end + opens
   // AddShotSheet pre-filled with the calculated distance.
   // GPS opt-in. Off by default so we don't prompt non-GPS users for location.
@@ -908,22 +917,55 @@ export function HoleTrackingPage() {
           return;
         }
         if (msg.type === 'trackingShot') {
-          // Mirror the watch's tracking state on the phone so the user
-          // can see at a glance that a shot is being tracked from the
-          // wrist. Includes the captured start position when present —
-          // useful for rendering an indicator on the map.
-          setWatchTracking({
-            active: msg.active,
-            startLat: msg.startLat ?? null,
-            startLng: msg.startLng ?? null
+          // Mirror the watch's tracking state on the phone. When
+          // active=true and currentLat/Lng are present (periodic
+          // updates while the user walks), update the live-position
+          // fields so the phone map can render a "you are here" dot
+          // for the watch user — same affordance as phone-side Track.
+          setWatchTracking((prev) => {
+            if (!msg.active) {
+              return {
+                active: false,
+                startLat: null,
+                startLng: null,
+                currentLat: null,
+                currentLng: null
+              };
+            }
+            return {
+              active: true,
+              startLat: msg.startLat ?? prev.startLat,
+              startLng: msg.startLng ?? prev.startLng,
+              currentLat: msg.currentLat ?? prev.currentLat,
+              currentLng: msg.currentLng ?? prev.currentLng
+            };
           });
+          return;
+        }
+        if (msg.type === 'selectClub') {
+          // Watch user changed clubs from the home-view picker (not as
+          // part of recording a shot). Update the phone's selected
+          // club so suggested-club logic + the next shot's default
+          // reflect the pick. The snapshot re-sends the change back to
+          // the watch via the regular useWatchSync flow.
+          setSelectedClubId(msg.clubId);
+          // Sync the tier-1 dropdown so the manual club picker on the
+          // phone reflects the new selection too.
+          const club = bagClubsRef.current.find((c) => c.clubId === msg.clubId);
+          if (club) setSelectedClubTier1(tier1ForCategory(club.category));
           return;
         }
         if (msg.type === 'recordShot') {
           // The watch finished a shot — if a tracking session was open,
           // it's done now. Clear the indicator before processing the
           // shot save below.
-          setWatchTracking({ active: false, startLat: null, startLng: null });
+          setWatchTracking({
+            active: false,
+            startLat: null,
+            startLng: null,
+            currentLat: null,
+            currentLng: null
+          });
           // Lie auto-fill mirrors AddShotSheet's logic. GPS pair flows
           // through so the next aim line + lastShotEndDistFromGreen reads
           // the actual landing position.
@@ -1219,13 +1261,19 @@ export function HoleTrackingPage() {
           showYardageMarkers={showYardageMarkers}
           pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
-          // Live "you are here" dot during auto-track sessions. Only
-          // rendered while auto-track is on so we don't show a stale
-          // phantom location when the user has turned tracking off.
+          // Live "you are here" dot. Phone-side Track wins (the user is
+          // actively tracking on this device). When the WATCH is the
+          // one tracking, fall through to the watch-reported position
+          // so the phone map mirrors what the watch sees — same dot,
+          // same animation. Null when neither side is tracking.
           currentLocation={
             autoTrackEnabled && autoTrack.latestFix
               ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
-              : null
+              : watchTracking.active &&
+                  watchTracking.currentLat != null &&
+                  watchTracking.currentLng != null
+                ? [watchTracking.currentLng, watchTracking.currentLat]
+                : null
           }
           // Reset the cached aim drag whenever the player edits par or
           // yardage. The handle re-anchors at the new defaults so the
@@ -1462,22 +1510,23 @@ export function HoleTrackingPage() {
           </Box>
         )}
 
-        {/* Club picker — bottom-left primary action. Shows the currently
-            selected club (or "Select club" placeholder); tap to slide up the
-            drawer with the full ClubPicker tier-1 / tier-2 UI. Pre-fills the
-            AddShotSheet so the user can scout club choice before committing. */}
+        {/* Club picker — bottom-left primary action. Compact circular
+            tag with the abbreviated club name ("7I", "PW", "56W", etc.)
+            so it doesn't compete with the map for screen space. Tap to
+            slide up the drawer with the full ClubPicker tier-1 / tier-2
+            UI. Empty placeholder is "+" when nothing's selected. */}
         <Button
-          variant="contained"
-          size="large"
-          startIcon={<SportsGolfRoundedIcon />}
           onClick={() => setClubPickerOpen(true)}
           sx={{
             position: 'absolute',
             bottom: 'calc(16px + env(safe-area-inset-bottom))',
             left: 16,
             zIndex: 4,
-            minHeight: 56,
-            maxWidth: 'calc(100% - 180px)',
+            width: 56,
+            height: 56,
+            minWidth: 56,
+            borderRadius: '50%',
+            p: 0,
             bgcolor: 'rgba(11,20,16,0.85)',
             color: 'common.white',
             border: 1.5,
@@ -1485,11 +1534,18 @@ export function HoleTrackingPage() {
             backdropFilter: 'blur(6px)',
             WebkitBackdropFilter: 'blur(6px)',
             textTransform: 'none',
-            fontWeight: 700,
+            fontWeight: 800,
+            fontSize: '0.95rem',
+            lineHeight: 1,
             '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
           }}
         >
-          {selectedClub ? selectedClub.customName || selectedClub.name : 'Select club'}
+          {selectedClub
+            ? abbreviateClubName(
+                selectedClub.customName || selectedClub.name,
+                selectedClub.category
+              )
+            : '+'}
         </Button>
 
         {/* View Shots — bottom-left, stacked above the club picker. Only

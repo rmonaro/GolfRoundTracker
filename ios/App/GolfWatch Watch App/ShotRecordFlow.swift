@@ -15,6 +15,12 @@ struct ShotRecordFlow: View {
     /// modal opened (Track button flow) — don't call `captureShotStart`
     /// a second time in the club picker.
     let startAlreadyCaptured: Bool
+    /// When true, the flow runs as a CLUB CHANGER only: picking a club
+    /// fires `selectClub` to the phone (so the new selected club flows
+    /// back via snapshot) and dismisses the modal — no GPS capture, no
+    /// progression to the result picker. Used when the user taps the
+    /// home-view's suggested-club pill specifically to swap clubs.
+    let clubPickerOnly: Bool
 
     @State private var step: Step = .pickClub
     @State private var selectedClubId: String?
@@ -24,11 +30,13 @@ struct ShotRecordFlow: View {
     init(
         isPresented: Binding<Bool>,
         initialClubId: String? = nil,
-        startAlreadyCaptured: Bool = false
+        startAlreadyCaptured: Bool = false,
+        clubPickerOnly: Bool = false
     ) {
         self._isPresented = isPresented
         self.initialClubId = initialClubId
         self.startAlreadyCaptured = startAlreadyCaptured
+        self.clubPickerOnly = clubPickerOnly
         // Seed the state from the prop so .onAppear isn't required.
         self._selectedClubId = State(initialValue: initialClubId)
         self._step = State(initialValue: initialClubId != nil ? .pickResult : .pickClub)
@@ -44,9 +52,24 @@ struct ShotRecordFlow: View {
                         onCancel: dismiss,
                         onPick: { id in
                             selectedClubId = id
-                            // Track-button flow already grabbed the start —
-                            // calling again would overwrite it with a later
-                            // (= closer to the ball) GPS fix and erase the
+                            // Club-changer mode: notify the phone that the
+                            // selected club moved, then close the modal —
+                            // do NOT capture a GPS start (this isn't part
+                            // of a shot record) and do NOT advance to the
+                            // result picker. Set the optimistic local
+                            // override so the home view reflects the
+                            // pick immediately, before the phone has
+                            // round-tripped a new snapshot.
+                            if clubPickerOnly {
+                                session.setLocalSelectedClub(id)
+                                session.send(.selectClub(clubId: id))
+                                isPresented = false
+                                return
+                            }
+                            // Normal flow — track-button-originated already
+                            // grabbed the start. Calling captureShotStart
+                            // again would overwrite it with a later (=
+                            // closer to the ball) GPS fix and erase the
                             // shot's actual starting position.
                             if !startAlreadyCaptured {
                                 session.captureShotStart()

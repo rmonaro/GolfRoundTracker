@@ -67,11 +67,24 @@ export type WatchInboundMessage =
   | { type: 'navigateHole'; direction: 'prev' | 'next' }
   | {
       /** Watch user tapped the Track button — start position captured.
-       *  active=true on tap; active=false when ended/cancelled. */
+       *  active=true on tap; active=false when ended/cancelled.
+       *  currentLat/Lng are also sent on periodic position updates
+       *  while tracking is active so the phone map can show a live
+       *  "you are here" dot for the watch user. */
       type: 'trackingShot';
       active: boolean;
       startLat?: number | null;
       startLng?: number | null;
+      currentLat?: number | null;
+      currentLng?: number | null;
+    }
+  | {
+      /** Watch user picked a club from the home-view picker, NOT as
+       *  part of recording a shot — the phone's `selectedClubId` should
+       *  flip to this club so subsequent suggestions / shot defaults
+       *  pick up the change. */
+      type: 'selectClub';
+      clubId: string;
     };
 
 interface WatchBridgeRawPlugin {
