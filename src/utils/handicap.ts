@@ -3,6 +3,14 @@
  * Disclaimer: this is an *estimated* handicap, not an official USGA handicap index.
  */
 
+/** Hard sanity bound for a USGA handicap differential. Real-world values
+ *  on any course / score combo stay between roughly -10 and +50. Anything
+ *  outside ±60 is almost certainly garbage input (course rating set to a
+ *  yardage by mistake, score = 0 because shots hadn't loaded yet, etc.).
+ *  Returning null in that case keeps the bad value out of the estimated
+ *  handicap calculation downstream. */
+const MAX_REASONABLE_DIFFERENTIAL = 60;
+
 export function calculateDifferential(
   adjustedGrossScore: number,
   courseRating: number | null | undefined,
@@ -17,8 +25,25 @@ export function calculateDifferential(
   ) {
     return null;
   }
+  // Defensive: reject obviously bad inputs before the math. A score
+  // below the course rating by more than the rating itself, or
+  // ratings/slopes outside USGA ranges, means something is wrong
+  // with the source data.
+  if (adjustedGrossScore <= 0) return null;
+  if (courseRating < 50 || courseRating > 90) return null;
+  if (slopeRating < 55 || slopeRating > 155) return null;
   const diff = ((adjustedGrossScore - courseRating) * 113) / slopeRating;
+  if (!Number.isFinite(diff)) return null;
+  if (Math.abs(diff) > MAX_REASONABLE_DIFFERENTIAL) return null;
   return Math.round(diff * 10) / 10;
+}
+
+/** Returns true when a persisted differential is so far out of the USGA
+ *  range that it has to be data corruption (course rating wrong, score
+ *  computed as 0, etc.). Used by callers to invalidate stored values. */
+export function isAbsurdDifferential(diff: number | null | undefined): boolean {
+  if (diff == null || Number.isNaN(diff)) return false;
+  return Math.abs(diff) > MAX_REASONABLE_DIFFERENTIAL;
 }
 
 export interface HandicapResult {
@@ -34,7 +59,13 @@ export interface HandicapResult {
  * - 20+ rounds: average of best 8 of last 20
  */
 export function estimateHandicap(differentials: Array<number | null>): HandicapResult {
-  const recent = differentials.filter((d): d is number => typeof d === 'number');
+  // Filter out nulls AND absurd stored values. Without this, one
+  // corrupted round (e.g. an old row written before the input
+  // validation in calculateDifferential was added) would dominate
+  // the "lowest of 3+" branch below and tank the displayed handicap.
+  const recent = differentials.filter(
+    (d): d is number => typeof d === 'number' && !isAbsurdDifferential(d)
+  );
   const count = recent.length;
 
   if (count < 3) {

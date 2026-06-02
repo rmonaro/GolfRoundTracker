@@ -36,7 +36,7 @@ import { PageHeader } from '@/components/layout/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
 import { useRoundDetails } from '@/features/stats/useRounds';
 import { detailRoundStats } from '@/features/stats/computeStats';
-import { calculateDifferential } from '@/utils/handicap';
+import { calculateDifferential, isAbsurdDifferential } from '@/utils/handicap';
 import { roundRepo } from '@/services/roundRepo';
 import { useRoundStore } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
@@ -93,19 +93,36 @@ export function RoundSummaryPage() {
     if (!detail.data?.round) return;
     const { round, holes, shots } = detail.data;
     if (round.completed_at) {
-      // Compute differential once and persist if missing. Use the
-      // shots-list count (source of truth) per hole, NOT the cached
-      // round_holes.strokes column — that column can lag by a shot or
-      // two if the autosave debounce was clipped at round-finalize.
+      // Compute differential from the shots list (source of truth)
+      // per hole, NOT the cached round_holes.strokes column — that
+      // column can lag by a shot or two if the autosave debounce
+      // was clipped at round-finalize.
       const score = holes.reduce((s, h) => {
         const liveStrokes = shots.filter((sh) => sh.hole_id === h.id).length;
         return s + liveStrokes + h.penalty_strokes;
       }, 0);
-      const diff = calculateDifferential(score, round.course_rating, round.slope_rating);
-      if (diff != null && round.handicap_differential == null) {
-        roundRepo.update(round.id, { handicap_differential: diff }).catch((err) => {
-          console.error('[summary] could not persist differential', err);
-        });
+      const computed = calculateDifferential(score, round.course_rating, round.slope_rating);
+      const stored = round.handicap_differential;
+      const storedIsAbsurd = isAbsurdDifferential(stored);
+
+      // Self-heal cases:
+      //   1) Nothing stored → persist a fresh computed value.
+      //   2) Stored value is out of the USGA-reasonable range (e.g.
+      //      -226 from an earlier bug) → overwrite with the fresh
+      //      computed value, or clear to null when even the fresh
+      //      compute can't produce a sane number.
+      if (computed != null && (stored == null || storedIsAbsurd)) {
+        roundRepo
+          .update(round.id, { handicap_differential: computed })
+          .catch((err) =>
+            console.error('[summary] could not persist differential', err)
+          );
+      } else if (storedIsAbsurd && computed == null) {
+        roundRepo
+          .update(round.id, { handicap_differential: null })
+          .catch((err) =>
+            console.error('[summary] could not clear bad differential', err)
+          );
       }
       reset();
     }
@@ -792,7 +809,7 @@ function HolesTab({
   bag
 }: {
   roundId: string;
-  courseId: string;
+  courseId: string | null;
   holes: Array<{
     id: string;
     hole_number: number;
@@ -1029,16 +1046,20 @@ function HolesTab({
 
       {/* View Map — opens a dialog with the hole layout + every recorded
           shot end position rendered as a numbered dot. Read-only (no
-          tap-to-record; hideAim suppresses the aim handle). */}
-      <Button
-        variant="outlined"
-        size="small"
-        startIcon={<MapRoundedIcon />}
-        onClick={() => setMapHoleNumber(selected.hole_number)}
-        sx={{ borderRadius: '5px', textTransform: 'none', alignSelf: 'flex-start' }}
-      >
-        View map
-      </Button>
+          tap-to-record; hideAim suppresses the aim handle). Hidden when
+          the round has no course id (orphaned round / pre-course-library
+          import) since there's no layout to fetch. */}
+      {courseId && (
+        <Button
+          variant="outlined"
+          size="small"
+          startIcon={<MapRoundedIcon />}
+          onClick={() => setMapHoleNumber(selected.hole_number)}
+          sx={{ borderRadius: '5px', textTransform: 'none', alignSelf: 'flex-start' }}
+        >
+          View map
+        </Button>
+      )}
 
       {/* Hole Stats — Putts / GIR / Fairway (3 across). The 4th slot used
           to be Score; the section below replaces it with a full-width
@@ -1253,7 +1274,7 @@ function HoleMapDialog({
   onClose
 }: {
   open: boolean;
-  courseId: string;
+  courseId: string | null;
   holeNumber: number | null;
   shots: HolesTabShot[];
   holes: Array<{ id: string; hole_number: number; par: number }>;

@@ -131,52 +131,114 @@ struct ClubPickerView: View {
 
 // MARK: - Result picker
 
-/// Vocabulary on the watch is intentionally small — we only need 4 cardinal
-/// "miss" directions, "hit"/"made", and an optional "Missed" for putts.
+/// Targeted result selector laid out as a spatial diagram so the player
+/// taps in the direction the ball actually went:
+///
+///   • green / putt → cross (Long up, Short down, Left/Right sides) with
+///     a center "Hit" (or "Made" for putts).
+///   • fairway      → three buttons in a row: Left | Fairway hit | Right.
+///                    No short/long — those aren't recorded for fairway
+///                    target shots in this app.
 struct ResultPickerView: View {
     let targetType: String
     let onCancel: () -> Void
     let onSubmit: (_ targetType: String, _ targetResult: String) -> Void
 
-    var body: some View {
-        let options: [(label: String, value: String, tint: Color, system: String)] =
-            targetType == "putt"
-                ? [
-                    (label: "Made", value: "made", tint: .green, system: "checkmark.circle.fill"),
-                    (label: "Short", value: "short", tint: .orange, system: "arrow.down"),
-                    (label: "Long", value: "long", tint: .orange, system: "arrow.up"),
-                    (label: "Left", value: "left", tint: .orange, system: "arrow.left"),
-                    (label: "Right", value: "right", tint: .orange, system: "arrow.right")
-                ]
-                : [
-                    (label: "Hit", value: "hit", tint: .green, system: "checkmark.circle.fill"),
-                    (label: "Short", value: "short", tint: .orange, system: "arrow.down"),
-                    (label: "Long", value: "long", tint: .orange, system: "arrow.up"),
-                    (label: "Left", value: "left", tint: .orange, system: "arrow.left"),
-                    (label: "Right", value: "right", tint: .orange, system: "arrow.right")
-                ]
+    private var isFairway: Bool { targetType == "fairway" }
+    private var isPutt: Bool { targetType == "putt" }
 
-        List {
-            ForEach(options, id: \.value) { opt in
-                Button {
-                    onSubmit(targetType, opt.value)
-                } label: {
-                    HStack {
-                        Image(systemName: opt.system)
-                            .foregroundColor(opt.tint)
-                            .frame(width: 18)
-                        Text(opt.label)
-                            .fontWeight(.semibold)
-                        Spacer()
-                    }
-                }
+    private var centerLabel: String {
+        if isPutt { return "Made" }
+        if isFairway { return "Fairway" }
+        return "Hit"
+    }
+    private var centerValue: String { isPutt ? "made" : "hit" }
+
+    var body: some View {
+        Group {
+            if isFairway {
+                fairwayRow
+            } else {
+                crossLayout
             }
         }
-        .navigationTitle(targetType == "putt" ? "Putt" : "Result")
+        .navigationTitle(isPutt ? "Putt" : "Result")
         .toolbar {
             ToolbarItem(placement: .cancellationAction) {
                 Button("Cancel", action: onCancel)
             }
         }
+    }
+
+    // MARK: - Layouts
+
+    /// Three-button horizontal row for fairway shots: Left | Fairway | Right.
+    @ViewBuilder
+    private var fairwayRow: some View {
+        HStack(spacing: 8) {
+            arrowButton(system: "arrow.left", value: "left", a11y: "Missed left")
+            centerButton(width: 92, height: 92)
+            arrowButton(system: "arrow.right", value: "right", a11y: "Missed right")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    /// Cross / "compass" layout for green + putt targets:
+    ///   • top    → long
+    ///   • bottom → short
+    ///   • left   → left miss
+    ///   • right  → right miss
+    ///   • center → hit (or made, for putts)
+    @ViewBuilder
+    private var crossLayout: some View {
+        VStack(spacing: 6) {
+            arrowButton(system: "arrow.up", value: "long", a11y: "Long")
+            HStack(spacing: 6) {
+                arrowButton(system: "arrow.left", value: "left", a11y: "Left")
+                centerButton(width: 78, height: 78)
+                arrowButton(system: "arrow.right", value: "right", a11y: "Right")
+            }
+            arrowButton(system: "arrow.down", value: "short", a11y: "Short")
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Buttons
+
+    @ViewBuilder
+    private func arrowButton(system: String, value: String, a11y: String) -> some View {
+        Button {
+            onSubmit(targetType, value)
+        } label: {
+            Image(systemName: system)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(.orange)
+                .frame(width: 42, height: 42)
+                .background(Color.orange.opacity(0.18))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(a11y)
+    }
+
+    /// Big center target. Green-tinted to read as the positive outcome.
+    @ViewBuilder
+    private func centerButton(width: CGFloat, height: CGFloat) -> some View {
+        Button {
+            onSubmit(targetType, centerValue)
+        } label: {
+            Text(centerLabel)
+                .font(.system(size: 14, weight: .heavy, design: .rounded))
+                .multilineTextAlignment(.center)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .padding(.horizontal, 6)
+                .frame(width: width, height: height)
+                .background(Color.green.opacity(0.55))
+                .clipShape(Circle())
+                .foregroundColor(.white)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(centerLabel)
     }
 }
