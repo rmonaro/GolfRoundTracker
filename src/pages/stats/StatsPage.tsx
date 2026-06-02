@@ -22,11 +22,24 @@ import {
   type AimTargetByHole
 } from '@/features/stats/computeDispersion';
 import { ClubDispersionCard } from '@/features/stats/ClubDispersionCard';
+import {
+  computeStrokesGained,
+  aggregateStrokesGained,
+  aggregateStrokesGainedByClub,
+  aggregateStrokesGainedByRound,
+  derivePinsFromMadePutts,
+  type RoundHoleRef
+} from '@/features/stats/computeStrokesGained';
+import {
+  StrokesGainedCard,
+  MIN_ROUNDS_FOR_SG
+} from '@/features/stats/StrokesGainedCard';
 import { roundRepo } from '@/services/roundRepo';
 import { supabase } from '@/lib/supabase';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { useBagStore } from '@/stores/bagStore';
+import { useAuthStore } from '@/stores/authStore';
 
 export function StatsPage() {
   const navigate = useNavigate();
@@ -79,6 +92,7 @@ export function StatsPage() {
   });
 
   const bag = useBagStore((s) => s.clubs);
+  const skillLevel = useAuthStore((s) => s.profile?.skill_level ?? null);
 
   if (isLoading) {
     return (
@@ -172,6 +186,45 @@ export function StatsPage() {
     aimTargetByHole
   );
 
+  // Strokes Gained — derive a per-hole pin position from the user's
+  // history of made putts (most courses aren't OSM-synced yet so the
+  // explicit green coords aren't available), then run the per-shot SG
+  // compute against the amateur baseline. Card is hidden by the
+  // sample-size guard below.
+  const sgData = useMemo(() => {
+    const shots = shotsQuery.data ?? [];
+    if (shots.length === 0) return null;
+    // Flatten round_holes from holesByRound + rounds into the
+    // RoundHoleRef list the pin-derivation expects.
+    const roundToCourse = new Map(rounds.map((r) => [r.id, r.course_id]));
+    const roundHoleRefs: RoundHoleRef[] = [];
+    for (const [roundId, holes] of holesByRound.entries()) {
+      const courseId = roundToCourse.get(roundId);
+      if (!courseId) continue;
+      for (const h of holes) {
+        roundHoleRefs.push({ id: h.id, courseId, holeNumber: h.hole_number });
+      }
+    }
+    const pins = derivePinsFromMadePutts(shots, roundHoleRefs);
+    const shotSGs = computeStrokesGained(shots, pins, skillLevel);
+    // Restrict the trend-by-round aggregation to completed rounds so
+    // an in-progress round (active.completed_at = null) doesn't show
+    // up as a spurious low/partial point on the chart.
+    const completedRounds = rounds.filter((r) => r.completed_at);
+    return {
+      totals: aggregateStrokesGained(shotSGs),
+      byClub: aggregateStrokesGainedByClub(shotSGs, bag),
+      byRound: aggregateStrokesGainedByRound(shotSGs, completedRounds)
+    };
+  }, [shotsQuery.data, holesByRound, rounds, bag, skillLevel]);
+  const sgTotals = sgData?.totals ?? null;
+  const sgByClub = sgData?.byClub ?? [];
+  const sgByRound = sgData?.byRound ?? [];
+  const showSG =
+    completedIds.length >= MIN_ROUNDS_FOR_SG &&
+    sgTotals !== null &&
+    sgTotals.scoredShotCount > 0;
+
   return (
     <Box>
       <PageHeader
@@ -220,6 +273,16 @@ export function StatsPage() {
           <StatCard label="Miss Bias" value={stats.missBias ? capitalize(stats.missBias) : '—'} />
           <StatCard label="Avg vs Par" value={fmtVsPar(stats.averageScoreVsPar)} />
         </Box>
+
+        {showSG && sgTotals && (
+          <StrokesGainedCard
+            totals={sgTotals}
+            roundCount={completedIds.length}
+            byClub={sgByClub}
+            byRound={sgByRound}
+            skillLevel={skillLevel}
+          />
+        )}
 
         {!showTrends && completedIds.length > 0 && (
           <Alert severity="info" variant="outlined">
