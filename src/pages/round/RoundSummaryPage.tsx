@@ -21,6 +21,7 @@ import {
 } from '@mui/material';
 import HomeRoundedIcon from '@mui/icons-material/HomeRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
+import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
@@ -826,8 +827,21 @@ function HolesTab({
 }) {
   const queryClient = useQueryClient();
   const [editingShot, setEditingShot] = useState<HolesTabShot | null>(null);
+  /** Shot pending delete-confirmation. null = no confirm dialog open. */
+  const [deletingShot, setDeletingShot] = useState<HolesTabShot | null>(null);
   /** Currently-open map dialog (which hole's map to show). null = closed. */
   const [mapHoleNumber, setMapHoleNumber] = useState<number | null>(null);
+
+  const onConfirmDelete = async () => {
+    if (!deletingShot) return;
+    try {
+      await roundRepo.deleteShot(deletingShot.id);
+      queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+    } catch (err) {
+      console.error('[summary] shot delete failed', err);
+    }
+    setDeletingShot(null);
+  };
 
   const editingDraft: ShotEditDraft | null = useMemo(() => {
     if (!editingShot) return null;
@@ -1167,11 +1181,13 @@ function HolesTab({
                       }}
                       sx={{
                         display: 'grid',
-                        // 4 columns now: shot#, body, distance, edit icon.
-                        // The edit icon is the visible tap affordance — the
-                        // whole row stays clickable so the user can tap
-                        // anywhere on the row to edit.
-                        gridTemplateColumns: '32px 1fr auto 24px',
+                        // 5 columns: shot#, body, distance, edit icon,
+                        // delete icon. Edit + delete are visible
+                        // affordances; the row's body still triggers
+                        // edit-on-tap. The trash icon has its own
+                        // click handler with stopPropagation so it
+                        // doesn't bubble to the row click.
+                        gridTemplateColumns: '32px 1fr auto 24px 24px',
                         alignItems: 'center',
                         columnGap: 1,
                         rowGap: 0.25,
@@ -1223,6 +1239,36 @@ function HolesTab({
                           transition: 'opacity 120ms ease'
                         }}
                       />
+                      <Box
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`Delete shot ${s.shot_number}`}
+                        onClick={(e) => {
+                          // Don't bubble to the row's tap-to-edit.
+                          e.stopPropagation();
+                          setDeletingShot(s);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' || e.key === ' ') {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setDeletingShot(s);
+                          }
+                        }}
+                        sx={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          cursor: 'pointer',
+                          opacity: 0.6,
+                          transition: 'opacity 120ms ease',
+                          '&:hover': { opacity: 1 }
+                        }}
+                      >
+                        <DeleteOutlineRoundedIcon
+                          sx={{ fontSize: 18, color: 'error.light' }}
+                        />
+                      </Box>
                     </Box>
                   );
                 })}
@@ -1241,6 +1287,28 @@ function HolesTab({
         onClose={() => setEditingShot(null)}
         onSubmit={onSubmitEdit}
       />
+
+      <Dialog
+        open={deletingShot !== null}
+        onClose={() => setDeletingShot(null)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: '5px' } }}
+      >
+        <DialogTitle>Delete shot?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            Remove shot #{deletingShot?.shot_number} from this hole.
+            This cannot be undone.
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setDeletingShot(null)}>Cancel</Button>
+          <Button color="error" variant="contained" onClick={onConfirmDelete}>
+            Delete
+          </Button>
+        </DialogActions>
+      </Dialog>
 
       <HoleMapDialog
         open={mapHoleNumber !== null}
