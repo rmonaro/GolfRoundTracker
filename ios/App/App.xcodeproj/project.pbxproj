@@ -597,6 +597,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = RoundTracker;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Used to estimate your swing tempo and motion patterns during practice. Motion-based only — not a launch monitor.";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.pds.golfroundtracker.app;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -647,6 +648,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = RoundTracker;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown";
+				INFOPLIST_KEY_NSMotionUsageDescription = "Used to estimate your swing tempo and motion patterns during practice. Motion-based only — not a launch monitor.";
 				INFOPLIST_KEY_WKCompanionAppBundleIdentifier = com.pds.golfroundtracker.app;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",

@@ -85,6 +85,28 @@ export type WatchInboundMessage =
        *  pick up the change. */
       type: 'selectClub';
       clubId: string;
+    }
+  // --- Practice-mode swing feedback (motion-based) -----------------------
+  | { type: 'practiceStarted'; sessionId: string; clubId: string | null }
+  | { type: 'practiceClubSelected'; sessionId: string; clubId: string }
+  | { type: 'practiceEnded'; sessionId: string; swingCount: number }
+  | {
+      /** One detected swing's motion metrics. All values are relative /
+       *  estimated — NOT launch-monitor measurements. The phone applies
+       *  the rules engine and persists to `swing_metrics`. */
+      type: 'swingDetected';
+      sessionId: string;
+      swingIndex: number;
+      clubId: string | null;
+      capturedAt: number; // epoch seconds (watch clock)
+      backswingTimeMs: number;
+      downswingTimeMs: number;
+      tempoRatio: number;
+      transitionScore: number;
+      estimatedHandSpeed: number;
+      wristRotationScore: number;
+      finishStabilityScore: number;
+      planeAxis: number[];
     };
 
 interface WatchBridgeRawPlugin {

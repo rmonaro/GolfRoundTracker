@@ -9,6 +9,7 @@ import { AuthProvider } from '@/features/auth/AuthProvider';
 import { SessionHydrator } from '@/features/auth/SessionHydrator';
 import { initMapbox } from '@/features/course/mapbox';
 import { useWatchSync } from '@/features/watch/useWatchSync';
+import { usePracticeWatchSync } from '@/features/practice/usePracticeWatchSync';
 
 // Set the Mapbox access token once at bootstrap. No-op if VITE_MAPBOX_TOKEN
 // is absent — the hole layout falls back to SVG rendering in that case.
@@ -29,6 +30,9 @@ const queryClient = new QueryClient({
 // tree (it needs store hooks). No render output; lives next to SessionHydrator.
 function WatchSyncMount() {
   useWatchSync();
+  // Practice swing-feedback listeners — bound once at the root so swings are
+  // ingested regardless of the active screen. Independent of the round sync.
+  usePracticeWatchSync();
   return null;
 }
 

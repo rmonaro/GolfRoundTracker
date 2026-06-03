@@ -144,6 +144,18 @@ enum WatchOutboundMessage {
     /// so the next suggestion / shot default reflects the change.
     case selectClub(clubId: String)
 
+    // --- Practice-mode swing feedback (motion-based) ---
+    /// Practice session started on the watch. Carries the watch-minted
+    /// session id so the phone can correlate the swings that follow.
+    case practiceStarted(sessionId: String, clubId: String?)
+    /// One detected swing's motion metrics. All values are relative /
+    /// estimated — NOT launch-monitor measurements.
+    case swingDetected(sessionId: String, swingIndex: Int, metrics: SwingMetrics, clubId: String?)
+    /// User changed the practice club mid-session.
+    case practiceClubSelected(sessionId: String, clubId: String)
+    /// Practice session ended on the watch.
+    case practiceEnded(sessionId: String, swingCount: Int)
+
     var payload: [String: Any] {
         switch self {
         case .recordShot(let clubId, let targetType, let targetResult, let start, let end):
@@ -180,6 +192,40 @@ enum WatchOutboundMessage {
             return d
         case .selectClub(let clubId):
             return ["type": "selectClub", "clubId": clubId]
+        case .practiceStarted(let sessionId, let clubId):
+            return [
+                "type": "practiceStarted",
+                "sessionId": sessionId,
+                "clubId": clubId ?? NSNull()
+            ]
+        case .swingDetected(let sessionId, let swingIndex, let m, let clubId):
+            return [
+                "type": "swingDetected",
+                "sessionId": sessionId,
+                "swingIndex": swingIndex,
+                "clubId": clubId ?? NSNull(),
+                "capturedAt": Date().timeIntervalSince1970,
+                "backswingTimeMs": m.backswingTimeMs,
+                "downswingTimeMs": m.downswingTimeMs,
+                "tempoRatio": m.tempoRatio,
+                "transitionScore": m.transitionScore,
+                "estimatedHandSpeed": m.estimatedHandSpeed,
+                "wristRotationScore": m.wristRotationScore,
+                "finishStabilityScore": m.finishStabilityScore,
+                "planeAxis": m.planeAxis
+            ]
+        case .practiceClubSelected(let sessionId, let clubId):
+            return [
+                "type": "practiceClubSelected",
+                "sessionId": sessionId,
+                "clubId": clubId
+            ]
+        case .practiceEnded(let sessionId, let swingCount):
+            return [
+                "type": "practiceEnded",
+                "sessionId": sessionId,
+                "swingCount": swingCount
+            ]
         }
     }
 }

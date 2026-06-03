@@ -198,6 +198,79 @@ export interface ShotRow {
   created_at: string;
 }
 
+// --- Apple Watch motion-based swing feedback (migration 017) ---------------
+// Every value below is a MOTION-BASED ESTIMATE or RELATIVE CONSISTENCY SCORE.
+// Not a launch-monitor measurement (no club path / face angle / plane degrees
+// / launch / ball speed / spin / carry).
+
+/** Optional manual shot-result tag the user can attach to a swing. */
+export type SwingShotResultValue =
+  | 'straight'
+  | 'left'
+  | 'right'
+  | 'short'
+  | 'long'
+  | 'thin'
+  | 'fat'
+  | 'toe'
+  | 'heel'
+  | 'bunker'
+  | 'rough'
+  | 'fairway'
+  | 'green';
+
+export type FatigueTrend = 'none' | 'possible' | 'likely';
+
+export interface SwingSessionRow {
+  id: string;
+  user_id: string;
+  started_at: string;
+  ended_at: string | null;
+  primary_club_id: string | null;
+  swing_count: number;
+  avg_tempo_ratio: number | null;
+  tempo_consistency_score: number | null;
+  plane_consistency_score: number | null;
+  fatigue_trend: FatigueTrend | null;
+  notes: string | null;
+}
+
+export interface SwingMetricRow {
+  id: string;
+  session_id: string;
+  user_id: string;
+  swing_index: number;
+  club_id: string | null;
+  captured_at: string;
+  backswing_time_ms: number;
+  downswing_time_ms: number;
+  tempo_ratio: number;
+  transition_score: number;
+  /** Relative effort 0-100, NOT mph. */
+  estimated_hand_speed: number;
+  wrist_rotation_score: number;
+  finish_stability_score: number;
+  /** Derived on the phone vs baseline; null until a baseline exists. */
+  swing_consistency_score: number | null;
+  plane_consistency_score: number | null;
+  /** Unit rotation-axis [x,y,z] used only for relative pattern comparison. */
+  plane_axis: number[] | null;
+  shot_result: SwingShotResultValue | null;
+  created_at: string;
+}
+
+export interface SwingFeedbackRow {
+  id: string;
+  session_id: string;
+  swing_id: string | null;
+  level: 'positive' | 'neutral' | 'attention';
+  code: string;
+  message: string;
+  source: 'rules' | 'ai';
+  ai_payload: Record<string, unknown> | null;
+  created_at: string;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -208,6 +281,9 @@ export interface Database {
       rounds: { Row: RoundRow; Insert: Omit<RoundRow, 'id'> & { id?: string }; Update: Partial<RoundRow> };
       round_holes: { Row: RoundHoleRow; Insert: Omit<RoundHoleRow, 'id'> & { id?: string }; Update: Partial<RoundHoleRow> };
       shots: { Row: ShotRow; Insert: Omit<ShotRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<ShotRow> };
+      swing_sessions: { Row: SwingSessionRow; Insert: Omit<SwingSessionRow, 'id'> & { id?: string }; Update: Partial<SwingSessionRow> };
+      swing_metrics: { Row: SwingMetricRow; Insert: Omit<SwingMetricRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<SwingMetricRow> };
+      swing_feedback: { Row: SwingFeedbackRow; Insert: Omit<SwingFeedbackRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<SwingFeedbackRow> };
     };
   };
 }

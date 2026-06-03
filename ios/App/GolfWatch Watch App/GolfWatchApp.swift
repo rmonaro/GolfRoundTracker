@@ -33,9 +33,13 @@ struct RootView: View {
     var body: some View {
         Group {
             if session.state.active {
+                // During a live round, practice mode is intentionally out of
+                // reach — swing feedback is a separate, non-round flow.
                 HoleHomeView()
             } else {
-                IdleView()
+                NavigationStack {
+                    IdleView()
+                }
             }
         }
         .onChange(of: session.state.active) { _, isActive in
@@ -59,7 +63,7 @@ struct RootView: View {
 struct IdleView: View {
     @EnvironmentObject var session: WatchSession
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 10) {
             Image(systemName: "figure.golf")
                 .font(.system(size: 32))
                 .foregroundColor(.secondary)
@@ -69,6 +73,14 @@ struct IdleView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
+
+            // Practice mode is available off-round: motion-based swing feedback.
+            NavigationLink {
+                PracticeHomeView()
+            } label: {
+                Label("Practice", systemImage: "dot.radiowaves.left.and.right")
+            }
+            .buttonStyle(.borderedProminent)
         }
         .padding()
     }
