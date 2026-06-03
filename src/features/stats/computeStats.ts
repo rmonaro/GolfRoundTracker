@@ -1,6 +1,10 @@
 import dayjs from 'dayjs';
 import type { Round, Shot } from '@/models';
-import { estimateHandicap, type HandicapResult } from '@/utils/handicap';
+import {
+  estimateHandicap,
+  isAbsurdDifferential,
+  type HandicapResult
+} from '@/utils/handicap';
 
 export interface AggregatedStats {
   handicap: HandicapResult;
@@ -92,8 +96,15 @@ export function aggregateRoundStats(
     }))
     .reverse();
 
+  // Filter out absurd stored values (e.g., -210 from an early-bug
+  // round) the same way estimateHandicap does. Without this, one
+  // corrupted differential drags the trend chart into nonsense.
   const recentDifferentials = recent
-    .filter((r) => r.handicap_differential != null)
+    .filter(
+      (r) =>
+        r.handicap_differential != null &&
+        !isAbsurdDifferential(r.handicap_differential)
+    )
     .map((r) => ({
       date: dayjs(r.started_at).format('MMM D'),
       differential: r.handicap_differential

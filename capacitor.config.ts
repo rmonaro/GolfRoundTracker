@@ -1,4 +1,4 @@
-import type { CapacitorConfig } from '@capacitor/cli';
+import type { CapacitorConfig } from "@capacitor/cli";
 
 /**
  * Capacitor config.
@@ -12,9 +12,9 @@ import type { CapacitorConfig } from '@capacitor/cli';
  * Android Emulator can reach your machine).
  */
 const config: CapacitorConfig = {
-  appId: 'com.golfroundtracker.app',
-  appName: 'Golf Round Tracker',
-  webDir: 'dist',
+  appId: "com.pds.golfroundtracker.app",
+  appName: "Golf Round Tracker",
+  webDir: "dist",
   ios: {
     // 'never' lets the WKWebView extend edge-to-edge under the status bar
     // and over the home-indicator zone. With 'never', env(safe-area-inset-*)
@@ -25,13 +25,13 @@ const config: CapacitorConfig = {
     // the safe areas — which clamps the app inside a smaller box AND zeroes
     // out env(safe-area-inset-*), so our CSS can't make the layout fill the
     // screen.
-    contentInset: 'never'
+    contentInset: "never",
   },
   android: {
     // Match the deep colour the dark theme expects so there's no white flash
     // during startup.
-    backgroundColor: '#0B1410'
-  }
+    backgroundColor: "#0B1410",
+  },
   // server: {
   //   url: 'http://192.168.1.42:5173',
   //   cleartext: true
