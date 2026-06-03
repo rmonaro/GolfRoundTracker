@@ -42,6 +42,7 @@ import { useBagStore } from '@/stores/bagStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
+import { useIsAdmin } from '@/admin/hooks/useIsAdmin';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
 import {
   AddShotSheet,
@@ -149,6 +150,9 @@ export function HoleTrackingPage() {
   // start/stop tracking flow has been retired; the GPS FAB now toggles
   // auto-track instead.
   const [autoTrackEnabled, setAutoTrackEnabled] = useState(false);
+  // GPS Track FAB is gated to admins for now — gives us a controlled
+  // rollout while the auto-track + watch-bridge UX is stabilising.
+  const { data: isAdmin } = useIsAdmin();
   const [trackingBusy, setTrackingBusy] = useState(false);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   // Club pre-selection: the user picks a club on the main screen so the next
@@ -1575,11 +1579,13 @@ export function HoleTrackingPage() {
           </Button>
         )}
 
-        {/* Auto-track GPS FAB. Only when GPS is enabled in Settings. Tap to
-            arm continuous tracking; the state machine in useAutoTrack
-            detects "walked then stopped" patterns and opens the Add Shot
-            sheet pre-filled when a shot lands. Tap again to disarm. */}
-        {gpsEnabled && (
+        {/* Auto-track GPS FAB. Only when GPS is enabled in Settings AND
+            the viewer is an admin (controlled rollout while the auto-
+            track + watch-bridge UX is stabilising). Tap to arm
+            continuous tracking; the state machine in useAutoTrack
+            detects "walked then stopped" patterns and opens the Add
+            Shot sheet pre-filled when a shot lands. Tap again to disarm. */}
+        {gpsEnabled && isAdmin && (
           <Fab
             variant="extended"
             color={autoTrackEnabled ? 'error' : 'default'}
