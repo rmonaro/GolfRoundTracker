@@ -45,6 +45,12 @@ struct RootView: View {
         .onChange(of: session.state.active) { _, isActive in
             if isActive {
                 session.startContinuousLocation()
+                // A round taking over ends any practice session. The two modes
+                // are mutually exclusive: leaving practice armed keeps the
+                // motion sensors running and floods the shared WCSession
+                // channel the round needs for shot recording. endSession()
+                // also notifies the phone so its session is finalized.
+                PracticeController.shared.endSession()
             } else {
                 session.stopContinuousLocation()
             }
@@ -55,6 +61,7 @@ struct RootView: View {
             // after starting on the phone).
             if session.state.active {
                 session.startContinuousLocation()
+                PracticeController.shared.endSession()
             }
         }
     }

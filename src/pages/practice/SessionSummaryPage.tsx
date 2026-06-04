@@ -1,6 +1,8 @@
+import { useMemo } from 'react';
 import { Box, Button, Chip, Divider, Paper, Stack, Typography } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import { useSwingSessionStore } from '@/stores/swingSessionStore';
+import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
 import { fmtPlane } from '@/utils/swingLabels';
 
@@ -30,6 +32,10 @@ export function SessionSummaryPage() {
   const sessionFeedback = useSwingSessionStore((s) => s.sessionFeedback);
   const reset = useSwingSessionStore((s) => s.reset);
 
+  // Live-computed fallback stats so the cards reflect the swings even if the
+  // persisted rollup is missing (e.g. ended before all swings were ingested).
+  const derived = useMemo(() => evaluateSession(swings).rollup, [swings]);
+
   const onDone = () => {
     reset();
     navigate('/');
@@ -51,6 +57,14 @@ export function SessionSummaryPage() {
   const levelColor = (level: string) =>
     level === 'positive' ? 'success' : level === 'attention' ? 'warning' : 'default';
 
+  // Prefer the persisted rollup, but fall back to live computation from the
+  // swings so the cards never show 0/— while swings are clearly present.
+  const swingCount = rollup?.swingCount ?? swings.length;
+  const avgTempo = rollup?.avgTempoRatio ?? derived.avgTempoRatio;
+  const tempoConsistency = rollup?.tempoConsistencyScore ?? derived.tempoConsistencyScore;
+  const planeConsistency = rollup?.planeConsistencyScore ?? derived.planeConsistencyScore;
+  const fatigueTrend = rollup?.fatigueTrend ?? derived.fatigueTrend;
+
   return (
     <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
       <Typography variant="h5" fontWeight={800}>
@@ -66,36 +80,32 @@ export function SessionSummaryPage() {
           mt: 2
         }}
       >
-        <Stat label="Swings" value={String(rollup?.swingCount ?? swings.length)} />
+        <Stat label="Swings" value={String(swingCount)} />
         <Stat
           label="Avg tempo (est.)"
-          value={rollup?.avgTempoRatio != null ? `${rollup.avgTempoRatio.toFixed(1)} : 1` : '—'}
+          value={avgTempo != null ? `${avgTempo.toFixed(1)} : 1` : '—'}
         />
         <Stat
           label="Tempo consistency"
-          value={
-            rollup?.tempoConsistencyScore != null ? `${rollup.tempoConsistencyScore}/100` : '—'
-          }
+          value={tempoConsistency != null ? `${tempoConsistency}/100` : '—'}
         />
         <Stat
           label="Pattern consistency"
-          value={
-            rollup?.planeConsistencyScore != null ? `${rollup.planeConsistencyScore}/100` : '—'
-          }
+          value={planeConsistency != null ? `${planeConsistency}/100` : '—'}
         />
       </Box>
 
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-        {rollup?.planeConsistencyScore != null
-          ? fmtPlane(rollup.planeConsistencyScore)
+        {planeConsistency != null
+          ? fmtPlane(planeConsistency)
           : 'Swing motion pattern consistency —'}
       </Typography>
 
       <Chip
         sx={{ mt: 1.5 }}
         size="small"
-        color={rollup?.fatigueTrend === 'none' ? 'default' : 'warning'}
-        label={fatigueLabel[rollup?.fatigueTrend ?? 'none']}
+        color={fatigueTrend === 'none' ? 'default' : 'warning'}
+        label={fatigueLabel[fatigueTrend]}
       />
 
       {sessionFeedback.length > 0 && (

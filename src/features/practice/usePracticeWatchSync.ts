@@ -1,5 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { AppleWatchSwing } from '@/services/appleWatchSwing';
+import { useRoundStore } from '@/stores/roundStore';
+import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { practiceController } from './practiceController';
 
 /**
@@ -12,6 +14,16 @@ import { practiceController } from './practiceController';
  */
 export function usePracticeWatchSync() {
   const bound = useRef(false);
+  const roundActive = useRoundStore((s) => s.active != null);
+
+  // Mutual exclusivity (phone side): if a round starts while a practice session
+  // is still active (e.g. the user started practice from the phone), finalize
+  // the practice session. Mirrors the watch-side teardown in GolfWatchApp.
+  useEffect(() => {
+    if (roundActive && useSwingSessionStore.getState().session) {
+      void practiceController.end();
+    }
+  }, [roundActive]);
 
   useEffect(() => {
     if (bound.current) return;
@@ -38,9 +50,10 @@ export function usePracticeWatchSync() {
       .catch((err) => console.warn('[practice-sync] club listener failed', err));
 
     AppleWatchSwing.onPracticeEnded(() => {
-      // The phone owns end-of-session evaluation; a watch "End" just stops the
-      // motion stream. We leave the session open on the phone so the user can
-      // review + add shot results, then end it from the summary screen.
+      // Ending on the watch finalizes the phone session: compute rollups +
+      // baseline feedback and write `ended_at`. Without this the session stays
+      // "in progress" forever. Safe no-op if there's no active session.
+      void practiceController.end();
     })
       .then((h) => handles.push(h))
       .catch((err) => console.warn('[practice-sync] ended listener failed', err));

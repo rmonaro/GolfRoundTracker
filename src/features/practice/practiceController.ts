@@ -21,28 +21,65 @@ function currentUserId(): string | null {
   return useAuthStore.getState().session?.user.id ?? null;
 }
 
-export const practiceController = {
-  /** Start a practice session (phone-initiated). */
-  async start(clubId: string | null): Promise<string | null> {
-    const userId = currentUserId();
-    if (!userId) return null;
-    const remote = await swingRepo.createSession({ userId, primaryClubId: clubId });
-    store.getState().startSession({
-      sessionId: remote.id,
-      watchSessionId: null,
-      userId,
-      startedAt: remote.startedAt,
-      clubId
+/**
+ * In-flight session creation, so the burst of swing messages that arrive right
+ * after `practiceStarted` (or all at once when a pocketed phone reconnects)
+ * share ONE created session instead of racing to make 36 of them.
+ */
+let creating: Promise<string | null> | null = null;
+
+/**
+ * Return the active practice session id, creating one if none exists. This is
+ * what makes watch-initiated practice work and guarantees swings are never
+ * dropped — whoever arrives first (a `practiceStarted` message or the first
+ * `swingDetected`) lazily opens the session.
+ */
+async function ensureSession(clubId: string | null): Promise<string | null> {
+  const existing = store.getState().session;
+  if (existing) return existing.sessionId;
+  if (creating) return creating;
+
+  const userId = currentUserId();
+  if (!userId) return null;
+
+  creating = swingRepo
+    .createSession({ userId, primaryClubId: clubId })
+    .then((remote) => {
+      // Guard against a concurrent caller having already opened one.
+      if (!store.getState().session) {
+        store.getState().startSession({
+          sessionId: remote.id,
+          watchSessionId: null,
+          userId,
+          startedAt: remote.startedAt,
+          clubId
+        });
+      }
+      creating = null;
+      return store.getState().session?.sessionId ?? remote.id;
+    })
+    .catch((err) => {
+      console.warn('[practice] ensureSession failed', err);
+      creating = null;
+      return null;
     });
-    return remote.id;
+  return creating;
+}
+
+export const practiceController = {
+  /** Start a practice session (phone-initiated). Reuses one if already open. */
+  async start(clubId: string | null): Promise<string | null> {
+    return ensureSession(clubId);
   },
 
-  /** Correlate a watch-minted session id with the active phone session. */
+  /** Watch started practice: open/correlate the phone session. */
   onWatchPracticeStarted(watchSessionId: string, clubId: string | null): void {
-    const st = store.getState();
-    if (!st.session) return; // V1: phone "Start" creates the session first.
-    st.setWatchSessionId(watchSessionId);
-    if (clubId) st.setClub(clubId);
+    void ensureSession(clubId).then((sessionId) => {
+      if (!sessionId) return;
+      const st = store.getState();
+      st.setWatchSessionId(watchSessionId);
+      if (clubId) st.setClub(clubId);
+    });
   },
 
   onWatchClubSelected(clubId: string): void {
@@ -55,9 +92,15 @@ export const practiceController = {
 
   /** Ingest one swing streamed from the watch: add locally + persist. */
   async ingestSwing(payload: SwingDetectedPayload): Promise<void> {
-    const st = store.getState();
-    const session = st.session;
-    if (!session) return; // No active session — ignore (bounded V1 behaviour).
+    // Open a session if one isn't active yet (watch-initiated practice, or a
+    // queued burst arriving after the phone reconnected). Without this the
+    // swing would be silently dropped.
+    const sessionId = await ensureSession(payload.clubId ?? null);
+    const session = store.getState().session;
+    if (!sessionId || !session) {
+      console.warn('[practice] dropped swing — no session and could not create one');
+      return;
+    }
 
     const id = localId();
     const swing: SwingMetric = {
@@ -81,7 +124,7 @@ export const practiceController = {
     };
 
     const feedback = evaluateSwing(swing);
-    st.addSwing(swing, feedback);
+    store.getState().addSwing(swing, feedback);
 
     // Persist (best-effort; the swing is already visible locally).
     try {
@@ -142,20 +185,45 @@ export const practiceController = {
       console.warn('[practice] baseline lookup failed', err);
     }
 
-    const evaluation = evaluateSession(st.swings, baseline);
+    // Evaluate against the authoritative swing set. The in-memory store can lag
+    // the DB when swings arrive as a queued burst (pocketed phone), so pull the
+    // persisted rows and use whichever set is larger — this keeps the saved
+    // rollup (shown in the Past Practices list) in sync with the real swings.
+    let dbSwings: typeof st.swings = [];
+    try {
+      dbSwings = await swingRepo.listSwings(session.sessionId);
+    } catch (err) {
+      console.warn('[practice] listSwings during end failed', err);
+    }
+    const localSwings = store.getState().swings;
+    const swings = dbSwings.length >= localSwings.length ? dbSwings : localSwings;
 
-    // Backfill per-swing relative scores (local + remote).
-    for (const swing of st.swings) {
+    const evaluation = evaluateSession(swings, baseline);
+
+    // Persist per-swing relative scores to the DB. `evaluation.perSwing` is
+    // keyed by the evaluated set's ids; each evaluated swing carries a
+    // remoteId (DB rows) or its own id is the remote id.
+    for (const swing of swings) {
       const scores = evaluation.perSwing[swing.id];
       if (!scores) continue;
-      store.getState().setSwingScores(swing.id, scores);
-      if (swing.remoteId) {
-        try {
-          await swingRepo.updateSwingScores(swing.remoteId, scores);
-        } catch (err) {
-          console.warn('[practice] updateSwingScores failed', err);
-        }
+      const remoteId = swing.remoteId ?? swing.id;
+      try {
+        await swingRepo.updateSwingScores(remoteId, scores);
+      } catch (err) {
+        console.warn('[practice] updateSwingScores failed', err);
       }
+    }
+
+    // Reflect the scores in the in-memory store so the just-ended summary's
+    // swing cards show them, matching DB rows by remoteId.
+    const scoresByRemote = new Map(
+      swings.map((s) => [s.remoteId ?? s.id, evaluation.perSwing[s.id]])
+    );
+    for (const local of store.getState().swings) {
+      const scores = local.remoteId
+        ? scoresByRemote.get(local.remoteId)
+        : evaluation.perSwing[local.id];
+      if (scores) store.getState().setSwingScores(local.id, scores);
     }
 
     store.getState().applySessionEvaluation(evaluation.feedback, evaluation.rollup);

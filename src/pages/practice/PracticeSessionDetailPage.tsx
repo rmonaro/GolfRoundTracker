@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Button, Chip, Divider, Paper, Stack, Typography } from '@mui/material';
 import { useNavigate, useParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { swingRepo } from '@/services/swingRepo';
+import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
 import { SwingCard } from '@/features/practice/SwingCard';
 import { SWING_DISCLAIMER } from '@/utils/swingLabels';
@@ -80,6 +81,17 @@ export function PracticeSessionDetailPage() {
     };
   }, [sessionId]);
 
+  // Compute the overview stats from the actual swings rather than trusting the
+  // session row's rollup — the rollup is only written on a clean end-of-session,
+  // so an in-progress or imperfectly-ended session would otherwise show 0/—
+  // even though the swings exist. Computed values always match the cards below.
+  const derived = useMemo(() => evaluateSession(swings).rollup, [swings]);
+  const swingCount = swings.length || (session?.swingCount ?? 0);
+  const avgTempo = derived.avgTempoRatio ?? session?.avgTempoRatio ?? null;
+  const tempoConsistency = derived.tempoConsistencyScore ?? session?.tempoConsistencyScore ?? null;
+  const planeConsistency = derived.planeConsistencyScore ?? session?.planeConsistencyScore ?? null;
+  const fatigueTrend = derived.fatigueTrend ?? session?.fatigueTrend ?? 'none';
+
   const levelColor = (level: string) =>
     level === 'positive' ? 'success' : level === 'attention' ? 'warning' : 'default';
 
@@ -104,28 +116,26 @@ export function PracticeSessionDetailPage() {
       <MotionDisclaimer />
 
       <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 1, mt: 2 }}>
-        <Stat label="Swings" value={String(session?.swingCount ?? swings.length)} />
+        <Stat label="Swings" value={String(swingCount)} />
         <Stat
           label="Avg tempo (est.)"
-          value={session?.avgTempoRatio != null ? `${session.avgTempoRatio.toFixed(1)} : 1` : '—'}
+          value={avgTempo != null ? `${avgTempo.toFixed(1)} : 1` : '—'}
         />
         <Stat
           label="Tempo consistency"
-          value={session?.tempoConsistencyScore != null ? `${session.tempoConsistencyScore}/100` : '—'}
+          value={tempoConsistency != null ? `${tempoConsistency}/100` : '—'}
         />
         <Stat
           label="Pattern consistency"
-          value={
-            session?.planeConsistencyScore != null ? `${session.planeConsistencyScore}/100` : '—'
-          }
+          value={planeConsistency != null ? `${planeConsistency}/100` : '—'}
         />
       </Box>
 
       <Chip
         sx={{ mt: 1.5 }}
         size="small"
-        color={session?.fatigueTrend && session.fatigueTrend !== 'none' ? 'warning' : 'default'}
-        label={fatigueLabel[session?.fatigueTrend ?? 'none']}
+        color={fatigueTrend !== 'none' ? 'warning' : 'default'}
+        label={fatigueLabel[fatigueTrend]}
       />
 
       {sessionFeedback.length > 0 && (
