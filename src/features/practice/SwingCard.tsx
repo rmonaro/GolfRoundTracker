@@ -33,17 +33,20 @@ function ScorePill({ label, value }: { label: string; value: number }) {
 export function SwingCard({
   swing,
   feedback,
-  editable = true
+  editable = true,
+  square = false
 }: {
   swing: SwingMetric;
   feedback: SwingFeedback[];
   /** Live feed allows tagging a shot result; history view is read-only. */
   editable?: boolean;
+  /** Square (0 radius) corners — used on the session overview. */
+  square?: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
   return (
-    <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2 }}>
+    <Paper variant="outlined" sx={{ p: 1.5, borderRadius: square ? 0 : 2 }}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Stack direction="row" alignItems="baseline" spacing={1}>
           <Typography variant="h5" fontWeight={800}>

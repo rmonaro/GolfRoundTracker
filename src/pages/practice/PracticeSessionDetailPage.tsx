@@ -18,7 +18,7 @@ const fatigueLabel: Record<string, string> = {
 
 function Stat({ label, value }: { label: string; value: string }) {
   return (
-    <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 2, textAlign: 'center' }}>
+    <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 0, textAlign: 'center' }}>
       <Typography variant="h6" fontWeight={800}>
         {value}
       </Typography>
@@ -158,7 +158,13 @@ export function PracticeSessionDetailPage() {
       </Typography>
       <Stack spacing={1.5}>
         {swings.map((s) => (
-          <SwingCard key={s.id} swing={s} feedback={feedbackBySwing[s.remoteId ?? s.id] ?? []} editable={false} />
+          <SwingCard
+            key={s.id}
+            swing={s}
+            feedback={feedbackBySwing[s.remoteId ?? s.id] ?? []}
+            editable={false}
+            square
+          />
         ))}
       </Stack>
 
