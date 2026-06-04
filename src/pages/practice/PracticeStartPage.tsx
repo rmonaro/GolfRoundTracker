@@ -55,7 +55,11 @@ export function PracticeStartPage() {
         </Stack>
       )}
 
-      <Button sx={{ mt: 3 }} onClick={() => navigate('/')}>
+      <Button sx={{ mt: 3 }} variant="outlined" fullWidth onClick={() => navigate('/practice/history')}>
+        View past practices
+      </Button>
+
+      <Button sx={{ mt: 1 }} onClick={() => navigate('/')}>
         Back
       </Button>
     </Box>

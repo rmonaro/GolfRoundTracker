@@ -112,7 +112,15 @@ export function SessionSummaryPage() {
         </>
       )}
 
-      <Button variant="contained" fullWidth sx={{ mt: 3 }} onClick={onDone}>
+      <Button
+        variant="outlined"
+        fullWidth
+        sx={{ mt: 3 }}
+        onClick={() => navigate('/practice/history')}
+      >
+        View past practices
+      </Button>
+      <Button variant="contained" fullWidth sx={{ mt: 1 }} onClick={onDone}>
         Done
       </Button>
     </Box>

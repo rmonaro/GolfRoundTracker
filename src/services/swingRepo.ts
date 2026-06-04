@@ -178,6 +178,26 @@ export const swingRepo = {
     return (data ?? []).map((r) => mapSession(r as SwingSessionRow));
   },
 
+  /**
+   * Delete a practice session. RLS restricts this to the owner; the schema
+   * cascades to swing_metrics and swing_feedback, so one delete removes the
+   * whole session graph.
+   */
+  async deleteSession(sessionId: string): Promise<void> {
+    const { error } = await supabase.from('swing_sessions').delete().eq('id', sessionId);
+    if (error) throw toAppError(error, 'Could not delete practice session');
+  },
+
+  async getSession(sessionId: string): Promise<SwingSession | null> {
+    const { data, error } = await supabase
+      .from('swing_sessions')
+      .select('*')
+      .eq('id', sessionId)
+      .maybeSingle();
+    if (error) throw toAppError(error, 'Could not load practice session');
+    return data ? mapSession(data as SwingSessionRow) : null;
+  },
+
   async listSwings(sessionId: string): Promise<SwingMetric[]> {
     const { data, error } = await supabase
       .from('swing_metrics')

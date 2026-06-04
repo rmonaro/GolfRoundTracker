@@ -106,8 +106,19 @@ function buildSnapshot({
   pinLat,
   pinLng
 }: SnapshotInputs): WatchRoundState {
+  // Slim the bag down to what the watch UI actually renders. Computed up front
+  // so it's available even with no active round — practice mode runs off-round
+  // and the watch's club picker needs the bag regardless of round state.
+  const slimBag = bag.map((c) => ({
+    clubId: c.clubId,
+    name: c.customName || c.name,
+    isPutter: c.category === 'putter',
+    typicalYards: c.typicalDistanceYards ?? null
+  }));
+
   if (!active || !currentHole) {
-    return { active: false };
+    // No round: still push the bag so Watch Practice can select a club.
+    return { active: false, bag: slimBag };
   }
 
   // Yards remaining: full hole yardage minus sum of recorded shot distances
@@ -130,14 +141,6 @@ function buildSnapshot({
     completedTotals.completedCount === 0
       ? '--'
       : scoreVsPar(completedTotals.score, completedTotals.par);
-
-  // Slim the bag down to what the watch UI actually renders.
-  const slimBag = bag.map((c) => ({
-    clubId: c.clubId,
-    name: c.customName || c.name,
-    isPutter: c.category === 'putter',
-    typicalYards: c.typicalDistanceYards ?? null
-  }));
 
   // Putts on this hole — same heuristic the phone uses for the Score card.
   const puttsThisHole = currentHole.shots.filter((s) => s.targetType === 'putt').length;

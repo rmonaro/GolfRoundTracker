@@ -18,6 +18,8 @@ import { WatchPage } from '@/pages/watch/WatchPage';
 import { PracticeStartPage } from '@/pages/practice/PracticeStartPage';
 import { PracticeLivePage } from '@/pages/practice/PracticeLivePage';
 import { SessionSummaryPage } from '@/pages/practice/SessionSummaryPage';
+import { PastPracticesPage } from '@/pages/practice/PastPracticesPage';
+import { PracticeSessionDetailPage } from '@/pages/practice/PracticeSessionDetailPage';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { AdminGuard } from '@/admin/AdminGuard';
 import { AdminLayout } from '@/admin/pages/AdminLayout';
@@ -105,6 +107,22 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <SessionSummaryPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/history"
+        element={
+          <AuthGuard>
+            <PastPracticesPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/history/:sessionId"
+        element={
+          <AuthGuard>
+            <PracticeSessionDetailPage />
           </AuthGuard>
         }
       />

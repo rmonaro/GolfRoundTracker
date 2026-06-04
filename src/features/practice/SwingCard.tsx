@@ -32,10 +32,13 @@ function ScorePill({ label, value }: { label: string; value: number }) {
 
 export function SwingCard({
   swing,
-  feedback
+  feedback,
+  editable = true
 }: {
   swing: SwingMetric;
   feedback: SwingFeedback[];
+  /** Live feed allows tagging a shot result; history view is read-only. */
+  editable?: boolean;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -98,10 +101,20 @@ export function SwingCard({
         <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
           {fmtHandSpeed(swing.estimatedHandSpeed)}
         </Typography>
-        <ShotResultPicker
-          value={swing.shotResult}
-          onChange={(r) => void practiceController.setShotResult(swing.id, r)}
-        />
+        {editable ? (
+          <ShotResultPicker
+            value={swing.shotResult}
+            onChange={(r) => void practiceController.setShotResult(swing.id, r)}
+          />
+        ) : (
+          swing.shotResult && (
+            <Chip
+              size="small"
+              label={`Result: ${swing.shotResult}`}
+              sx={{ textTransform: 'capitalize' }}
+            />
+          )
+        )}
       </Collapse>
     </Paper>
   );
