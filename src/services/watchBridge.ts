@@ -89,7 +89,18 @@ export type WatchInboundMessage =
   // --- Practice-mode swing feedback (motion-based) -----------------------
   | { type: 'practiceStarted'; sessionId: string; clubId: string | null }
   | { type: 'practiceClubSelected'; sessionId: string; clubId: string }
-  | { type: 'practiceEnded'; sessionId: string; swingCount: number }
+  | {
+      type: 'practiceEnded';
+      sessionId: string;
+      swingCount: number;
+      // Optional health summary from the watch workout session.
+      avgHeartRate?: number;
+      maxHeartRate?: number;
+      minHeartRate?: number;
+      hrvSdnn?: number;
+      activeCalories?: number;
+      durationSeconds?: number;
+    }
   | {
       /** One detected swing's motion metrics. All values are relative /
        *  estimated — NOT launch-monitor measurements. The phone applies
@@ -107,6 +118,15 @@ export type WatchInboundMessage =
       wristRotationScore: number;
       finishStabilityScore: number;
       planeAxis: number[];
+      // Derived (Phase 1)
+      swingType?: string;
+      isAirSwing?: boolean;
+      backswingRotation?: number;
+      releaseTimingScore?: number;
+      decelerationScore?: number;
+      transitionDirectionScore?: number;
+      addressGravity?: number[];
+      heartRate?: number;
     };
 
 interface WatchBridgeRawPlugin {

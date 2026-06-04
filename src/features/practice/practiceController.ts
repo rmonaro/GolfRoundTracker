@@ -9,7 +9,12 @@ import { useAuthStore } from '@/stores/authStore';
 import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { swingRepo } from '@/services/swingRepo';
 import { evaluateSession, evaluateSwing } from '@/services/swingFeedbackEngine';
-import type { SwingDetectedPayload, SwingMetric, SwingShotResult } from '@/types/swing';
+import type {
+  PracticeHealthSummary,
+  SwingDetectedPayload,
+  SwingMetric,
+  SwingShotResult
+} from '@/types/swing';
 
 const store = useSwingSessionStore;
 
@@ -119,6 +124,14 @@ export const practiceController = {
       swingConsistencyScore: null,
       planeConsistencyScore: null,
       planeAxis: payload.planeAxis ?? [],
+      swingType: payload.swingType ?? null,
+      isAirSwing: payload.isAirSwing ?? false,
+      backswingRotation: payload.backswingRotation ?? null,
+      releaseTimingScore: payload.releaseTimingScore ?? null,
+      decelerationScore: payload.decelerationScore ?? null,
+      transitionDirectionScore: payload.transitionDirectionScore ?? null,
+      addressGravity: payload.addressGravity ?? [],
+      heartRate: payload.heartRate ?? null,
       shotResult: null,
       remoteId: null
     };
@@ -142,6 +155,14 @@ export const practiceController = {
         wristRotationScore: swing.wristRotationScore,
         finishStabilityScore: swing.finishStabilityScore,
         planeAxis: swing.planeAxis,
+        swingType: swing.swingType,
+        isAirSwing: swing.isAirSwing,
+        backswingRotation: swing.backswingRotation,
+        releaseTimingScore: swing.releaseTimingScore,
+        decelerationScore: swing.decelerationScore,
+        transitionDirectionScore: swing.transitionDirectionScore,
+        addressGravity: swing.addressGravity,
+        heartRate: swing.heartRate,
         shotResult: swing.shotResult
       });
       store.getState().markSwingPersisted(id, saved.remoteId ?? saved.id);
@@ -172,8 +193,9 @@ export const practiceController = {
     }
   },
 
-  /** End the session: compute session rollups + baseline feedback, persist. */
-  async end(): Promise<string | null> {
+  /** End the session: compute session rollups + baseline feedback, persist
+   *  (including the optional health summary from the watch). */
+  async end(health?: PracticeHealthSummary): Promise<string | null> {
     const st = store.getState();
     const session = st.session;
     if (!session) return null;
@@ -239,7 +261,7 @@ export const practiceController = {
           source: 'rules'
         });
       }
-      await swingRepo.endSession(session.sessionId, evaluation.rollup);
+      await swingRepo.endSession(session.sessionId, evaluation.rollup, health);
     } catch (err) {
       console.warn('[practice] endSession failed', err);
     }

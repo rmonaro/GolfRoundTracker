@@ -18,6 +18,21 @@ import { useClubNameLookup } from './useClubName';
 const levelColor = (level: SwingFeedback['level']) =>
   level === 'positive' ? 'success' : level === 'attention' ? 'warning' : 'default';
 
+const SWING_TYPE_LABEL: Record<string, string> = {
+  full: 'Full swing',
+  pitch: 'Pitch',
+  chip: 'Chip',
+  putt: 'Putt',
+  air: 'Rehearsal'
+};
+
+/** Wrist rotation amount (radians) → relative length category. */
+function backswingLengthLabel(rotationRad: number): string {
+  if (rotationRad < 1.6) return 'Short';
+  if (rotationRad > 2.6) return 'Long';
+  return 'Normal';
+}
+
 function ScorePill({ label, value }: { label: string; value: number }) {
   return (
     <Stack alignItems="center" sx={{ minWidth: 64 }}>
@@ -59,6 +74,13 @@ export function SwingCard({
           </Typography>
         </Stack>
         <Stack direction="row" spacing={0.5} alignItems="center">
+          {swing.isAirSwing ? (
+            <Chip size="small" variant="outlined" label="Rehearsal" />
+          ) : (
+            swing.swingType && (
+              <Chip size="small" variant="outlined" label={SWING_TYPE_LABEL[swing.swingType]} />
+            )
+          )}
           <Chip size="small" color="primary" label={clubNameOf(swing.clubId)} />
           <Chip size="small" variant="outlined" label={`#${swing.swingIndex + 1}`} />
         </Stack>
@@ -105,10 +127,31 @@ export function SwingCard({
           {swing.swingConsistencyScore != null && (
             <ScorePill label="Consistency" value={swing.swingConsistencyScore} />
           )}
+          {swing.releaseTimingScore != null && (
+            <ScorePill label="Release" value={swing.releaseTimingScore} />
+          )}
+          {swing.decelerationScore != null && (
+            <ScorePill label="Thru impact" value={swing.decelerationScore} />
+          )}
+          {swing.transitionDirectionScore != null && (
+            <ScorePill label="Direction" value={swing.transitionDirectionScore} />
+          )}
         </Box>
-        <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-          {fmtHandSpeed(swing.estimatedHandSpeed)}
-        </Typography>
+        <Stack direction="row" spacing={2} sx={{ mb: 1 }} flexWrap="wrap" useFlexGap>
+          <Typography variant="caption" color="text.secondary">
+            {fmtHandSpeed(swing.estimatedHandSpeed)}
+          </Typography>
+          {swing.backswingRotation != null && (
+            <Typography variant="caption" color="text.secondary">
+              Backswing length: {backswingLengthLabel(swing.backswingRotation)}
+            </Typography>
+          )}
+          {swing.heartRate != null && (
+            <Typography variant="caption" color="error">
+              ♥ {swing.heartRate} bpm
+            </Typography>
+          )}
+        </Stack>
         {editable ? (
           <ShotResultPicker
             value={swing.shotResult}

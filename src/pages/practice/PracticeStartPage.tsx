@@ -59,6 +59,10 @@ export function PracticeStartPage() {
         View past practices
       </Button>
 
+      <Button sx={{ mt: 1 }} fullWidth onClick={() => navigate('/practice/guide')}>
+        What's measured & what it means
+      </Button>
+
       <Button sx={{ mt: 1 }} onClick={() => navigate('/')}>
         Back
       </Button>

@@ -20,6 +20,7 @@ import { PracticeLivePage } from '@/pages/practice/PracticeLivePage';
 import { SessionSummaryPage } from '@/pages/practice/SessionSummaryPage';
 import { PastPracticesPage } from '@/pages/practice/PastPracticesPage';
 import { PracticeSessionDetailPage } from '@/pages/practice/PracticeSessionDetailPage';
+import { SwingMetricsGuidePage } from '@/pages/practice/SwingMetricsGuidePage';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { AdminGuard } from '@/admin/AdminGuard';
 import { AdminLayout } from '@/admin/pages/AdminLayout';
@@ -107,6 +108,14 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <SessionSummaryPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/guide"
+        element={
+          <AuthGuard>
+            <SwingMetricsGuidePage />
           </AuthGuard>
         }
       />

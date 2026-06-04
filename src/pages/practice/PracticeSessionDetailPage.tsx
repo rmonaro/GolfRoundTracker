@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Button, Chip, Divider, Paper, Stack, Typography } from '@mui/material';
+import { Box, Button, Chip, Divider, IconButton, Paper, Stack, Typography } from '@mui/material';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import { useNavigate, useParams } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { swingRepo } from '@/services/swingRepo';
@@ -86,11 +87,14 @@ export function PracticeSessionDetailPage() {
   // so an in-progress or imperfectly-ended session would otherwise show 0/—
   // even though the swings exist. Computed values always match the cards below.
   const derived = useMemo(() => evaluateSession(swings).rollup, [swings]);
-  const swingCount = swings.length || (session?.swingCount ?? 0);
+  // Count real swings (rehearsals excluded), matching the stats below.
+  const swingCount = derived.swingCount || swings.length;
   const avgTempo = derived.avgTempoRatio ?? session?.avgTempoRatio ?? null;
   const tempoConsistency = derived.tempoConsistencyScore ?? session?.tempoConsistencyScore ?? null;
   const planeConsistency = derived.planeConsistencyScore ?? session?.planeConsistencyScore ?? null;
   const fatigueTrend = derived.fatigueTrend ?? session?.fatigueTrend ?? 'none';
+  const setupConsistency = derived.setupConsistencyScore ?? session?.setupConsistencyScore ?? null;
+  const avgRest = derived.avgRestSeconds ?? session?.avgRestSeconds ?? null;
 
   const levelColor = (level: string) =>
     level === 'positive' ? 'success' : level === 'attention' ? 'warning' : 'default';
@@ -105,9 +109,17 @@ export function PracticeSessionDetailPage() {
 
   return (
     <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
-      <Typography variant="h5" fontWeight={800}>
-        Practice Session
-      </Typography>
+      <Stack direction="row" justifyContent="space-between" alignItems="center">
+        <Typography variant="h5" fontWeight={800}>
+          Practice Session
+        </Typography>
+        <IconButton
+          aria-label="What these numbers mean"
+          onClick={() => navigate('/practice/guide')}
+        >
+          <InfoOutlinedIcon />
+        </IconButton>
+      </Stack>
       {session && (
         <Typography variant="caption" color="text.secondary">
           {dayjs(session.startedAt).format('MMM D, YYYY · h:mm A')}
@@ -131,12 +143,31 @@ export function PracticeSessionDetailPage() {
         />
       </Box>
 
-      <Chip
-        sx={{ mt: 1.5 }}
-        size="small"
-        color={fatigueTrend !== 'none' ? 'warning' : 'default'}
-        label={fatigueLabel[fatigueTrend]}
-      />
+      <Stack direction="row" spacing={1} sx={{ mt: 1.5 }} flexWrap="wrap" useFlexGap>
+        <Chip
+          size="small"
+          color={fatigueTrend !== 'none' ? 'warning' : 'default'}
+          label={fatigueLabel[fatigueTrend]}
+        />
+        {setupConsistency != null && (
+          <Chip size="small" variant="outlined" label={`Setup ${setupConsistency}/100`} />
+        )}
+        {avgRest != null && (
+          <Chip size="small" variant="outlined" label={`~${avgRest}s between swings`} />
+        )}
+        {session?.avgHeartRate != null && (
+          <Chip size="small" color="error" variant="outlined" label={`♥ ${session.avgHeartRate} avg`} />
+        )}
+        {session?.maxHeartRate != null && (
+          <Chip size="small" color="error" variant="outlined" label={`♥ ${session.maxHeartRate} max`} />
+        )}
+        {session?.hrvSdnn != null && (
+          <Chip size="small" variant="outlined" label={`HRV ${Math.round(session.hrvSdnn)} ms`} />
+        )}
+        {session?.activeCalories != null && (
+          <Chip size="small" variant="outlined" label={`${Math.round(session.activeCalories)} kcal`} />
+        )}
+      </Stack>
 
       {sessionFeedback.length > 0 && (
         <>

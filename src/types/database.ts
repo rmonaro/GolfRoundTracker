@@ -221,6 +221,8 @@ export type SwingShotResultValue =
 
 export type FatigueTrend = 'none' | 'possible' | 'likely';
 
+export type SwingTypeValue = 'full' | 'pitch' | 'chip' | 'putt' | 'air';
+
 export interface SwingSessionRow {
   id: string;
   user_id: string;
@@ -233,6 +235,17 @@ export interface SwingSessionRow {
   plane_consistency_score: number | null;
   fatigue_trend: FatigueTrend | null;
   notes: string | null;
+  // Derived (migration 018)
+  avg_rest_seconds: number | null;
+  rushing: boolean | null;
+  setup_consistency_score: number | null;
+  // Heart rate (migration 019)
+  avg_heart_rate: number | null;
+  max_heart_rate: number | null;
+  min_heart_rate: number | null;
+  hrv_sdnn: number | null;
+  active_calories: number | null;
+  duration_seconds: number | null;
 }
 
 export interface SwingMetricRow {
@@ -256,6 +269,16 @@ export interface SwingMetricRow {
   /** Unit rotation-axis [x,y,z] used only for relative pattern comparison. */
   plane_axis: number[] | null;
   shot_result: SwingShotResultValue | null;
+  // Derived (migration 018)
+  swing_type: SwingTypeValue | null;
+  is_air_swing: boolean;
+  backswing_rotation: number | null;
+  release_timing_score: number | null;
+  deceleration_score: number | null;
+  transition_direction_score: number | null;
+  address_gravity: number[] | null;
+  // Heart rate (migration 019)
+  heart_rate: number | null;
   created_at: string;
 }
 

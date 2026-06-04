@@ -8,9 +8,12 @@
 // are launch-monitor measurements — no exact club path, face angle, swing
 // plane degrees, launch angle, ball speed, spin, or carry distance.
 
-import type { FatigueTrend, SwingShotResultValue } from './database';
+import type { FatigueTrend, SwingShotResultValue, SwingTypeValue } from './database';
 
 export type { FatigueTrend } from './database';
+
+/** Estimated swing classification. */
+export type SwingType = SwingTypeValue;
 
 /** Optional manual shot result the user can attach after a swing. */
 export type SwingShotResult = SwingShotResultValue;
@@ -62,6 +65,19 @@ export interface SwingMetric {
   /** Unit rotation-axis vector used only for the relative comparison. */
   planeAxis: number[];
 
+  // --- Derived motion signals (Phase 1) ---
+  swingType: SwingType | null;
+  isAirSwing: boolean;
+  /** Wrist rotation amount through the backswing (radians). */
+  backswingRotation: number | null;
+  releaseTimingScore: number | null;
+  decelerationScore: number | null;
+  transitionDirectionScore: number | null;
+  /** Gravity direction [x,y,z] at takeaway (setup repeatability compare). */
+  addressGravity: number[];
+  /** Heart rate (bpm) at the swing — a real sensor reading. Null if no HR. */
+  heartRate: number | null;
+
   shotResult: SwingShotResult | null;
   /** Supabase row id once persisted; null while in-flight. `id` stays a
    *  stable local key for React lists either way (mirrors roundStore's
@@ -81,6 +97,27 @@ export interface SwingSession {
   planeConsistencyScore: number | null;
   fatigueTrend: FatigueTrend | null;
   notes: string | null;
+  // Derived (Phase 1)
+  avgRestSeconds: number | null;
+  rushing: boolean | null;
+  setupConsistencyScore: number | null;
+  // Heart rate (Phase 3)
+  avgHeartRate: number | null;
+  maxHeartRate: number | null;
+  minHeartRate: number | null;
+  hrvSdnn: number | null;
+  activeCalories: number | null;
+  durationSeconds: number | null;
+}
+
+/** Session-level health summary captured by the watch workout session. */
+export interface PracticeHealthSummary {
+  avgHeartRate?: number;
+  maxHeartRate?: number;
+  minHeartRate?: number;
+  hrvSdnn?: number;
+  activeCalories?: number;
+  durationSeconds?: number;
 }
 
 /** A single piece of feedback shown to the user. */
@@ -111,4 +148,13 @@ export interface SwingDetectedPayload {
   wristRotationScore: number;
   finishStabilityScore: number;
   planeAxis: number[];
+  // Derived (Phase 1)
+  swingType: SwingType | null;
+  isAirSwing: boolean;
+  backswingRotation: number | null;
+  releaseTimingScore: number | null;
+  decelerationScore: number | null;
+  transitionDirectionScore: number | null;
+  addressGravity: number[];
+  heartRate: number | null;
 }

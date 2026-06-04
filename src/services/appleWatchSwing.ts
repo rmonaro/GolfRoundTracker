@@ -1,6 +1,6 @@
 import type { PluginListenerHandle } from '@capacitor/core';
 import { watchBridge, type WatchInboundMessage } from './watchBridge';
-import type { SwingDetectedPayload } from '@/types/swing';
+import type { PracticeHealthSummary, SwingDetectedPayload } from '@/types/swing';
 
 /**
  * Thin facade over the existing `WatchBridge` plugin that exposes a swing-
@@ -16,7 +16,9 @@ import type { SwingDetectedPayload } from '@/types/swing';
 
 type SwingListener = (swing: SwingDetectedPayload) => void;
 type PracticeStartedListener = (e: { sessionId: string; clubId: string | null }) => void;
-type PracticeEndedListener = (e: { sessionId: string; swingCount: number }) => void;
+type PracticeEndedListener = (
+  e: { sessionId: string; swingCount: number; health: PracticeHealthSummary }
+) => void;
 type ClubSelectedListener = (e: { sessionId: string; clubId: string }) => void;
 
 const swingListeners = new Set<SwingListener>();
@@ -42,7 +44,15 @@ function dispatch(msg: WatchInboundMessage) {
           estimatedHandSpeed: msg.estimatedHandSpeed,
           wristRotationScore: msg.wristRotationScore,
           finishStabilityScore: msg.finishStabilityScore,
-          planeAxis: msg.planeAxis ?? []
+          planeAxis: msg.planeAxis ?? [],
+          swingType: (msg.swingType as SwingDetectedPayload['swingType']) ?? null,
+          isAirSwing: msg.isAirSwing ?? false,
+          backswingRotation: msg.backswingRotation ?? null,
+          releaseTimingScore: msg.releaseTimingScore ?? null,
+          decelerationScore: msg.decelerationScore ?? null,
+          transitionDirectionScore: msg.transitionDirectionScore ?? null,
+          addressGravity: msg.addressGravity ?? [],
+          heartRate: msg.heartRate ?? null
         })
       );
       break;
@@ -50,7 +60,20 @@ function dispatch(msg: WatchInboundMessage) {
       startedListeners.forEach((l) => l({ sessionId: msg.sessionId, clubId: msg.clubId }));
       break;
     case 'practiceEnded':
-      endedListeners.forEach((l) => l({ sessionId: msg.sessionId, swingCount: msg.swingCount }));
+      endedListeners.forEach((l) =>
+        l({
+          sessionId: msg.sessionId,
+          swingCount: msg.swingCount,
+          health: {
+            avgHeartRate: msg.avgHeartRate,
+            maxHeartRate: msg.maxHeartRate,
+            minHeartRate: msg.minHeartRate,
+            hrvSdnn: msg.hrvSdnn,
+            activeCalories: msg.activeCalories,
+            durationSeconds: msg.durationSeconds
+          }
+        })
+      );
       break;
     case 'practiceClubSelected':
       clubListeners.forEach((l) => l({ sessionId: msg.sessionId, clubId: msg.clubId }));

@@ -4,7 +4,13 @@ import type {
   SwingMetricRow,
   SwingSessionRow
 } from '@/types/database';
-import type { SwingMetric, SwingSession, SwingShotResult } from '@/types/swing';
+import type {
+  PracticeHealthSummary,
+  SwingMetric,
+  SwingSession,
+  SwingShotResult,
+  SwingType
+} from '@/types/swing';
 import type { SessionBaseline, SessionRollup } from './swingFeedbackEngine';
 import { toAppError } from './errors';
 
@@ -22,7 +28,16 @@ function mapSession(r: SwingSessionRow): SwingSession {
     tempoConsistencyScore: r.tempo_consistency_score,
     planeConsistencyScore: r.plane_consistency_score,
     fatigueTrend: r.fatigue_trend,
-    notes: r.notes
+    notes: r.notes,
+    avgRestSeconds: r.avg_rest_seconds,
+    rushing: r.rushing,
+    setupConsistencyScore: r.setup_consistency_score,
+    avgHeartRate: r.avg_heart_rate,
+    maxHeartRate: r.max_heart_rate,
+    minHeartRate: r.min_heart_rate,
+    hrvSdnn: r.hrv_sdnn,
+    activeCalories: r.active_calories,
+    durationSeconds: r.duration_seconds
   };
 }
 
@@ -43,6 +58,14 @@ function mapSwing(r: SwingMetricRow): SwingMetric {
     swingConsistencyScore: r.swing_consistency_score,
     planeConsistencyScore: r.plane_consistency_score,
     planeAxis: r.plane_axis ?? [],
+    swingType: r.swing_type,
+    isAirSwing: r.is_air_swing ?? false,
+    backswingRotation: r.backswing_rotation,
+    releaseTimingScore: r.release_timing_score,
+    decelerationScore: r.deceleration_score,
+    transitionDirectionScore: r.transition_direction_score,
+    addressGravity: r.address_gravity ?? [],
+    heartRate: r.heart_rate,
     shotResult: r.shot_result,
     remoteId: r.id
   };
@@ -64,6 +87,14 @@ export interface SaveSwingInput {
   planeAxis: number[];
   swingConsistencyScore?: number | null;
   planeConsistencyScore?: number | null;
+  swingType?: SwingType | null;
+  isAirSwing?: boolean;
+  backswingRotation?: number | null;
+  releaseTimingScore?: number | null;
+  decelerationScore?: number | null;
+  transitionDirectionScore?: number | null;
+  addressGravity?: number[];
+  heartRate?: number | null;
   shotResult?: SwingShotResult | null;
 }
 
@@ -102,6 +133,14 @@ export const swingRepo = {
         swing_consistency_score: input.swingConsistencyScore ?? null,
         plane_consistency_score: input.planeConsistencyScore ?? null,
         plane_axis: input.planeAxis,
+        swing_type: input.swingType ?? null,
+        is_air_swing: input.isAirSwing ?? false,
+        backswing_rotation: input.backswingRotation ?? null,
+        release_timing_score: input.releaseTimingScore ?? null,
+        deceleration_score: input.decelerationScore ?? null,
+        transition_direction_score: input.transitionDirectionScore ?? null,
+        address_gravity: input.addressGravity ?? null,
+        heart_rate: input.heartRate ?? null,
         shot_result: input.shotResult ?? null
       })
       .select('*')
@@ -132,7 +171,11 @@ export const swingRepo = {
     if (error) throw toAppError(error, 'Could not update swing scores');
   },
 
-  async endSession(sessionId: string, rollup: SessionRollup): Promise<void> {
+  async endSession(
+    sessionId: string,
+    rollup: SessionRollup,
+    health?: PracticeHealthSummary
+  ): Promise<void> {
     const { error } = await supabase
       .from('swing_sessions')
       .update({
@@ -141,7 +184,16 @@ export const swingRepo = {
         avg_tempo_ratio: rollup.avgTempoRatio,
         tempo_consistency_score: rollup.tempoConsistencyScore,
         plane_consistency_score: rollup.planeConsistencyScore,
-        fatigue_trend: rollup.fatigueTrend
+        fatigue_trend: rollup.fatigueTrend,
+        avg_rest_seconds: rollup.avgRestSeconds,
+        rushing: rollup.rushing,
+        setup_consistency_score: rollup.setupConsistencyScore,
+        avg_heart_rate: health?.avgHeartRate ?? null,
+        max_heart_rate: health?.maxHeartRate ?? null,
+        min_heart_rate: health?.minHeartRate ?? null,
+        hrv_sdnn: health?.hrvSdnn ?? null,
+        active_calories: health?.activeCalories ?? null,
+        duration_seconds: health?.durationSeconds ?? null
       })
       .eq('id', sessionId);
     if (error) throw toAppError(error, 'Could not end session');

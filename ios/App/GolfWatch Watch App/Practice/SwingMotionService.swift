@@ -17,22 +17,36 @@ final class SwingMotionService {
     var onSwing: ((SwingMetrics) -> Void)?
 
     private let motion = CMMotionManager()
+    private let batched = CMBatchedSensorManager()
+    private var batchedTask: Task<Void, Never>?
     private let detector = SwingDetector()
     private let calc = SwingMetricsCalculator()
 
     private var buffer: [MotionSample] = []
     private static let sampleHz = 100.0
-    /// Keep ~4s of context so a full swing's window is always available.
-    private static let maxBuffer = Int(sampleHz * 4)
+    /// Keep ~4s of context so a full swing's window is always available. Sized
+    /// for the 200 Hz batched path so it always holds a full swing.
+    private static let maxBuffer = Int(200.0 * 4)
 
     private(set) var isRunning = false
 
     func start() {
         guard !isRunning else { return }
-        guard motion.isDeviceMotionAvailable else { return }
         isRunning = true
         buffer.removeAll()
         detector.reset()
+        // Prefer the high-rate (200 Hz) batched sensor path on supported
+        // watches (Series 8+/Ultra); fall back to the 100 Hz device-motion
+        // manager everywhere else.
+        if CMBatchedSensorManager.isDeviceMotionSupported {
+            startBatched()
+        } else {
+            startStandard()
+        }
+    }
+
+    private func startStandard() {
+        guard motion.isDeviceMotionAvailable else { return }
         motion.deviceMotionUpdateInterval = 1.0 / Self.sampleHz
         motion.startDeviceMotionUpdates(to: .main) { [weak self] dm, _ in
             guard let self, let dm else { return }
@@ -40,9 +54,29 @@ final class SwingMotionService {
         }
     }
 
+    private func startBatched() {
+        batchedTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                for try await batch in self.batched.deviceMotionUpdates() {
+                    for dm in batch { self.ingest(dm) }
+                }
+            } catch {
+                // Batched streaming needs an active workout + supported HW;
+                // if it errors, fall back to the standard manager.
+                self.startStandard()
+            }
+        }
+    }
+
     func stop() {
         guard isRunning else { return }
         isRunning = false
+        batchedTask?.cancel()
+        batchedTask = nil
+        if CMBatchedSensorManager.isDeviceMotionSupported {
+            batched.stopDeviceMotionUpdates()
+        }
         motion.stopDeviceMotionUpdates()
         buffer.removeAll()
         detector.reset()

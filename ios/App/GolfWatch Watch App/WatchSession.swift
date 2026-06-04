@@ -149,12 +149,13 @@ enum WatchOutboundMessage {
     /// session id so the phone can correlate the swings that follow.
     case practiceStarted(sessionId: String, clubId: String?)
     /// One detected swing's motion metrics. All values are relative /
-    /// estimated — NOT launch-monitor measurements.
-    case swingDetected(sessionId: String, swingIndex: Int, metrics: SwingMetrics, clubId: String?)
+    /// estimated — NOT launch-monitor measurements. `heartRate` is the live
+    /// bpm at swing time (0 when HealthKit isn't available).
+    case swingDetected(sessionId: String, swingIndex: Int, metrics: SwingMetrics, clubId: String?, heartRate: Int)
     /// User changed the practice club mid-session.
     case practiceClubSelected(sessionId: String, clubId: String)
-    /// Practice session ended on the watch.
-    case practiceEnded(sessionId: String, swingCount: Int)
+    /// Practice session ended on the watch, with an optional health summary.
+    case practiceEnded(sessionId: String, swingCount: Int, health: WorkoutSummary?)
 
     var payload: [String: Any] {
         switch self {
@@ -198,8 +199,8 @@ enum WatchOutboundMessage {
                 "sessionId": sessionId,
                 "clubId": clubId ?? NSNull()
             ]
-        case .swingDetected(let sessionId, let swingIndex, let m, let clubId):
-            return [
+        case .swingDetected(let sessionId, let swingIndex, let m, let clubId, let heartRate):
+            var d: [String: Any] = [
                 "type": "swingDetected",
                 "sessionId": sessionId,
                 "swingIndex": swingIndex,
@@ -212,20 +213,38 @@ enum WatchOutboundMessage {
                 "estimatedHandSpeed": m.estimatedHandSpeed,
                 "wristRotationScore": m.wristRotationScore,
                 "finishStabilityScore": m.finishStabilityScore,
-                "planeAxis": m.planeAxis
+                "planeAxis": m.planeAxis,
+                "swingType": m.swingType,
+                "isAirSwing": m.isAirSwing,
+                "backswingRotation": m.backswingRotation,
+                "releaseTimingScore": m.releaseTimingScore,
+                "decelerationScore": m.decelerationScore,
+                "transitionDirectionScore": m.transitionDirectionScore,
+                "addressGravity": m.addressGravity
             ]
+            if heartRate > 0 { d["heartRate"] = heartRate }
+            return d
         case .practiceClubSelected(let sessionId, let clubId):
             return [
                 "type": "practiceClubSelected",
                 "sessionId": sessionId,
                 "clubId": clubId
             ]
-        case .practiceEnded(let sessionId, let swingCount):
-            return [
+        case .practiceEnded(let sessionId, let swingCount, let health):
+            var d: [String: Any] = [
                 "type": "practiceEnded",
                 "sessionId": sessionId,
                 "swingCount": swingCount
             ]
+            if let h = health, h.hasData {
+                d["avgHeartRate"] = Int(h.avgHeartRate.rounded())
+                d["maxHeartRate"] = Int(h.maxHeartRate.rounded())
+                d["minHeartRate"] = Int(h.minHeartRate.rounded())
+                d["hrvSdnn"] = h.hrvSdnn
+                d["activeCalories"] = h.activeCalories
+                d["durationSeconds"] = h.durationSeconds
+            }
+            return d
         }
     }
 }

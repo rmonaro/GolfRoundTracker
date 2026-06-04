@@ -37,6 +37,8 @@ struct PracticeHomeView: View {
                         Label("Start Practice", systemImage: "play.fill")
                     }
                     .buttonStyle(.borderedProminent)
+                    // Apple Watch double-tap gesture starts practice hands-free.
+                    .handGestureShortcut(.primaryAction)
                 }
 
                 NavigationLink {
@@ -45,6 +47,12 @@ struct PracticeHomeView: View {
                     Label(practice.clubName(in: session.state.bag) ?? "Select Club",
                           systemImage: "bag")
                         .lineLimit(1)
+                }
+
+                NavigationLink {
+                    TempoTrainerView()
+                } label: {
+                    Label("Tempo Trainer", systemImage: "metronome")
                 }
             }
             .padding()

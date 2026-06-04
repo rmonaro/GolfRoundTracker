@@ -49,11 +49,12 @@ export function usePracticeWatchSync() {
       .then((h) => handles.push(h))
       .catch((err) => console.warn('[practice-sync] club listener failed', err));
 
-    AppleWatchSwing.onPracticeEnded(() => {
+    AppleWatchSwing.onPracticeEnded((e) => {
       // Ending on the watch finalizes the phone session: compute rollups +
-      // baseline feedback and write `ended_at`. Without this the session stays
-      // "in progress" forever. Safe no-op if there's no active session.
-      void practiceController.end();
+      // baseline feedback, persist the health summary, and write `ended_at`.
+      // Without this the session stays "in progress" forever. Safe no-op if
+      // there's no active session.
+      void practiceController.end(e.health);
     })
       .then((h) => handles.push(h))
       .catch((err) => console.warn('[practice-sync] ended listener failed', err));

@@ -25,6 +25,10 @@ final class SwingDetector {
     private(set) var tTop: TimeInterval?
     private(set) var tImpact: TimeInterval?
     private(set) var tFinish: TimeInterval?
+    /// True when the downswing decayed with no impact spike — a rehearsal /
+    /// air swing. The calculator labels these and the phone keeps them out of
+    /// the real-swing stats.
+    private(set) var isAirSwing = false
 
     // --- tunable thresholds ---
     /// Below this angular speed (rad/s) the wrist is considered quiet.
@@ -35,10 +39,16 @@ final class SwingDetector {
     private let impactAccel = 2.5
     /// How long (s) motion must stay quiet after impact to call the finish.
     private let finishSettleS = 0.4
+    /// If no impact spike lands within this long after the downswing starts,
+    /// treat the swing as an air swing (impact ≈ the peak-speed moment).
+    private let airSwingTimeoutS = 0.8
 
     private var dominantAxis = 0
     private var lastSignAtDominant: Double = 0
     private var quietSince: TimeInterval?
+    private var downswingStart: TimeInterval?
+    private var peakOmega = 0.0
+    private var peakOmegaTime: TimeInterval?
 
     /// Feed one sample. Returns `.finished` exactly once, on the sample that
     /// completes a swing; otherwise nil.
@@ -65,12 +75,28 @@ final class SwingDetector {
         case .topOfBackswing:
             if s.angularSpeed > startOmega {
                 phase = .downswing
+                downswingStart = s.t
+                peakOmega = s.angularSpeed
+                peakOmegaTime = s.t
             }
 
         case .downswing:
+            if s.angularSpeed > peakOmega {
+                peakOmega = s.angularSpeed
+                peakOmegaTime = s.t
+            }
             if s.linearAccelMag >= impactAccel {
+                // Real strike.
                 phase = .impact
                 tImpact = s.t
+                quietSince = nil
+            } else if let ds = downswingStart, s.t - ds > airSwingTimeoutS {
+                // No contact within the window → rehearsal / air swing. Use the
+                // peak-speed moment as the impact reference so the timing
+                // metrics still work.
+                phase = .impact
+                isAirSwing = true
+                tImpact = peakOmegaTime ?? s.t
                 quietSince = nil
             }
 
@@ -100,15 +126,22 @@ final class SwingDetector {
         guard let a = tStart, let top = tTop, let imp = tImpact, let f = tFinish else { return nil }
         let samples = buffer.filter { $0.t >= a && $0.t <= f }
         guard samples.count > 3 else { return nil }
-        return SwingWindow(samples: samples, tStart: a, tTop: top, tImpact: imp, tFinish: f)
+        return SwingWindow(
+            samples: samples, tStart: a, tTop: top, tImpact: imp, tFinish: f,
+            isAirSwing: isAirSwing
+        )
     }
 
     func reset() {
         phase = .idle
         tStart = nil; tTop = nil; tImpact = nil; tFinish = nil
+        isAirSwing = false
         quietSince = nil
         dominantAxis = 0
         lastSignAtDominant = 0
+        downswingStart = nil
+        peakOmega = 0
+        peakOmegaTime = nil
     }
 
     // --- helpers ---

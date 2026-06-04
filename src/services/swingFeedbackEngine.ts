@@ -63,6 +63,10 @@ export interface SessionRollup {
   tempoConsistencyScore: number | null;
   planeConsistencyScore: number | null;
   fatigueTrend: FatigueTrend;
+  // Derived (Phase 1)
+  avgRestSeconds: number | null;
+  rushing: boolean | null;
+  setupConsistencyScore: number | null;
 }
 
 export interface SessionEvaluation {
@@ -79,22 +83,51 @@ export function evaluateSession(
   const out: SwingFeedback[] = [];
   const perSwing: SessionEvaluation['perSwing'] = {};
 
-  const tempos = swings.map((s) => s.tempoRatio).filter((t) => t > 0);
+  // Rehearsal / air swings are excluded from the real-swing stats so they
+  // don't pollute tempo, consistency, fatigue, etc.
+  const real = swings.filter((s) => !s.isAirSwing);
+
+  const tempos = real.map((s) => s.tempoRatio).filter((t) => t > 0);
   const avgTempo = tempos.length ? mean(tempos) : null;
   const tempoCvNow = tempos.length > 1 ? cv(tempos) : 0;
   const tempoConsistency = tempos.length > 1 ? clamp100((1 - tempoCvNow) * 100) : null;
 
   // Swing-motion-pattern (a.k.a. plane-tendency) consistency — relative,
   // cosine similarity of each swing's rotation axis to the session mean axis.
-  const axes = swings.map((s) => s.planeAxis).filter((a) => a && a.length === 3);
+  const axes = real.map((s) => s.planeAxis).filter((a) => a && a.length === 3);
   const meanAxis = axes.length ? normalize(axes.reduce((acc, a) => add(acc, a), [0, 0, 0])) : null;
   const planeConsistency =
     meanAxis && axes.length > 1
       ? clamp100(mean(axes.map((a) => dot(normalize(a), meanAxis))) * 100)
       : null;
 
+  // Setup repeatability — cosine similarity of each swing's address-gravity
+  // vector to the session mean. Relative, 0-100.
+  const setupVecs = real.map((s) => s.addressGravity).filter((a) => a && a.length === 3);
+  const meanSetup = setupVecs.length
+    ? normalize(setupVecs.reduce((acc, a) => add(acc, a), [0, 0, 0]))
+    : null;
+  const setupConsistency =
+    meanSetup && setupVecs.length > 1
+      ? clamp100(mean(setupVecs.map((a) => dot(normalize(a), meanSetup))) * 100)
+      : null;
+
+  // Cadence — average rest between consecutive swings (gaps over 2 min are
+  // treated as breaks and ignored).
+  const times = real
+    .map((s) => Date.parse(s.capturedAt))
+    .filter((t) => !Number.isNaN(t))
+    .sort((a, b) => a - b);
+  const gaps: number[] = [];
+  for (let i = 1; i < times.length; i++) {
+    const sec = (times[i] - times[i - 1]) / 1000;
+    if (sec > 0 && sec < 120) gaps.push(sec);
+  }
+  const avgRestSeconds = gaps.length ? Math.round(mean(gaps) * 10) / 10 : null;
+  const rushing = avgRestSeconds != null ? avgRestSeconds < 8 : null;
+
   // Backfill per-swing relative scores (need the session to exist first).
-  for (const s of swings) {
+  for (const s of real) {
     const tempoScore =
       avgTempo && avgTempo > 0
         ? clamp100((1 - Math.min(Math.abs(s.tempoRatio - avgTempo) / avgTempo, 1)) * 100)
@@ -123,19 +156,46 @@ export function evaluateSession(
   }
 
   // Fatigue: compare the back third of the session to the front third.
-  const fatigue = detectFatigue(swings);
+  const fatigue = detectFatigue(real);
   if (fatigue !== 'none') {
     out.push(fb('attention', 'FATIGUE_POSSIBLE', 'Possible fatigue detected'));
+  }
+
+  // Setup repeatability.
+  if (setupConsistency != null && setupConsistency < 60) {
+    out.push(fb('attention', 'SETUP_VARIED', 'Your setup varied between swings'));
+  } else if (setupConsistency != null && setupConsistency >= 85) {
+    out.push(fb('positive', 'SETUP_REPEATABLE', 'Very repeatable setup'));
+  }
+
+  // Pace.
+  if (rushing) {
+    out.push(fb('neutral', 'RUSHING', 'You were working through balls quickly'));
+  }
+
+  // Over-the-top tendency (low transition-direction consistency on average).
+  const transDir = real.map((s) => s.transitionDirectionScore).filter((v): v is number => v != null);
+  if (transDir.length >= 3 && mean(transDir) < 45) {
+    out.push(fb('attention', 'OVER_THE_TOP', 'Some over-the-top motion tendency'));
+  }
+
+  // Quitting on it — decelerating through impact on average.
+  const decel = real.map((s) => s.decelerationScore).filter((v): v is number => v != null);
+  if (decel.length >= 3 && mean(decel) < 40) {
+    out.push(fb('attention', 'DECELERATING', 'You tend to decelerate through impact'));
   }
 
   return {
     feedback: out,
     rollup: {
-      swingCount: swings.length,
+      swingCount: real.length,
       avgTempoRatio: avgTempo == null ? null : round2(avgTempo),
       tempoConsistencyScore: tempoConsistency,
       planeConsistencyScore: planeConsistency,
-      fatigueTrend: fatigue
+      fatigueTrend: fatigue,
+      avgRestSeconds,
+      rushing,
+      setupConsistencyScore: setupConsistency
     },
     perSwing
   };

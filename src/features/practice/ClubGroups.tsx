@@ -17,7 +17,8 @@ const avg = (nums: number[]) => (nums.length ? nums.reduce((a, b) => a + b, 0) /
 
 function buildGroups(swings: SwingMetric[]): ClubGroup[] {
   const map = new Map<string | null, SwingMetric[]>();
-  for (const s of swings) {
+  // Rehearsal / air swings aren't shots — keep them out of the club averages.
+  for (const s of swings.filter((sw) => !sw.isAirSwing)) {
     const key = s.clubId ?? null;
     const arr = map.get(key);
     if (arr) arr.push(s);

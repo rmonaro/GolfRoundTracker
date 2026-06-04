@@ -26,6 +26,7 @@ final class PracticeController: ObservableObject {
     @Published private(set) var selectedClubId: String?
 
     private let motion = SwingMotionService()
+    private let workout = WorkoutManager()
     private var sessionId = ""
 
     private init() {
@@ -33,6 +34,9 @@ final class PracticeController: ObservableObject {
             self?.handleSwing(metrics)
         }
     }
+
+    /// Live heart rate (bpm) while a workout is running; 0 if unavailable.
+    var currentHeartRate: Int { Int(workout.currentHeartRate.rounded()) }
 
     var swingCountLabel: String {
         swingCount == 0 ? "No swings yet" : "Swing \(swingCount)"
@@ -53,14 +57,26 @@ final class PracticeController: ObservableObject {
         isActive = true
         WatchSession.shared.send(.practiceStarted(sessionId: sessionId, clubId: club))
         armDetection()
+        // Start a golf workout so we can read heart rate and keep the runtime
+        // alive with the wrist down. No-ops if HealthKit isn't authorized.
+        Task { await workout.startSession() }
     }
 
     func endSession() {
-        if isActive {
-            WatchSession.shared.send(.practiceEnded(sessionId: sessionId, swingCount: swingCount))
-        }
+        let wasActive = isActive
+        let sid = sessionId
+        let count = swingCount
         disarmDetection()
         isActive = false
+        guard wasActive else { return }
+        // Stop the workout (async) and ship the health summary with the
+        // practiceEnded message so the phone can persist it.
+        Task {
+            let summary = await workout.stopSession()
+            WatchSession.shared.send(
+                .practiceEnded(sessionId: sid, swingCount: count, health: summary)
+            )
+        }
     }
 
     /// Start listening for swings. Idempotent. Called when the active view
@@ -92,7 +108,10 @@ final class PracticeController: ObservableObject {
         let index = swingCount
         swingCount += 1
         WatchSession.shared.send(
-            .swingDetected(sessionId: sessionId, swingIndex: index, metrics: metrics, clubId: selectedClubId)
+            .swingDetected(
+                sessionId: sessionId, swingIndex: index, metrics: metrics,
+                clubId: selectedClubId, heartRate: currentHeartRate
+            )
         )
         lastSwing = SwingResult(
             tempoRatio: metrics.tempoRatio,
