@@ -5,7 +5,7 @@ import dayjs from 'dayjs';
 import { swingRepo } from '@/services/swingRepo';
 import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
-import { SwingCard } from '@/features/practice/SwingCard';
+import { ClubGroups } from '@/features/practice/ClubGroups';
 import { SWING_DISCLAIMER } from '@/utils/swingLabels';
 import type { SwingFeedback, SwingMetric, SwingSession } from '@/types/swing';
 import type { SwingFeedbackRow } from '@/types/database';
@@ -154,19 +154,12 @@ export function PracticeSessionDetailPage() {
 
       <Divider sx={{ my: 2 }} />
       <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>
-        Swings
+        By club
       </Typography>
-      <Stack spacing={1.5}>
-        {swings.map((s) => (
-          <SwingCard
-            key={s.id}
-            swing={s}
-            feedback={feedbackBySwing[s.remoteId ?? s.id] ?? []}
-            editable={false}
-            square
-          />
-        ))}
-      </Stack>
+      <ClubGroups
+        swings={swings}
+        getFeedback={(s) => feedbackBySwing[s.remoteId ?? s.id] ?? []}
+      />
 
       <Button sx={{ mt: 3 }} onClick={() => navigate('/practice/history')}>
         Back to history

@@ -13,6 +13,7 @@ import type { SwingFeedback, SwingMetric } from '@/types/swing';
 import { fmtHandSpeed } from '@/utils/swingLabels';
 import { ShotResultPicker } from './ShotResultPicker';
 import { practiceController } from './practiceController';
+import { useClubNameLookup } from './useClubName';
 
 const levelColor = (level: SwingFeedback['level']) =>
   level === 'positive' ? 'success' : level === 'attention' ? 'warning' : 'default';
@@ -44,6 +45,7 @@ export function SwingCard({
   square?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const clubNameOf = useClubNameLookup();
 
   return (
     <Paper variant="outlined" sx={{ p: 1.5, borderRadius: square ? 0 : 2 }}>
@@ -56,7 +58,10 @@ export function SwingCard({
             tempo · estimated
           </Typography>
         </Stack>
-        <Chip size="small" label={`#${swing.swingIndex + 1}`} />
+        <Stack direction="row" spacing={0.5} alignItems="center">
+          <Chip size="small" color="primary" label={clubNameOf(swing.clubId)} />
+          <Chip size="small" variant="outlined" label={`#${swing.swingIndex + 1}`} />
+        </Stack>
       </Stack>
 
       <Stack direction="row" spacing={2} sx={{ mt: 1 }}>

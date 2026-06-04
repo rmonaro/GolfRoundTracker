@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { ClubGroups } from '@/features/practice/ClubGroups';
 import { fmtPlane } from '@/utils/swingLabels';
 
 const fatigueLabel: Record<string, string> = {
@@ -30,6 +31,7 @@ export function SessionSummaryPage() {
   const swings = useSwingSessionStore((s) => s.swings);
   const rollup = useSwingSessionStore((s) => s.rollup);
   const sessionFeedback = useSwingSessionStore((s) => s.sessionFeedback);
+  const feedbackBySwing = useSwingSessionStore((s) => s.feedbackBySwing);
   const reset = useSwingSessionStore((s) => s.reset);
 
   // Live-computed fallback stats so the cards reflect the swings even if the
@@ -121,6 +123,12 @@ export function SessionSummaryPage() {
           </Stack>
         </>
       )}
+
+      <Divider sx={{ my: 2 }} />
+      <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>
+        By club
+      </Typography>
+      <ClubGroups swings={swings} getFeedback={(s) => feedbackBySwing[s.id] ?? []} />
 
       <Button
         variant="outlined"
