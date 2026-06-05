@@ -8,12 +8,10 @@ import HealthKit
 /// the phone" and jump straight into a practice session.
 final class WatchAppDelegate: NSObject, WKApplicationDelegate {
     func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
-        Task { @MainActor in
-            // Don't clobber an in-progress round or an already-running session.
-            guard !WatchSession.shared.state.active,
-                  !PracticeController.shared.isActive else { return }
-            PracticeController.shared.startSession(club: WatchSession.shared.state.selectedClubId)
-        }
+        // Launched from the iPhone via startWatchApp. What happens next is
+        // driven by the phone's WCSession command (a `startPractice` user-info
+        // for practice) or the synced round state (for a round) — NOT started
+        // here, so launching for a round never kicks off a practice session.
     }
 }
 

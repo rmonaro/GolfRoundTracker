@@ -139,7 +139,7 @@ interface WatchBridgeRawPlugin {
   }>;
   isReachable(): Promise<{ reachable: boolean }>;
   sendState(args: { state: WatchRoundState }): Promise<void>;
-  launchWatchPractice(): Promise<{ launched: boolean; reason?: string }>;
+  launchWatch(args: { startPractice: boolean }): Promise<{ launched: boolean; reason?: string }>;
   addListener(
     eventName: 'messageFromWatch',
     listener: (event: { message: Record<string, unknown>; delivery: 'live' | 'queued' }) => void
@@ -199,14 +199,16 @@ export const watchBridge = {
   },
 
   /**
-   * Launch the paired Apple Watch app into practice mode via HealthKit's
-   * startWatchApp (the only iOS-sanctioned way to launch the watch app).
+   * Launch the paired Apple Watch app via HealthKit's startWatchApp (the only
+   * iOS-sanctioned way to launch the watch app). Pass `startPractice: true` to
+   * have the watch open straight into a practice session; omit it for a round
+   * launch (the watch then shows the round from its synced state).
    * Best-effort — resolves `{ launched: false }` off-iOS or on failure.
    */
-  async launchWatchPractice(): Promise<{ launched: boolean; reason?: string }> {
+  async launchWatch(startPractice = false): Promise<{ launched: boolean; reason?: string }> {
     if (!isIOSNative) return { launched: false };
     try {
-      return await Raw.launchWatchPractice();
+      return await Raw.launchWatch({ startPractice });
     } catch (err) {
       return { launched: false, reason: err instanceof Error ? err.message : 'failed' };
     }

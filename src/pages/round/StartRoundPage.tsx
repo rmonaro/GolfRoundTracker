@@ -24,6 +24,7 @@ import { useCourses, useStartRound } from '@/features/round/useStartRound';
 import { useSearchCourses, useImportCourse } from '@/admin/hooks/useCoursesApi';
 import { useAuthStore } from '@/stores/authStore';
 import { toAppError } from '@/services/errors';
+import { watchBridge } from '@/services/watchBridge';
 import type { Course } from '@/models';
 
 type HoleChoice = '9' | '18' | 'custom';
@@ -102,6 +103,12 @@ export function StartRoundPage() {
       }
 
       await startRound.mutateAsync(payload);
+      // Live (today) rounds only: launch the watch so it comes up on the
+      // round. Backdated rounds are historical entry — no watch. Fire-and-
+      // forget; the round flow works regardless of whether the watch wakes.
+      if (payload.playedAt === null) {
+        void watchBridge.launchWatch(false);
+      }
       navigate('/round/play', { replace: true });
     } catch (err) {
       setError(toAppError(err).message);

@@ -516,6 +516,26 @@ extension WatchSession: WCSessionDelegate {
             }
         }
     }
+
+    /// Phone → watch commands (guaranteed FIFO). Currently just `startPractice`,
+    /// sent when the user taps "Start Watch Practice" on the phone so the watch
+    /// opens straight into a practice session. Round launches send no command.
+    nonisolated func session(
+        _ session: WCSession,
+        didReceiveUserInfo userInfo: [String: Any] = [:]
+    ) {
+        guard let command = userInfo["watchCommand"] as? String else { return }
+        Task { @MainActor in
+            switch command {
+            case "startPractice":
+                if !self.state.active && !PracticeController.shared.isActive {
+                    PracticeController.shared.startSession(club: self.state.selectedClubId)
+                }
+            default:
+                break
+            }
+        }
+    }
 }
 
 // MARK: - CLLocationManagerDelegate

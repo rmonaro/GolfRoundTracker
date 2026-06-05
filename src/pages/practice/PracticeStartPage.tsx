@@ -23,7 +23,7 @@ export function PracticeStartPage() {
       // Launch the watch straight into practice mode (HealthKit startWatchApp).
       // We surface the result so a failed launch is diagnosable in-app rather
       // than silently doing nothing.
-      const result = await watchBridge.launchWatchPractice();
+      const result = await watchBridge.launchWatch(true);
       if (!Capacitor.isNativePlatform()) {
         setLaunchInfo('Watch launch only works on a real iPhone build.');
       } else if (result.launched) {

@@ -43,7 +43,7 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         CAPPluginMethod(name: "activate", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isReachable", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "launchWatchPractice", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "launchWatch", returnType: CAPPluginReturnPromise)
     ]
 
     private let healthStore = HKHealthStore()
@@ -85,18 +85,32 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         call.resolve(["reachable": WCSession.default.isReachable])
     }
 
-    /// Launch the paired Apple Watch app directly into practice mode via
-    /// HealthKit's `startWatchApp(with:)` — the only Apple-sanctioned way for
-    /// an iOS app to launch its watch app. Requires the HealthKit capability
-    /// on the iOS app and a watch app that handles the incoming workout
-    /// configuration (see `WatchAppDelegate.handle(_:)`). Best-effort: resolves
-    /// `launched: false` (never rejects) so the phone-side practice flow keeps
-    /// working even when the watch can't be brought up.
-    @objc func launchWatchPractice(_ call: CAPPluginCall) {
+    /// Launch the paired Apple Watch app via HealthKit's `startWatchApp(with:)`
+    /// — the only Apple-sanctioned way for an iOS app to launch its watch app.
+    /// Used for both starting a round (the watch then shows the round from its
+    /// synced state) and starting practice.
+    ///
+    /// `startPractice` (default false): when true, a `startPractice` command is
+    /// queued to the watch so it opens straight into a practice session. Round
+    /// launches send NO command, so launching for a round never kicks off
+    /// practice. Requires the HealthKit capability on the iOS app. Best-effort:
+    /// resolves `launched: false` (never rejects).
+    @objc func launchWatch(_ call: CAPPluginCall) {
+        let startPractice = call.getBool("startPractice") ?? false
+
         guard HKHealthStore.isHealthDataAvailable() else {
             call.resolve(["launched": false, "reason": "healthUnavailable"])
             return
         }
+
+        // Queue the practice-start command (guaranteed FIFO delivery) so the
+        // watch knows what to do once it wakes. Delivered after the launch.
+        if startPractice,
+           WCSession.isSupported(),
+           WCSession.default.activationState == .activated {
+            WCSession.default.transferUserInfo(["watchCommand": "startPractice"])
+        }
+
         let config = HKWorkoutConfiguration()
         config.activityType = .golf
         config.locationType = .outdoor
