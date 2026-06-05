@@ -5,6 +5,7 @@ import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { practiceController } from '@/features/practice/practiceController';
 import { ClubSelector } from '@/features/practice/ClubSelector';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { practicePageSx } from './practicePageSx';
 
 export function PracticeStartPage() {
   const navigate = useNavigate();
@@ -23,7 +24,7 @@ export function PracticeStartPage() {
   };
 
   return (
-    <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
+    <Box sx={practicePageSx()}>
       <Typography variant="h5" fontWeight={800}>
         Watch Practice
       </Typography>

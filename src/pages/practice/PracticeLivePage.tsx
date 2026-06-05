@@ -6,6 +6,7 @@ import { useBagStore } from '@/stores/bagStore';
 import { practiceController } from '@/features/practice/practiceController';
 import { SwingCard } from '@/features/practice/SwingCard';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { practicePageSx } from './practicePageSx';
 
 export function PracticeLivePage() {
   const navigate = useNavigate();
@@ -23,7 +24,7 @@ export function PracticeLivePage() {
 
   if (!session) {
     return (
-      <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
+      <Box sx={practicePageSx()}>
         <Typography variant="body2" color="text.secondary">
           No active practice session.
         </Typography>

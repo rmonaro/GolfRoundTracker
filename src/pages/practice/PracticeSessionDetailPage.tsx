@@ -6,6 +6,7 @@ import dayjs from 'dayjs';
 import { swingRepo } from '@/services/swingRepo';
 import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { practicePageSx } from './practicePageSx';
 import { ClubGroups } from '@/features/practice/ClubGroups';
 import { SWING_DISCLAIMER } from '@/utils/swingLabels';
 import type { SwingFeedback, SwingMetric, SwingSession } from '@/types/swing';
@@ -101,14 +102,14 @@ export function PracticeSessionDetailPage() {
 
   if (loading) {
     return (
-      <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
+      <Box sx={practicePageSx()}>
         <Typography color="text.secondary">Loading…</Typography>
       </Box>
     );
   }
 
   return (
-    <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
+    <Box sx={practicePageSx()}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
         <Typography variant="h5" fontWeight={800}>
           Practice Session

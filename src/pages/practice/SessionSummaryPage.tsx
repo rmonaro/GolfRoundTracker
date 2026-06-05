@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { practicePageSx } from './practicePageSx';
 import { ClubGroups } from '@/features/practice/ClubGroups';
 import { fmtPlane } from '@/utils/swingLabels';
 
@@ -45,7 +46,7 @@ export function SessionSummaryPage() {
 
   if (swings.length === 0) {
     return (
-      <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
+      <Box sx={practicePageSx()}>
         <Typography variant="body2" color="text.secondary">
           No swings recorded in the last session.
         </Typography>
@@ -68,7 +69,7 @@ export function SessionSummaryPage() {
   const fatigueTrend = rollup?.fatigueTrend ?? derived.fatigueTrend;
 
   return (
-    <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
+    <Box sx={practicePageSx()}>
       <Typography variant="h5" fontWeight={800}>
         Session Summary
       </Typography>

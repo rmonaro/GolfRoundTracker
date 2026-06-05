@@ -2,6 +2,7 @@ import { Box, Button, Chip, Divider, Paper, Stack, Typography } from '@mui/mater
 import { alpha } from '@mui/material/styles';
 import { useNavigate } from 'react-router-dom';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { practicePageSx } from './practicePageSx';
 
 interface Metric {
   name: string;
@@ -204,7 +205,7 @@ export function SwingMetricsGuidePage() {
   const navigate = useNavigate();
 
   return (
-    <Box sx={{ p: 2, maxWidth: 560, mx: 'auto' }}>
+    <Box sx={practicePageSx(560)}>
       <Typography variant="h5" fontWeight={800}>
         What your swing data means
       </Typography>

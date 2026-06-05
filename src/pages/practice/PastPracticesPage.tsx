@@ -20,6 +20,7 @@ import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { useAuthStore } from '@/stores/authStore';
 import { swingRepo } from '@/services/swingRepo';
+import { practicePageSx } from './practicePageSx';
 import type { SwingSession } from '@/types/swing';
 
 interface PendingDelete {
@@ -70,7 +71,7 @@ export function PastPracticesPage() {
   };
 
   return (
-    <Box sx={{ p: 2, maxWidth: 520, mx: 'auto' }}>
+    <Box sx={practicePageSx()}>
       <Typography variant="h5" fontWeight={800}>
         Past Practices
       </Typography>
