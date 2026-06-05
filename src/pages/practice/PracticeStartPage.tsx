@@ -3,6 +3,7 @@ import { Box, Button, Stack, Typography } from '@mui/material';
 import { useNavigate } from 'react-router-dom';
 import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { practiceController } from '@/features/practice/practiceController';
+import { watchBridge } from '@/services/watchBridge';
 import { ClubSelector } from '@/features/practice/ClubSelector';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
 import { practicePageSx } from './practicePageSx';
@@ -16,6 +17,10 @@ export function PracticeStartPage() {
   const onStart = async () => {
     setStarting(true);
     try {
+      // Launch the watch straight into practice mode (HealthKit startWatchApp).
+      // Fire-and-forget — the phone session still works if the watch can't be
+      // brought up (e.g. not paired, HealthKit not authorized).
+      void watchBridge.launchWatchPractice();
       const id = await practiceController.start(clubId);
       if (id) navigate('/practice/live');
     } finally {

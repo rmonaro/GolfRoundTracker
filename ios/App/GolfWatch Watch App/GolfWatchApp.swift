@@ -1,9 +1,27 @@
 import SwiftUI
+import WatchKit
+import HealthKit
+
+/// Handles the watch app being launched from the iPhone via
+/// `HKHealthStore.startWatchApp(with:)`. iOS hands us the workout
+/// configuration; we treat that as "the user tapped Start Watch Practice on
+/// the phone" and jump straight into a practice session.
+final class WatchAppDelegate: NSObject, WKApplicationDelegate {
+    func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
+        Task { @MainActor in
+            // Don't clobber an in-progress round or an already-running session.
+            guard !WatchSession.shared.state.active,
+                  !PracticeController.shared.isActive else { return }
+            PracticeController.shared.startSession(club: WatchSession.shared.state.selectedClubId)
+        }
+    }
+}
 
 /// Entry point. Activates the WCSession on first appear and hands the
 /// shared session into the view tree via `@StateObject`.
 @main
 struct GolfWatchApp: App {
+    @WKApplicationDelegateAdaptor(WatchAppDelegate.self) private var appDelegate
     @StateObject private var session = WatchSession.shared
 
     var body: some Scene {
@@ -29,6 +47,7 @@ struct GolfWatchApp: App {
 /// live distance-to-pin without waiting on phone snapshots.
 struct RootView: View {
     @EnvironmentObject var session: WatchSession
+    @ObservedObject private var practice = PracticeController.shared
 
     var body: some View {
         Group {
@@ -36,6 +55,12 @@ struct RootView: View {
                 // During a live round, practice mode is intentionally out of
                 // reach — swing feedback is a separate, non-round flow.
                 HoleHomeView()
+            } else if practice.isActive {
+                // Launched into practice (e.g. from the phone's Start Watch
+                // Practice) or started on the watch — show the practice hub.
+                NavigationStack {
+                    PracticeHomeView()
+                }
             } else {
                 NavigationStack {
                     IdleView()

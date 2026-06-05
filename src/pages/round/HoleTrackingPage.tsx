@@ -33,7 +33,9 @@ import {
   ensureGpsPermission,
   getCurrentPosition,
   haversineMeters,
-  isGpsAvailable
+  isGpsAvailable,
+  watchPosition,
+  type GpsPoint
 } from '@/services/gpsService';
 import { useAutoTrack } from '@/features/round/useAutoTrack';
 import { useNavigate, Navigate } from 'react-router-dom';
@@ -150,6 +152,11 @@ export function HoleTrackingPage() {
   // auto-track instead.
   const [autoTrackEnabled, setAutoTrackEnabled] = useState(false);
   const [trackingBusy, setTrackingBusy] = useState(false);
+  // Always-on "you are here" fix. Kept updated by its own GPS watch whenever
+  // GPS is enabled and the user isn't auto-tracking (auto-track supplies its
+  // own fix). This is what keeps the blue dot on the map at all times — it
+  // never gets cleared by marking a position or recording a shot.
+  const [liveFix, setLiveFix] = useState<GpsPoint | null>(null);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   // Club pre-selection: the user picks a club on the main screen so the next
   // shot opens with it already chosen. Resets when the hole changes (see effect
@@ -588,6 +595,18 @@ export function HoleTrackingPage() {
     // this effect's identity matched to actual ball-pos changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoTrackEnabled, autoTrackInitialBallPos?.lat, autoTrackInitialBallPos?.lng]);
+
+  // Always-on live-location watch. Runs while GPS is enabled and auto-track is
+  // OFF (auto-track runs its own watch and feeds the dot directly). This keeps
+  // a persistent "you are here" dot on the map regardless of tracking/marking
+  // state — marking a spot or recording a shot no longer makes the dot vanish.
+  useEffect(() => {
+    if (!gpsEnabled || autoTrackEnabled) {
+      return;
+    }
+    const stop = watchPosition((fix) => setLiveFix(fix));
+    return stop;
+  }, [gpsEnabled, autoTrackEnabled]);
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
@@ -1261,11 +1280,11 @@ export function HoleTrackingPage() {
           showYardageMarkers={showYardageMarkers}
           pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
-          // Live "you are here" dot. Phone-side Track wins (the user is
-          // actively tracking on this device). When the WATCH is the
-          // one tracking, fall through to the watch-reported position
-          // so the phone map mirrors what the watch sees — same dot,
-          // same animation. Null when neither side is tracking.
+          // Live "you are here" dot, shown at all times while GPS is on.
+          // Priority: phone auto-track fix (active tracking on this device) →
+          // the WATCH-reported position (so the phone mirrors the watch) →
+          // the always-on `liveFix`. Marking a spot / recording a shot never
+          // clears it, because `liveFix` keeps updating independently.
           currentLocation={
             autoTrackEnabled && autoTrack.latestFix
               ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
@@ -1273,7 +1292,9 @@ export function HoleTrackingPage() {
                   watchTracking.currentLat != null &&
                   watchTracking.currentLng != null
                 ? [watchTracking.currentLng, watchTracking.currentLat]
-                : null
+                : liveFix
+                  ? [liveFix.lng, liveFix.lat]
+                  : null
           }
           // Reset the cached aim drag whenever the player edits par or
           // yardage. The handle re-anchors at the new defaults so the

@@ -1,6 +1,7 @@
 import Foundation
 import Capacitor
 import WatchConnectivity
+import HealthKit
 
 /// Custom bridge controller — required so the in-app `WatchBridgePlugin`
 /// (which lives in the App target rather than a Pod / SPM module) gets
@@ -41,8 +42,11 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "activate", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isReachable", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "launchWatchPractice", returnType: CAPPluginReturnPromise)
     ]
+
+    private let healthStore = HKHealthStore()
 
     /// Latest snapshot received from JS while the session was still
     /// activating. WCSession.activate() is async — the JS layer can (and
@@ -79,6 +83,36 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
             return
         }
         call.resolve(["reachable": WCSession.default.isReachable])
+    }
+
+    /// Launch the paired Apple Watch app directly into practice mode via
+    /// HealthKit's `startWatchApp(with:)` — the only Apple-sanctioned way for
+    /// an iOS app to launch its watch app. Requires the HealthKit capability
+    /// on the iOS app and a watch app that handles the incoming workout
+    /// configuration (see `WatchAppDelegate.handle(_:)`). Best-effort: resolves
+    /// `launched: false` (never rejects) so the phone-side practice flow keeps
+    /// working even when the watch can't be brought up.
+    @objc func launchWatchPractice(_ call: CAPPluginCall) {
+        guard HKHealthStore.isHealthDataAvailable() else {
+            call.resolve(["launched": false, "reason": "healthUnavailable"])
+            return
+        }
+        let config = HKWorkoutConfiguration()
+        config.activityType = .golf
+        config.locationType = .outdoor
+        // startWatchApp needs share authorization for the workout type.
+        healthStore.requestAuthorization(toShare: [HKObjectType.workoutType()], read: []) { [weak self] _, _ in
+            self?.healthStore.startWatchApp(with: config) { success, error in
+                if success {
+                    call.resolve(["launched": true])
+                } else {
+                    call.resolve([
+                        "launched": false,
+                        "reason": error?.localizedDescription ?? "failed"
+                    ])
+                }
+            }
+        }
     }
 
     /// Send the latest round-state snapshot to the watch. Uses
