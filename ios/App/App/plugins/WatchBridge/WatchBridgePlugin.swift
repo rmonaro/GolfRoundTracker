@@ -100,15 +100,21 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         let config = HKWorkoutConfiguration()
         config.activityType = .golf
         config.locationType = .outdoor
-        // startWatchApp needs share authorization for the workout type.
-        healthStore.requestAuthorization(toShare: [HKObjectType.workoutType()], read: []) { [weak self] _, _ in
-            self?.healthStore.startWatchApp(with: config) { success, error in
+        // startWatchApp needs share authorization for the workout type. A
+        // missing HealthKit capability surfaces here as an entitlement error.
+        healthStore.requestAuthorization(toShare: [HKObjectType.workoutType()], read: []) { [weak self] _, authError in
+            guard let self else { return }
+            if let authError = authError {
+                call.resolve(["launched": false, "reason": "auth: \(authError.localizedDescription)"])
+                return
+            }
+            self.healthStore.startWatchApp(with: config) { success, error in
                 if success {
                     call.resolve(["launched": true])
                 } else {
                     call.resolve([
                         "launched": false,
-                        "reason": error?.localizedDescription ?? "failed"
+                        "reason": error?.localizedDescription ?? "startWatchApp returned false"
                     ])
                 }
             }

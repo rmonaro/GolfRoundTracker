@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { Box, Button, Stack, Typography } from '@mui/material';
+import { Alert, Box, Button, Stack, Typography } from '@mui/material';
+import { Capacitor } from '@capacitor/core';
 import { useNavigate } from 'react-router-dom';
 import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { practiceController } from '@/features/practice/practiceController';
@@ -13,16 +14,31 @@ export function PracticeStartPage() {
   const activeSession = useSwingSessionStore((s) => s.session);
   const [clubId, setClubId] = useState<string | null>(activeSession?.clubId ?? null);
   const [starting, setStarting] = useState(false);
+  const [launchInfo, setLaunchInfo] = useState<string | null>(null);
 
   const onStart = async () => {
     setStarting(true);
+    setLaunchInfo(null);
     try {
       // Launch the watch straight into practice mode (HealthKit startWatchApp).
-      // Fire-and-forget — the phone session still works if the watch can't be
-      // brought up (e.g. not paired, HealthKit not authorized).
-      void watchBridge.launchWatchPractice();
-      const id = await practiceController.start(clubId);
-      if (id) navigate('/practice/live');
+      // We surface the result so a failed launch is diagnosable in-app rather
+      // than silently doing nothing.
+      const result = await watchBridge.launchWatchPractice();
+      if (!Capacitor.isNativePlatform()) {
+        setLaunchInfo('Watch launch only works on a real iPhone build.');
+      } else if (result.launched) {
+        setLaunchInfo('Opening practice on your Apple Watch…');
+      } else {
+        setLaunchInfo(
+          `Couldn't open the watch app automatically (${result.reason ?? 'unknown'}). ` +
+            'Open Practice on the watch manually — your swings still record.'
+        );
+      }
+      console.log('[practice] launchWatchPractice result:', result);
+
+      // Start the phone session, but stay on this screen so the launch result
+      // above stays visible. Tap "Resume live session" to go to the feed.
+      await practiceController.start(clubId);
     } finally {
       setStarting(false);
     }
@@ -40,6 +56,12 @@ export function PracticeStartPage() {
       </Typography>
 
       <MotionDisclaimer />
+
+      {launchInfo && (
+        <Alert severity={launchInfo.startsWith('Opening') ? 'success' : 'info'} sx={{ mt: 2 }}>
+          {launchInfo}
+        </Alert>
+      )}
 
       {activeSession ? (
         <Stack spacing={2} sx={{ mt: 3 }}>
