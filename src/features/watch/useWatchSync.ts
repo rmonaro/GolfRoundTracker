@@ -8,6 +8,7 @@ import { scoreVsPar } from '@/utils/format';
 import { recommendClub } from '@/features/course/HoleLayout';
 import { watchBridge, type WatchRoundState } from '@/services/watchBridge';
 import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
+import { useSettingsStore } from '@/stores/settingsStore';
 
 /**
  * Subscribe the watch to the current round. Activates WCSession on mount and
@@ -25,6 +26,7 @@ export function useWatchSync() {
   const bag = useBagStore((s) => s.clubs);
   const selectedClubId = useWatchHintsStore((s) => s.selectedClubId);
   const recordingShot = useWatchHintsStore((s) => s.recordingShot);
+  const shotDetection = useSettingsStore((s) => s.watchShotDetectionEnabled);
 
   // Layout query for the current hole — gives us the OSM par + centerline
   // distance for the distance-to-pin reading. Skips when there's no round.
@@ -67,6 +69,7 @@ export function useWatchSync() {
       bag,
       selectedClubId,
       recordingShot,
+      shotDetection,
       pinLat,
       pinLng
     });
@@ -76,7 +79,7 @@ export function useWatchSync() {
     watchBridge.sendState(snapshot).catch((err) => {
       console.warn('[watch-sync] sendState failed', err);
     });
-  }, [active, currentHole, layoutQuery.data, bag, selectedClubId, recordingShot]);
+  }, [active, currentHole, layoutQuery.data, bag, selectedClubId, recordingShot, shotDetection]);
 }
 
 interface SnapshotInputs {
@@ -91,6 +94,7 @@ interface SnapshotInputs {
   bag: ReturnType<typeof useBagStore.getState>['clubs'];
   selectedClubId: string | null;
   recordingShot: boolean;
+  shotDetection: boolean;
   pinLat: number | null;
   pinLng: number | null;
 }
@@ -103,6 +107,7 @@ function buildSnapshot({
   bag,
   selectedClubId,
   recordingShot,
+  shotDetection,
   pinLat,
   pinLng
 }: SnapshotInputs): WatchRoundState {
@@ -174,6 +179,7 @@ function buildSnapshot({
     suggestedClubId: suggested?.clubId ?? null,
     selectedClubId,
     recordingShot,
+    shotDetection,
     pinLat,
     pinLng,
     bag: slimBag

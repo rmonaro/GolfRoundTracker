@@ -20,6 +20,10 @@ struct WatchRoundState: Equatable {
     let suggestedClubId: String?
     let selectedClubId: String?
     let recordingShot: Bool
+    /// User's Apple Watch shot-detection setting, mirrored from the phone.
+    /// Gates whether `RoundShotController` runs during a round. Defaults true
+    /// when the phone doesn't send it (older build / missing key).
+    let shotDetection: Bool
     let pinLat: Double?
     let pinLng: Double?
     let bag: [WatchClub]
@@ -30,7 +34,7 @@ struct WatchRoundState: Equatable {
         distanceYards: nil, distanceFeet: nil, scoreVsPar: nil,
         shotsThisHole: nil, puttsThisHole: nil,
         suggestedClubId: nil, selectedClubId: nil,
-        recordingShot: false, pinLat: nil, pinLng: nil, bag: []
+        recordingShot: false, shotDetection: true, pinLat: nil, pinLng: nil, bag: []
     )
 
     init(
@@ -47,6 +51,7 @@ struct WatchRoundState: Equatable {
         suggestedClubId: String? = nil,
         selectedClubId: String? = nil,
         recordingShot: Bool = false,
+        shotDetection: Bool = true,
         pinLat: Double? = nil,
         pinLng: Double? = nil,
         bag: [WatchClub] = []
@@ -64,6 +69,7 @@ struct WatchRoundState: Equatable {
         self.suggestedClubId = suggestedClubId
         self.selectedClubId = selectedClubId
         self.recordingShot = recordingShot
+        self.shotDetection = shotDetection
         self.pinLat = pinLat
         self.pinLng = pinLng
         self.bag = bag
@@ -85,6 +91,7 @@ struct WatchRoundState: Equatable {
         self.suggestedClubId = dict["suggestedClubId"] as? String
         self.selectedClubId = dict["selectedClubId"] as? String
         self.recordingShot = (dict["recordingShot"] as? Bool) ?? false
+        self.shotDetection = (dict["shotDetection"] as? Bool) ?? true
         self.pinLat = dict["pinLat"] as? Double
         self.pinLng = dict["pinLng"] as? Double
         if let rawBag = dict["bag"] as? [[String: Any]] {
@@ -156,6 +163,15 @@ enum WatchOutboundMessage {
     case practiceClubSelected(sessionId: String, clubId: String)
     /// Practice session ended on the watch, with an optional health summary.
     case practiceEnded(sessionId: String, swingCount: Int, health: WorkoutSummary?)
+
+    // --- Round-mode strike detection (Phase 1 auto-track gating) ---
+    /// A confirmed ball-strike during a live round (real impact spike, NOT an
+    /// air/practice swing). The phone's auto-track uses this to gate GPS shot
+    /// detection. `capturedAt` is the watch clock (epoch ms); the phone trusts
+    /// arrival time, not this, for recency. `location` is the watch's best
+    /// recent fix at impact, if any.
+    case swingImpact(impactId: Int, capturedAt: Double, swingType: String,
+                     handSpeed: Int, location: CLLocation?)
 
     var payload: [String: Any] {
         switch self {
@@ -243,6 +259,19 @@ enum WatchOutboundMessage {
                 d["hrvSdnn"] = h.hrvSdnn
                 d["activeCalories"] = h.activeCalories
                 d["durationSeconds"] = h.durationSeconds
+            }
+            return d
+        case .swingImpact(let impactId, let capturedAt, let swingType, let handSpeed, let location):
+            var d: [String: Any] = [
+                "type": "roundImpact",
+                "impactId": impactId,
+                "capturedAt": capturedAt,
+                "swingType": swingType,
+                "handSpeed": handSpeed
+            ]
+            if let l = location {
+                d["startLat"] = l.coordinate.latitude
+                d["startLng"] = l.coordinate.longitude
             }
             return d
         }
@@ -506,6 +535,17 @@ extension WatchSession: WCSessionDelegate {
         guard let snapshot = WatchRoundState(dict: applicationContext) else { return }
         Task { @MainActor in
             self.state = snapshot
+            // Reconcile round-mode strike detection against the desired state:
+            // run only during a live round AND when the user's shot-detection
+            // setting is on. Comparing against `isRunning` (not just an
+            // active-edge) means a mid-round settings toggle starts/stops it
+            // too. The controller itself no-ops while practice owns motion.
+            let shouldDetect = snapshot.active && snapshot.shotDetection
+            if shouldDetect && !RoundShotController.shared.isRunning {
+                RoundShotController.shared.start()
+            } else if !shouldDetect && RoundShotController.shared.isRunning {
+                RoundShotController.shared.stop()
+            }
             // Phone has confirmed an updated state — drop any optimistic
             // local override now that the snapshot reflects reality. If
             // the snapshot still doesn't match (slow round-trip), the
@@ -596,5 +636,79 @@ extension WatchSession: CLLocationManagerDelegate {
         #if DEBUG
         print("[watch] location error: \(error)")
         #endif
+    }
+}
+
+// MARK: - Round-mode strike detection (Phase 1 auto-track gating)
+
+/// Round-mode strike detector. Reuses the SAME CoreMotion swing detection as
+/// practice (`SwingMotionService` → `SwingDetector`), but forwards ONLY
+/// confirmed ball strikes — a real impact spike, never an air/practice swing —
+/// to the phone as `roundImpact` events. The phone's `useAutoTrack` uses these
+/// to gate GPS shot detection: a "walked then stopped" pattern only counts as
+/// a shot when a real strike preceded it, which kills false positives like
+/// cart rides and walking to a partner's ball.
+///
+/// Lifecycle is driven by round-active transitions in
+/// `didReceiveApplicationContext`. An `HKWorkoutSession` (via `WorkoutManager`)
+/// keeps motion streaming with the wrist down. Mutually exclusive with
+/// `PracticeController` — practice owns the motion stream when it's active, so
+/// this no-ops then.
+@MainActor
+final class RoundShotController: ObservableObject {
+    static let shared = RoundShotController()
+
+    @Published private(set) var isRunning = false
+
+    private let motion = SwingMotionService()
+    private let workout = WorkoutManager()
+
+    /// Monotonic within a round session so the phone can order / de-dupe.
+    private var nextImpactId = 1
+    /// Refractory window — ignore a second strike within this of the last so a
+    /// waggle / re-grip that crosses the impact threshold can't double-count.
+    private var lastImpactAt: Date = .distantPast
+    private static let refractoryS: TimeInterval = 1.5
+
+    private init() {
+        motion.onSwing = { [weak self] metrics in self?.handleStrike(metrics) }
+    }
+
+    func start() {
+        guard !isRunning else { return }
+        // Practice owns the motion stream when active — don't fight it.
+        guard !PracticeController.shared.isActive else { return }
+        isRunning = true
+        nextImpactId = 1
+        lastImpactAt = .distantPast
+        motion.start()
+        // Keep motion alive wrist-down. No-ops if HealthKit isn't authorized;
+        // the standard CMMotionManager path still works while foreground.
+        Task { await workout.startSession() }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        isRunning = false
+        motion.stop()
+        Task { _ = await workout.stopSession() }
+    }
+
+    private func handleStrike(_ m: SwingMetrics) {
+        // Air / practice swings (no impact spike) are exactly what we DON'T
+        // want to gate on — drop them. Only real strikes pass.
+        guard !m.isAirSwing else { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastImpactAt) >= Self.refractoryS else { return }
+        lastImpactAt = now
+        let id = nextImpactId
+        nextImpactId += 1
+        WatchSession.shared.send(.swingImpact(
+            impactId: id,
+            capturedAt: now.timeIntervalSince1970 * 1000,
+            swingType: m.swingType,
+            handSpeed: m.estimatedHandSpeed,
+            location: WatchSession.shared.lastLocation
+        ))
     }
 }

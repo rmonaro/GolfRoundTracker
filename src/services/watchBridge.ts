@@ -39,6 +39,13 @@ export interface WatchRoundState {
    */
   recordingShot?: boolean;
   /**
+   * Whether the user has Apple Watch shot detection enabled (settings). The
+   * watch reads this on round-active and starts/stops its motion-based strike
+   * detector accordingly — gating it here (rather than always-on) keeps watch
+   * battery in the user's control. Absent → watch treats it as enabled.
+   */
+  shotDetection?: boolean;
+  /**
    * Slim club list the watch can render. Putters land in their own bucket on
    * the watch UI so we mark them; everything else is just name + (optional)
    * typical-distance hint for inline display.
@@ -85,6 +92,25 @@ export type WatchInboundMessage =
        *  pick up the change. */
       type: 'selectClub';
       clubId: string;
+    }
+  | {
+      /** A confirmed ball-strike detected by the watch's round-mode motion
+       *  detector (real impact spike, NOT an air/practice swing). Phase 1
+       *  shot-detection gating: the phone's auto-track only treats a
+       *  "walked then stopped" pattern as a shot when one of these arrived
+       *  since the ball was last anchored — killing false positives like
+       *  cart rides. `impactId` is monotonic within a watch round session;
+       *  `capturedAt` is the watch clock (epoch ms) and is NOT trusted for
+       *  recency (the phone uses arrival time). `swingType`/`handSpeed`
+       *  are advisory; startLat/Lng are the watch's best fix at impact, if
+       *  any. */
+      type: 'roundImpact';
+      impactId: number;
+      capturedAt: number;
+      swingType?: string;
+      handSpeed?: number;
+      startLat?: number | null;
+      startLng?: number | null;
     }
   // --- Practice-mode swing feedback (motion-based) -----------------------
   | { type: 'practiceStarted'; sessionId: string; clubId: string | null }

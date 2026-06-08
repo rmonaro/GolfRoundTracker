@@ -110,6 +110,7 @@ export function HoleTrackingPage() {
   // AddShotSheet pre-filled with the calculated distance.
   // GPS opt-in. Off by default so we don't prompt non-GPS users for location.
   const gpsEnabled = useSettingsStore((s) => s.gpsEnabled);
+  const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
 
   // At-course detection. Skipped entirely when GPS is disabled.
   const courseQuery = useQuery({
@@ -175,6 +176,14 @@ export function HoleTrackingPage() {
   // Bumped by the post-hole "Recap" button to replay the shots as a growing
   // tee → landings → pin line with the numbered dots popping in one by one.
   const [recapToken, setRecapToken] = useState(0);
+  // Newest confirmed ball-strike pushed from the watch (Phase 1 impact gate).
+  // Fed to useAutoTrack so a "walked then stopped" pattern only counts as a
+  // shot when a real strike preceded it. Null until the watch sends one;
+  // absence leaves auto-track on its pure-GPS behavior.
+  const [lastImpact, setLastImpact] = useState<{
+    impactId: number;
+    capturedAt: number;
+  } | null>(null);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -565,6 +574,10 @@ export function HoleTrackingPage() {
   const autoTrack = useAutoTrack({
     enabled: autoTrackEnabled,
     initialBallPos: autoTrackInitialBallPos,
+    // Phase 1 impact gate — the latest confirmed strike from the watch,
+    // gated by the user's "watch shot detection" setting.
+    lastImpact,
+    impactGateEnabled: watchShotDetectionEnabled,
     onShotDetected: (shot) => {
       // 8s-stationary detection has fired — record the shot immediately
       // by staging pendingGps AND opening the AddShotSheet pre-filled
@@ -963,6 +976,14 @@ export function HoleTrackingPage() {
               currentLng: msg.currentLng ?? prev.currentLng
             };
           });
+          return;
+        }
+        if (msg.type === 'roundImpact') {
+          // A confirmed ball-strike from the watch. Phase 1: feed it to
+          // useAutoTrack as the impact gate — a detected "walked then
+          // stopped" shot is only emitted when a strike preceded it. New
+          // object identity each message so the hook treats it as fresh.
+          setLastImpact({ impactId: msg.impactId, capturedAt: msg.capturedAt });
           return;
         }
         if (msg.type === 'selectClub') {
