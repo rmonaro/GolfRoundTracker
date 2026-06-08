@@ -29,6 +29,7 @@ import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBullete
 import MyLocationRoundedIcon from '@mui/icons-material/MyLocationRounded';
 import StopCircleRoundedIcon from '@mui/icons-material/StopCircleRounded';
 import StraightenRoundedIcon from '@mui/icons-material/StraightenRounded';
+import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import {
   ensureGpsPermission,
   getCurrentPosition,
@@ -171,6 +172,9 @@ export function HoleTrackingPage() {
   // tap is unambiguous.
   const [pinEditMode, setPinEditMode] = useState(false);
   const [showYardageMarkers, setShowYardageMarkers] = useState(false);
+  // Bumped by the post-hole "Recap" button to replay the shots as a growing
+  // tee → landings → pin line with the numbered dots popping in one by one.
+  const [recapToken, setRecapToken] = useState(0);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -1270,6 +1274,8 @@ export function HoleTrackingPage() {
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
           shotEndPoints={shotEndPoints}
+          // Shot replay — bumped by the post-hole Recap button below.
+          recapToken={recapToken}
           // Hide the aim UI while reviewing a tap (pendingGps), after the
           // hole is complete, OR while moving the pin — in all three states
           // the handle / line / distance pill would either be misleading or
@@ -1835,27 +1841,60 @@ export function HoleTrackingPage() {
         {/* Hole-complete banner — replaces the Add Shot FAB / Confirm bar once
             a putt is made. Pure status; no actions inside the map area. */}
         {holeComplete && (
-          <Box
+          <Stack
+            direction="column"
+            spacing={1}
+            alignItems="flex-end"
             sx={{
               position: 'absolute',
               bottom: 'calc(16px + env(safe-area-inset-bottom))',
               right: 16,
-              zIndex: 4,
-              px: 1.5,
-              py: 0.75,
-              bgcolor: 'rgba(46,125,50,0.9)',
-              color: 'common.white',
-              borderRadius: 1.5,
-              border: 1.5,
-              borderColor: 'rgba(165,214,167,0.55)',
-              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
-              fontWeight: 800,
-              fontSize: '0.85rem',
-              letterSpacing: 0.4
+              zIndex: 4
             }}
           >
-            HOLE COMPLETE
-          </Box>
+            {/* Recap — replays the hole's shots as a growing tee → landings →
+                pin line with the numbered dots popping in one by one. Only
+                shown when there are GPS-tracked shots to animate. */}
+            {shotEndPoints.length > 0 && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={<PlayArrowRoundedIcon />}
+                onClick={() => setRecapToken((t) => t + 1)}
+                sx={{
+                  textTransform: 'none',
+                  fontWeight: 800,
+                  borderRadius: 999,
+                  px: 2,
+                  bgcolor: 'rgba(11,20,16,0.92)',
+                  color: '#fbbf24',
+                  border: 1.5,
+                  borderColor: '#fbbf24',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+                  '&:hover': { bgcolor: 'rgba(11,20,16,1)' }
+                }}
+              >
+                Recap shots
+              </Button>
+            )}
+            <Box
+              sx={{
+                px: 1.5,
+                py: 0.75,
+                bgcolor: 'rgba(46,125,50,0.9)',
+                color: 'common.white',
+                borderRadius: 1.5,
+                border: 1.5,
+                borderColor: 'rgba(165,214,167,0.55)',
+                boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+                fontWeight: 800,
+                fontSize: '0.85rem',
+                letterSpacing: 0.4
+              }}
+            >
+              HOLE COMPLETE
+            </Box>
+          </Stack>
         )}
 
         {/* Pending landing-point confirm bar. Appears above the FABs when the

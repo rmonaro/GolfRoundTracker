@@ -23,6 +23,7 @@ import HomeRoundedIcon from '@mui/icons-material/HomeRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import GpsFixedRoundedIcon from '@mui/icons-material/GpsFixedRounded';
@@ -1354,6 +1355,9 @@ function HoleMapDialog({
 }) {
   const queryClient = useQueryClient();
   const [editMode, setEditMode] = useState(false);
+  // Bumped each time the player taps "Recap" — triggers the tee → shots → pin
+  // replay animation in HoleLayout. Reset when the dialog closes.
+  const [recapToken, setRecapToken] = useState(0);
   // Optimistic per-shot drag positions, keyed by shot.id. Drag-end sets
   // this immediately so the dot stays at the new spot even before the
   // network round-trip completes — without it, leaving edit mode flips
@@ -1365,7 +1369,10 @@ function HoleMapDialog({
   >(new Map());
   // Reset the overrides each time the dialog opens — fresh per session.
   useEffect(() => {
-    if (!open) setOptimisticPositions(new Map());
+    if (!open) {
+      setOptimisticPositions(new Map());
+      setRecapToken(0);
+    }
   }, [open]);
   const hole = holes.find((h) => h.hole_number === holeNumber) ?? null;
 
@@ -1509,6 +1516,25 @@ function HoleMapDialog({
           )}
         </Box>
         <Stack direction="row" spacing={1} alignItems="center">
+          {/* Recap — replays the shots as a growing tee → landings → pin
+              line with the numbered dots popping in one by one. Hidden in
+              edit mode (drag + animation would fight) and when the hole has
+              no GPS-tracked shots to replay. */}
+          {!editMode && shotEndPoints.length > 0 && (
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<PlayArrowRoundedIcon />}
+              onClick={() => setRecapToken((t) => t + 1)}
+              sx={{
+                borderRadius: '5px',
+                textTransform: 'none',
+                minWidth: 64
+              }}
+            >
+              Recap
+            </Button>
+          )}
           {/* Edit toggle — makes the numbered shot dots draggable so
               the user can correct mis-recorded positions, AND lets
               taps on the map assign positions to shots that don't
@@ -1564,6 +1590,8 @@ function HoleMapDialog({
             // unmapped shot in shot-number order. Disabled (undefined)
             // when not editing or when all shots already have GPS.
             onShotLanded={onShotLanded}
+            // Shot replay — bumped by the Recap button above.
+            recapToken={recapToken}
           />
         )}
       </Box>

@@ -161,6 +161,16 @@ interface HoleLayoutProps {
    *  the user releases the drag. Used by the Round Summary map dialog
    *  so the player can correct mis-recorded shot positions. */
   onShotEndPointMoved?: (index: number, newPos: [number, number]) => void;
+  /**
+   * Recap replay trigger. Each time this value changes to a fresh positive
+   * number, the map animates a "shot replay": an amber line grows from the
+   * tee through every recorded shot-landing point to the pin, and each
+   * numbered shot dot pops into view as the line reaches it. 0 / undefined =
+   * idle (no recap). Mapbox-only. The path + dot handles are captured by the
+   * main map-creation effect, so a recap always replays the most recently
+   * rendered `shotEndPoints`.
+   */
+  recapToken?: number;
 }
 
 // -------------------- Shared style tokens --------------------
@@ -184,6 +194,9 @@ const FEATURE_STYLE: Record<
 };
 const BACKGROUND = '#2d3e2d';
 const CENTERLINE_COLOR = '#fbbf24';
+// Recap-replay growing line. Amber core (matches the numbered shot dots) over
+// a white casing so the path stays legible across grass, sand, and water.
+const RECAP_LINE_COLOR = '#fbbf24';
 
 // Z-order for polygon fills. Higher index draws on top.
 const FEATURE_LAYER_ORDER = [
@@ -714,7 +727,8 @@ export function HoleLayout({
   currentLocation = null,
   aimResetKey = null,
   yardageScale = 1,
-  onShotEndPointMoved
+  onShotEndPointMoved,
+  recapToken
 }: HoleLayoutProps) {
   // Decision tree:
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
@@ -761,6 +775,18 @@ export function HoleLayout({
   useEffect(() => {
     onShotLandedRef.current = onShotLanded;
   }, [onShotLanded]);
+
+  // --- Recap replay state ---
+  // DOM handles for the numbered shot dots, captured during the map-creation
+  // effect so the recap animation can hide them all, then reveal each in turn
+  // as the growing line reaches it.
+  const shotDotElsRef = useRef<HTMLDivElement[]>([]);
+  // Ordered recap path `[tee, ...shotEndPoints, pin]` in [lng, lat]. Rebuilt
+  // whenever the map effect re-runs so a replay always reflects current shots.
+  const recapPathRef = useRef<Array<[number, number]>>([]);
+  // Active requestAnimationFrame id for an in-flight recap, so we can cancel it
+  // on unmount or when a new recap starts.
+  const recapRafRef = useRef<number | null>(null);
 
   useEffect(() => {
     if (!useMapbox || !containerRef.current) return;
@@ -1562,10 +1588,23 @@ export function HoleLayout({
     // Capture the callback as a local so the loop reads from the ref
     // once (whether dots should be draggable is decided per-marker).
     const moveCb = onShotEndPointMovedRef.current;
+    const shotDots: HTMLDivElement[] = [];
     for (let i = 0; i < shotEndPoints.length; i++) {
       const pt = shotEndPoints[i];
+      // Mapbox drives the marker ROOT's `transform` (a translate that pins it
+      // to the map). We must never touch that transform, so the visible disk
+      // and its recap pop-in animation (opacity + scale) live on an inner
+      // child — clobbering the root's transform would teleport the dot.
       const dot = document.createElement('div');
       Object.assign(dot.style, {
+        // Default = pass-through taps. When draggable mode is on we
+        // need pointer events on so Mapbox can detect drag gestures
+        // on the dot itself.
+        pointerEvents: moveCb ? 'auto' : 'none',
+        cursor: moveCb ? 'grab' : 'default'
+      } as Partial<CSSStyleDeclaration>);
+      const inner = document.createElement('div');
+      Object.assign(inner.style, {
         width: '20px',
         height: '20px',
         borderRadius: '50%',
@@ -1577,14 +1616,15 @@ export function HoleLayout({
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        // Default = pass-through taps. When draggable mode is on we
-        // need pointer events on so Mapbox can detect drag gestures
-        // on the dot itself.
-        pointerEvents: moveCb ? 'auto' : 'none',
-        cursor: moveCb ? 'grab' : 'default',
-        lineHeight: '1'
+        lineHeight: '1',
+        // Smooth the recap pop-in. No visual effect outside recap since the
+        // disk renders at opacity 1 / scale 1.
+        transition: 'opacity 200ms ease, transform 200ms ease',
+        transform: 'scale(1)',
+        opacity: '1'
       } as Partial<CSSStyleDeclaration>);
-      dot.textContent = String(i + 1);
+      inner.textContent = String(i + 1);
+      dot.appendChild(inner);
       const marker = new mapboxgl.Marker({
         element: dot,
         anchor: 'center',
@@ -1592,6 +1632,8 @@ export function HoleLayout({
       })
         .setLngLat(pt)
         .addTo(map);
+      // Store the INNER disk — that's what the recap animation shows/hides.
+      shotDots.push(inner);
       if (moveCb) {
         const index = i;
         marker.on('dragend', () => {
@@ -1599,6 +1641,23 @@ export function HoleLayout({
           onShotEndPointMovedRef.current?.(index, [ll.lng, ll.lat]);
         });
       }
+    }
+
+    // Capture the recap path + dot handles for the replay animation. Path =
+    // tee → each shot landing → pin, so the growing line starts at the tee box
+    // and finishes at the flag. `centerlineCoords` is oriented tee→green, so
+    // [0] is the tee end; `effectivePin` is the authoritative flag position.
+    shotDotElsRef.current = shotDots;
+    if (shotEndPoints.length > 0) {
+      const path: Array<[number, number]> = [centerlineCoords[0], ...shotEndPoints];
+      // Append the pin as the final vertex unless the last shot already
+      // finished essentially on top of it (holed out) — avoids a ~0-length
+      // tail segment that would stall the animation on the final frame.
+      const last = shotEndPoints[shotEndPoints.length - 1];
+      if (haversineMetersFE(last, effectivePin) > 2) path.push(effectivePin);
+      recapPathRef.current = path;
+    } else {
+      recapPathRef.current = [];
     }
 
     // Pending landing-point marker is managed by a separate effect below so
@@ -1713,6 +1772,123 @@ export function HoleLayout({
       .setLngLat(landingPoint)
       .addTo(map);
   }, [landingPoint, useMapbox]);
+
+  // Recap replay — grow an amber line from tee → each shot landing → pin,
+  // revealing each numbered dot as the line reaches it. Triggered whenever
+  // `recapToken` changes to a fresh positive value. Reads the path + dot
+  // handles captured by the main map effect, so it always replays the latest
+  // `shotEndPoints` without forcing a map rebuild.
+  useEffect(() => {
+    if (!useMapbox) return;
+    if (!recapToken) return; // 0 / undefined = idle
+    const map = mapRef.current;
+    if (!map) return;
+    const path = recapPathRef.current;
+    const dots = shotDotElsRef.current;
+    if (path.length < 2) return;
+
+    const SEGMENT_MS = 520; // grow time per leg
+    const easeInOut = (t: number) =>
+      t < 0.5 ? 2 * t * t : 1 - (-2 * t + 2) ** 2 / 2;
+    const lineFeature = (coords: Array<[number, number]>): GeoJSON.Feature => ({
+      type: 'Feature',
+      properties: {},
+      geometry: { type: 'LineString', coordinates: coords }
+    });
+    const setLine = (coords: Array<[number, number]>) => {
+      const src = map.getSource('recap-line') as mapboxgl.GeoJSONSource | undefined;
+      src?.setData(lineFeature(coords));
+    };
+
+    // Lazily add the source + casing/core layers on first play. Subsequent
+    // replays reuse them; map teardown (the main effect's cleanup) disposes
+    // them along with everything else.
+    if (!map.getSource('recap-line')) {
+      map.addSource('recap-line', {
+        type: 'geojson',
+        data: lineFeature([path[0], path[0]])
+      });
+      map.addLayer({
+        id: 'recap-line-casing',
+        type: 'line',
+        source: 'recap-line',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: { 'line-color': '#ffffff', 'line-width': 6, 'line-opacity': 0.55 }
+      });
+      map.addLayer({
+        id: 'recap-line-core',
+        type: 'line',
+        source: 'recap-line',
+        layout: { 'line-cap': 'round', 'line-join': 'round' },
+        paint: {
+          'line-color': RECAP_LINE_COLOR,
+          'line-width': 3.5,
+          'line-opacity': 0.98
+        }
+      });
+    }
+
+    // Dot index d sits at path vertex d+1 (path[0] is the tee).
+    const showDot = (d: number) => {
+      const el = dots[d];
+      if (!el) return;
+      el.style.opacity = '1';
+      el.style.transform = 'scale(1)';
+    };
+
+    // Start state: nothing drawn, every dot hidden (fades back in as the line
+    // arrives). The CSS transition on each dot animates the pop.
+    dots.forEach((el) => {
+      el.style.opacity = '0';
+      el.style.transform = 'scale(0.4)';
+    });
+    setLine([path[0], path[0]]);
+
+    const segments = path.length - 1;
+    let startTs: number | null = null;
+
+    const frame = (ts: number) => {
+      if (!mapRef.current) return; // map torn down mid-recap
+      if (startTs == null) startTs = ts;
+      const elapsed = ts - startTs;
+      const segFloat = elapsed / SEGMENT_MS;
+      const segIdx = Math.floor(segFloat);
+
+      if (segIdx >= segments) {
+        // Done — draw the full path and reveal every dot.
+        setLine(path);
+        for (let d = 0; d < dots.length; d++) showDot(d);
+        recapRafRef.current = null;
+        return;
+      }
+
+      const t = easeInOut(Math.min(1, segFloat - segIdx));
+      const a = path[segIdx];
+      const b = path[segIdx + 1];
+      const cur: [number, number] = [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t
+      ];
+      setLine([...path.slice(0, segIdx + 1), cur]);
+
+      // Vertices the line has fully passed are visible; the dot at the end of
+      // the current leg pops in as the line arrives (t > 0.82).
+      let visible = segIdx; // vertices 1..segIdx reached → dots 0..segIdx-1
+      if (segFloat - segIdx > 0.82) visible = segIdx + 1;
+      for (let d = 0; d < Math.min(visible, dots.length); d++) showDot(d);
+
+      recapRafRef.current = requestAnimationFrame(frame);
+    };
+
+    recapRafRef.current = requestAnimationFrame(frame);
+
+    return () => {
+      if (recapRafRef.current != null) {
+        cancelAnimationFrame(recapRafRef.current);
+        recapRafRef.current = null;
+      }
+    };
+  }, [recapToken, useMapbox]);
 
   // Live user-position marker — pulsing blue dot that tracks the player's
   // current GPS fix. Renders only when `currentLocation` is supplied; the
