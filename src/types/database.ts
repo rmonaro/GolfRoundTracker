@@ -195,6 +195,9 @@ export interface ShotRow {
   end_lat: number | null;
   end_lng: number | null;
   calculated_distance: number | null;
+  /** False for auto-detected (watch impact) shots awaiting golfer review;
+   *  true for manual/historical shots. DB default true (migration 020). */
+  verified: boolean;
   created_at: string;
 }
 

@@ -117,6 +117,8 @@ export const roundRepo = {
     end_lat?: number | null;
     end_lng?: number | null;
     calculated_distance?: number | null;
+    /** Auto-detected shots pass false (awaiting review); omit/true for manual. */
+    verified?: boolean;
   }): Promise<Shot> {
     const { data, error } = await supabase.from('shots').insert(payload).select('*').single();
     if (error) throw toAppError(error, 'Could not add shot');
@@ -140,6 +142,8 @@ export const roundRepo = {
       end_lat?: number | null;
       end_lng?: number | null;
       calculated_distance?: number | null;
+      /** Set true when the golfer confirms an auto-detected shot. */
+      verified?: boolean;
     }
   ): Promise<Shot> {
     const { data, error } = await supabase

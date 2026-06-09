@@ -79,6 +79,7 @@ interface HolesTabShot {
   end_lat: number | null;
   end_lng: number | null;
   calculated_distance: number | null;
+  verified: boolean;
 }
 
 export function RoundSummaryPage() {
@@ -88,7 +89,9 @@ export function RoundSummaryPage() {
   const reset = useRoundStore((s) => s.reset);
   const bag = useBagStore((s) => s.clubs);
   const profile = useAuthStore((s) => s.profile);
+  const pageQueryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
+  const [verifyingAll, setVerifyingAll] = useState(false);
   const [tab, setTab] = useState<'overview' | 'holes' | 'game'>('overview');
 
   useEffect(() => {
@@ -142,6 +145,25 @@ export function RoundSummaryPage() {
 
   const { round, holes: rawHoles, shots } = detail.data;
 
+  // Round-summary verification backstop: auto-detected shots the golfer never
+  // confirmed per-hole surface here. "Verify all" clears the whole round; to
+  // edit/delete an individual shot they use the per-hole map / scorecard.
+  const unverifiedShots = shots.filter((s) => s.verified === false);
+  const verifyAllRound = async () => {
+    if (verifyingAll || unverifiedShots.length === 0) return;
+    setVerifyingAll(true);
+    try {
+      await Promise.all(
+        unverifiedShots.map((s) => roundRepo.updateShot(s.id, { verified: true }))
+      );
+      pageQueryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+    } catch (err) {
+      console.error('[verify] round verify-all failed', err);
+    } finally {
+      setVerifyingAll(false);
+    }
+  };
+
   // Live-derive per-hole strokes / putts / penalty_strokes from the shot
   // list rather than trusting the round_holes.strokes column. The column
   // is a debounced cache written by the live tracking page; if a shot
@@ -183,6 +205,56 @@ export function RoundSummaryPage() {
         subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
         back="/round"
       />
+
+      {/* Verification backstop — auto-detected shots not yet confirmed. */}
+      {unverifiedShots.length > 0 && (
+        <Box sx={{ px: 2, mt: 1 }}>
+          <Card
+            elevation={0}
+            sx={{
+              bgcolor: 'rgba(251,191,36,0.12)',
+              border: 1,
+              borderColor: 'rgba(251,191,36,0.5)',
+              borderRadius: '5px'
+            }}
+          >
+            <CardContent
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1.5,
+                py: 1.5,
+                '&:last-child': { pb: 1.5 }
+              }}
+            >
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>
+                  {unverifiedShots.length}{' '}
+                  {unverifiedShots.length === 1 ? 'shot needs' : 'shots need'} review
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Auto-detected from your watch. Open a hole to edit, or confirm
+                  them all.
+                </Typography>
+              </Box>
+              <Button
+                variant="contained"
+                size="small"
+                disabled={verifyingAll}
+                onClick={() => void verifyAllRound()}
+                sx={{
+                  textTransform: 'none',
+                  fontWeight: 700,
+                  borderRadius: '6px',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {verifyingAll ? 'Verifying…' : 'Verify all'}
+              </Button>
+            </CardContent>
+          </Card>
+        </Box>
+      )}
 
       {/* Tab nav — Overview (existing content) / Holes (per-hole detail) /
           Game Stats (placeholder). Sits between the header and the page
