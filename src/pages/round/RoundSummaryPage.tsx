@@ -23,6 +23,7 @@ import HomeRoundedIcon from '@mui/icons-material/HomeRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import GpsFixedRoundedIcon from '@mui/icons-material/GpsFixedRounded';
@@ -78,6 +79,7 @@ interface HolesTabShot {
   end_lat: number | null;
   end_lng: number | null;
   calculated_distance: number | null;
+  verified: boolean;
 }
 
 export function RoundSummaryPage() {
@@ -87,7 +89,9 @@ export function RoundSummaryPage() {
   const reset = useRoundStore((s) => s.reset);
   const bag = useBagStore((s) => s.clubs);
   const profile = useAuthStore((s) => s.profile);
+  const pageQueryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
+  const [verifyingAll, setVerifyingAll] = useState(false);
   const [tab, setTab] = useState<'overview' | 'holes' | 'game'>('overview');
 
   useEffect(() => {
@@ -141,6 +145,25 @@ export function RoundSummaryPage() {
 
   const { round, holes: rawHoles, shots } = detail.data;
 
+  // Round-summary verification backstop: auto-detected shots the golfer never
+  // confirmed per-hole surface here. "Verify all" clears the whole round; to
+  // edit/delete an individual shot they use the per-hole map / scorecard.
+  const unverifiedShots = shots.filter((s) => s.verified === false);
+  const verifyAllRound = async () => {
+    if (verifyingAll || unverifiedShots.length === 0) return;
+    setVerifyingAll(true);
+    try {
+      await Promise.all(
+        unverifiedShots.map((s) => roundRepo.updateShot(s.id, { verified: true }))
+      );
+      pageQueryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+    } catch (err) {
+      console.error('[verify] round verify-all failed', err);
+    } finally {
+      setVerifyingAll(false);
+    }
+  };
+
   // Live-derive per-hole strokes / putts / penalty_strokes from the shot
   // list rather than trusting the round_holes.strokes column. The column
   // is a debounced cache written by the live tracking page; if a shot
@@ -182,6 +205,56 @@ export function RoundSummaryPage() {
         subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
         back="/round"
       />
+
+      {/* Verification backstop — auto-detected shots not yet confirmed. */}
+      {unverifiedShots.length > 0 && (
+        <Box sx={{ px: 2, mt: 1 }}>
+          <Card
+            elevation={0}
+            sx={{
+              bgcolor: 'rgba(251,191,36,0.12)',
+              border: 1,
+              borderColor: 'rgba(251,191,36,0.5)',
+              borderRadius: '5px'
+            }}
+          >
+            <CardContent
+              sx={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 1.5,
+                py: 1.5,
+                '&:last-child': { pb: 1.5 }
+              }}
+            >
+              <Box sx={{ flex: 1, minWidth: 0 }}>
+                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>
+                  {unverifiedShots.length}{' '}
+                  {unverifiedShots.length === 1 ? 'shot needs' : 'shots need'} review
+                </Typography>
+                <Typography variant="caption" color="text.secondary">
+                  Auto-detected from your watch. Open a hole to edit, or confirm
+                  them all.
+                </Typography>
+              </Box>
+              <Button
+                variant="contained"
+                size="small"
+                disabled={verifyingAll}
+                onClick={() => void verifyAllRound()}
+                sx={{
+                  textTransform: 'none',
+                  fontWeight: 700,
+                  borderRadius: '6px',
+                  whiteSpace: 'nowrap'
+                }}
+              >
+                {verifyingAll ? 'Verifying…' : 'Verify all'}
+              </Button>
+            </CardContent>
+          </Card>
+        </Box>
+      )}
 
       {/* Tab nav — Overview (existing content) / Holes (per-hole detail) /
           Game Stats (placeholder). Sits between the header and the page
@@ -1354,6 +1427,9 @@ function HoleMapDialog({
 }) {
   const queryClient = useQueryClient();
   const [editMode, setEditMode] = useState(false);
+  // Bumped each time the player taps "Recap" — triggers the tee → shots → pin
+  // replay animation in HoleLayout. Reset when the dialog closes.
+  const [recapToken, setRecapToken] = useState(0);
   // Optimistic per-shot drag positions, keyed by shot.id. Drag-end sets
   // this immediately so the dot stays at the new spot even before the
   // network round-trip completes — without it, leaving edit mode flips
@@ -1365,7 +1441,10 @@ function HoleMapDialog({
   >(new Map());
   // Reset the overrides each time the dialog opens — fresh per session.
   useEffect(() => {
-    if (!open) setOptimisticPositions(new Map());
+    if (!open) {
+      setOptimisticPositions(new Map());
+      setRecapToken(0);
+    }
   }, [open]);
   const hole = holes.find((h) => h.hole_number === holeNumber) ?? null;
 
@@ -1509,6 +1588,25 @@ function HoleMapDialog({
           )}
         </Box>
         <Stack direction="row" spacing={1} alignItems="center">
+          {/* Recap — replays the shots as a growing tee → landings → pin
+              line with the numbered dots popping in one by one. Hidden in
+              edit mode (drag + animation would fight) and when the hole has
+              no GPS-tracked shots to replay. */}
+          {!editMode && shotEndPoints.length > 0 && (
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={<PlayArrowRoundedIcon />}
+              onClick={() => setRecapToken((t) => t + 1)}
+              sx={{
+                borderRadius: '5px',
+                textTransform: 'none',
+                minWidth: 64
+              }}
+            >
+              Recap
+            </Button>
+          )}
           {/* Edit toggle — makes the numbered shot dots draggable so
               the user can correct mis-recorded positions, AND lets
               taps on the map assign positions to shots that don't
@@ -1564,6 +1662,8 @@ function HoleMapDialog({
             // unmapped shot in shot-number order. Disabled (undefined)
             // when not editing or when all shots already have GPS.
             onShotLanded={onShotLanded}
+            // Shot replay — bumped by the Recap button above.
+            recapToken={recapToken}
           />
         )}
       </Box>

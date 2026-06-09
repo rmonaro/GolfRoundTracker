@@ -29,13 +29,18 @@ import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBullete
 import MyLocationRoundedIcon from '@mui/icons-material/MyLocationRounded';
 import StopCircleRoundedIcon from '@mui/icons-material/StopCircleRounded';
 import StraightenRoundedIcon from '@mui/icons-material/StraightenRounded';
+import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
+import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
+import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import {
   ensureGpsPermission,
   getCurrentPosition,
   haversineMeters,
-  isGpsAvailable
+  isGpsAvailable,
+  watchPosition,
+  type GpsPoint
 } from '@/services/gpsService';
-import { useAutoTrack } from '@/features/round/useAutoTrack';
+import { useAutoTrack, type ShotDetected } from '@/features/round/useAutoTrack';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
@@ -107,6 +112,7 @@ export function HoleTrackingPage() {
   // AddShotSheet pre-filled with the calculated distance.
   // GPS opt-in. Off by default so we don't prompt non-GPS users for location.
   const gpsEnabled = useSettingsStore((s) => s.gpsEnabled);
+  const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
 
   // At-course detection. Skipped entirely when GPS is disabled.
   const courseQuery = useQuery({
@@ -150,6 +156,11 @@ export function HoleTrackingPage() {
   // auto-track instead.
   const [autoTrackEnabled, setAutoTrackEnabled] = useState(false);
   const [trackingBusy, setTrackingBusy] = useState(false);
+  // Always-on "you are here" fix. Kept updated by its own GPS watch whenever
+  // GPS is enabled and the user isn't auto-tracking (auto-track supplies its
+  // own fix). This is what keeps the blue dot on the map at all times — it
+  // never gets cleared by marking a position or recording a shot.
+  const [liveFix, setLiveFix] = useState<GpsPoint | null>(null);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   // Club pre-selection: the user picks a club on the main screen so the next
   // shot opens with it already chosen. Resets when the hole changes (see effect
@@ -164,6 +175,33 @@ export function HoleTrackingPage() {
   // tap is unambiguous.
   const [pinEditMode, setPinEditMode] = useState(false);
   const [showYardageMarkers, setShowYardageMarkers] = useState(false);
+  // Bumped by the post-hole "Recap" button to replay the shots as a growing
+  // tee → landings → pin line with the numbered dots popping in one by one.
+  const [recapToken, setRecapToken] = useState(0);
+  // Newest confirmed ball-strike pushed from the watch (Phase 1 impact gate).
+  // Fed to useAutoTrack so a "walked then stopped" pattern only counts as a
+  // shot when a real strike preceded it. Null until the watch sends one;
+  // absence leaves auto-track on its pure-GPS behavior.
+  const [lastImpact, setLastImpact] = useState<{
+    impactId: number;
+    capturedAt: number;
+  } | null>(null);
+  // True while the watch strike stream is "live" — flipped on each roundImpact
+  // and cleared by a staleness timeout. Gates Phase 2 impact-primary mode: only
+  // when strikes are actually arriving do we hand detection to the watch;
+  // otherwise we stay on Phase 1 GPS-gated tracking so non-watch users are
+  // unaffected.
+  const [strikeStreamLive, setStrikeStreamLive] = useState(false);
+  const strikeStaleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Headless auto-commit handler, assigned below once onSubmitShot exists.
+  // Routed through a ref so the (earlier-defined) useAutoTrack callback can
+  // reach it without a temporal-dead-zone reference.
+  const autoCommitRef = useRef<((shot: ShotDetected) => void) | null>(null);
+  // Per-hole shot-verification dialog (auto-detected shots awaiting review).
+  const [verifyOpen, setVerifyOpen] = useState(false);
+  // Tracks which hole we've already auto-prompted for verification so closing
+  // the dialog doesn't immediately reopen it on the next render.
+  const promptedHoleRef = useRef<number | null>(null);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -551,14 +589,31 @@ export function HoleTrackingPage() {
     return null;
   }, [lastShotForAutoTrack?.endLat, lastShotForAutoTrack?.endLng]);
 
+  // Phase 2 impact-primary mode: hand detection to the watch when GPS + the
+  // shot-detection setting are on AND the strike stream is live. Otherwise fall
+  // back to Phase 1 GPS-gated tracking (impactPrimary off).
+  const impactPrimary = gpsEnabled && watchShotDetectionEnabled && strikeStreamLive;
+
   const autoTrack = useAutoTrack({
     enabled: autoTrackEnabled,
     initialBallPos: autoTrackInitialBallPos,
+    // Phase 1 impact gate — the latest confirmed strike from the watch,
+    // gated by the user's "watch shot detection" setting.
+    lastImpact,
+    impactGateEnabled: watchShotDetectionEnabled,
+    // Phase 2 — strikes drive detection; emitted shots carry source:'impact'.
+    impactPrimary,
     onShotDetected: (shot) => {
-      // 8s-stationary detection has fired — record the shot immediately
-      // by staging pendingGps AND opening the AddShotSheet pre-filled
-      // with the captured GPS pair + calculated distance. The user
-      // picks club + result and submits; the shot saves with full GPS.
+      if (shot.source === 'impact') {
+        // Phase 2: a watch strike closed the in-flight shot. Auto-commit it in
+        // an UNVERIFIED state — no sheet interruption; the golfer reviews it
+        // at hole-complete / round summary.
+        autoCommitRef.current?.(shot);
+        return;
+      }
+      // Phase 1 (source:'gps'): 8s-stationary detection fired — stage
+      // pendingGps AND open the AddShotSheet pre-filled with the captured GPS
+      // pair + calculated distance. The user picks club + result and submits.
       //
       // To reposition the auto-detected landing point: cancel the
       // sheet → the Ball Landed bar (managed by pendingGps) still
@@ -589,6 +644,18 @@ export function HoleTrackingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoTrackEnabled, autoTrackInitialBallPos?.lat, autoTrackInitialBallPos?.lng]);
 
+  // Always-on live-location watch. Runs while GPS is enabled and auto-track is
+  // OFF (auto-track runs its own watch and feeds the dot directly). This keeps
+  // a persistent "you are here" dot on the map regardless of tracking/marking
+  // state — marking a spot or recording a shot no longer makes the dot vanish.
+  useEffect(() => {
+    if (!gpsEnabled || autoTrackEnabled) {
+      return;
+    }
+    const stop = watchPosition((fix) => setLiveFix(fix));
+    return stop;
+  }, [gpsEnabled, autoTrackEnabled]);
+
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
   // covered along the centerline. Clamped to 0 so a slight over-walk doesn't
@@ -612,6 +679,21 @@ export function HoleTrackingPage() {
   // can't accidentally add a phantom shot after the ball is in the cup.
   // They can still navigate to the next/prev hole via the header arrows.
   const holeComplete = lastShotMadePutt;
+
+  // Auto-detected shots on this hole still awaiting the golfer's confirmation.
+  const unverifiedShots = useMemo(
+    () => hole.shots.filter((s) => s.verified === false),
+    [hole.shots]
+  );
+  // When a hole completes with unverified auto shots, prompt the review once.
+  useEffect(() => {
+    if (!holeComplete) return;
+    if (promptedHoleRef.current === hole.holeNumber) return;
+    if (hole.shots.some((s) => s.verified === false)) {
+      promptedHoleRef.current = hole.holeNumber;
+      setVerifyOpen(true);
+    }
+  }, [holeComplete, hole.holeNumber, hole.shots]);
 
   // "Next shot lands on the green" — the player is close enough to the pin
   // that this swing is an approach (≤ 200 yds remaining). On approach shots
@@ -701,7 +783,8 @@ export function HoleTrackingPage() {
     startLng,
     endLat,
     endLng,
-    calculatedDistance
+    calculatedDistance,
+    verified = true
   }: {
     clubId: string | null;
     clubCategory: import('@/models').ClubCategory | null;
@@ -718,6 +801,9 @@ export function HoleTrackingPage() {
     endLat: number | null;
     endLng: number | null;
     calculatedDistance: number | null;
+    /** False for auto-detected shots (await review). Manual/sheet saves omit
+     *  it → true. The EDIT path always confirms (verified true) regardless. */
+    verified?: boolean;
   }) => {
     // The pendingGps prop is read by AddShotSheet on open; clear it now so a
     // subsequent manual Add Shot doesn't reuse stale GPS.
@@ -739,7 +825,10 @@ export function HoleTrackingPage() {
         startLng,
         endLat,
         endLng,
-        calculatedDistance
+        calculatedDistance,
+        // Editing a shot in the sheet IS a verification — the golfer has
+        // eyes on it and saved, so clear any pending-review flag.
+        verified: true
       });
       setShotSheet(false);
       setEditingShot(null);
@@ -760,7 +849,8 @@ export function HoleTrackingPage() {
             start_lng: startLng,
             end_lat: endLat,
             end_lng: endLng,
-            calculated_distance: calculatedDistance
+            calculated_distance: calculatedDistance,
+            verified: true
           });
         } catch (err) {
           console.error('[shot] edit save failed', err);
@@ -769,8 +859,25 @@ export function HoleTrackingPage() {
       return;
     }
 
-    // ADD path
-    const nextNum = (hole.shots.length ?? 0) + 1;
+    // Impact-primary: a MANUAL add (e.g. a putt on the green) means the player
+    // has reached the ball — so close any pending auto shot FIRST (the approach
+    // that landed where they're now standing) and commit it. autoCommit's local
+    // store write is synchronous (pre-await), so the manual shot below reads the
+    // updated count and the two land in the right order. Guarded to manual
+    // saves (verified) so the auto path itself doesn't recurse.
+    if (verified && impactPrimary && autoTrack.hasPendingShot()) {
+      const pending = autoTrack.resolvePendingShot();
+      if (pending) autoCommitRef.current?.(pending);
+    }
+
+    // ADD path. Read the shot count FRESH from the store (not the closed-over
+    // `hole`) so two saves in the same tick — e.g. an auto-resolve of the
+    // pending shot immediately followed by a manual save — get sequential
+    // numbers instead of colliding on the same one.
+    const freshHole = useRoundStore
+      .getState()
+      .active?.holes.find((h) => h.holeNumber === hole.holeNumber);
+    const nextNum = (freshHole?.shots.length ?? hole.shots.length ?? 0) + 1;
     const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     addShotLocal(hole.holeNumber, {
       tempId,
@@ -785,6 +892,7 @@ export function HoleTrackingPage() {
       distanceUnit,
       notes,
       createdAt: new Date().toISOString(),
+      verified,
       startLat,
       startLng,
       endLat,
@@ -833,7 +941,8 @@ export function HoleTrackingPage() {
         start_lng: startLng,
         end_lat: endLat,
         end_lng: endLng,
-        calculated_distance: calculatedDistance
+        calculated_distance: calculatedDistance,
+        verified
       });
       markShotSynced(hole.holeNumber, tempId, persisted.id);
 
@@ -880,6 +989,56 @@ export function HoleTrackingPage() {
     }
   };
 
+  // Phase 2 auto-commit: turn a strike-detected shot into an UNVERIFIED row,
+  // reusing the same save pipeline as the manual sheet. Club/result/lie are
+  // best-effort defaults (selected club, optimistic "hit") — the golfer
+  // reviews and edits before verifying at hole-complete / round summary.
+  const autoCommitShot = (shot: ShotDetected) => {
+    const club = bagClubs.find((c) => c.clubId === selectedClubId) ?? null;
+    const tType = upcomingTargetType;
+    const tResult: import('@/models').TargetResult = 'hit';
+    const lie: import('@/models').Lie | null =
+      tType === 'green' ? 'green' : tType === 'fairway' ? 'fairway' : null;
+    const derived: import('@/models').ShotResult =
+      tType === 'fairway' ? 'fairway' : 'green';
+    void onSubmitShot({
+      clubId: selectedClubId,
+      clubCategory: club?.category ?? null,
+      distance: Math.round(shot.distanceM * 1.0936133),
+      distanceUnit: 'yards',
+      targetType: tType,
+      targetResult: tResult,
+      lie,
+      penaltyType: null,
+      derivedShotResult: derived,
+      notes: null,
+      startLat: shot.startLat,
+      startLng: shot.startLng,
+      endLat: shot.endLat,
+      endLng: shot.endLng,
+      calculatedDistance: shot.distanceM,
+      verified: false
+    });
+  };
+  // Keep the ref the useAutoTrack callback reads pointed at the latest closure.
+  useEffect(() => {
+    autoCommitRef.current = autoCommitShot;
+  });
+
+  // Close + commit any in-flight auto shot (e.g. on hole exit). End position
+  // defaults to the latest GPS fix inside resolvePendingShot.
+  const flushPendingAutoShot = () => {
+    if (!impactPrimary || !autoTrack.hasPendingShot()) return;
+    const pending = autoTrack.resolvePendingShot();
+    if (pending) autoCommitShot(pending);
+  };
+
+  // Drop a stale in-flight shot if impact-primary turns off (setting toggled,
+  // watch dropped) so it can't surface later against the wrong hole.
+  useEffect(() => {
+    if (!impactPrimary) autoTrack.clearPendingShot();
+  }, [impactPrimary, autoTrack]);
+
   const onDeleteShot = async (shot: LocalShot) => {
     removeShotLocal(hole.holeNumber, shot.tempId);
     if (shot.remoteId) {
@@ -891,8 +1050,32 @@ export function HoleTrackingPage() {
     }
   };
 
-  const goPrev = () => setCurrentHole(Math.max(0, idx - 1));
-  const goNext = () => setCurrentHole(Math.min(active.holes.length - 1, idx + 1));
+  // Confirm an auto-detected shot — clears its pending-review flag locally and
+  // in Supabase. Used by the per-hole verification dialog.
+  const verifyShot = async (shot: LocalShot) => {
+    updateShotLocal(hole.holeNumber, shot.tempId, { verified: true });
+    if (shot.remoteId) {
+      try {
+        await roundRepo.updateShot(shot.remoteId, { verified: true });
+      } catch (err) {
+        console.error('[verify] mark verified failed', err);
+      }
+    }
+  };
+  const verifyAllOnHole = async () => {
+    for (const s of hole.shots) {
+      if (s.verified === false) await verifyShot(s);
+    }
+  };
+
+  const goPrev = () => {
+    flushPendingAutoShot();
+    setCurrentHole(Math.max(0, idx - 1));
+  };
+  const goNext = () => {
+    flushPendingAutoShot();
+    setCurrentHole(Math.min(active.holes.length - 1, idx + 1));
+  };
 
   // Watch → phone message handler. Refs keep the listener pinned to the
   // latest handler functions without re-subscribing on every render (a
@@ -940,6 +1123,23 @@ export function HoleTrackingPage() {
               currentLng: msg.currentLng ?? prev.currentLng
             };
           });
+          return;
+        }
+        if (msg.type === 'roundImpact') {
+          // A confirmed ball-strike from the watch. Drives both the Phase 1
+          // gate (lastImpact) and Phase 2 impact-primary activation
+          // (strikeStreamLive). New object identity each message so the hook
+          // treats it as a fresh strike.
+          setLastImpact({ impactId: msg.impactId, capturedAt: msg.capturedAt });
+          // Mark the stream live and (re)arm a staleness timeout — if strikes
+          // stop arriving (watch off / out of range), impact-primary relaxes
+          // back to Phase 1 GPS tracking after the window.
+          setStrikeStreamLive(true);
+          if (strikeStaleTimerRef.current) clearTimeout(strikeStaleTimerRef.current);
+          strikeStaleTimerRef.current = setTimeout(
+            () => setStrikeStreamLive(false),
+            12 * 60 * 1000
+          );
           return;
         }
         if (msg.type === 'selectClub') {
@@ -1046,6 +1246,7 @@ export function HoleTrackingPage() {
     })();
     return () => {
       handle?.remove().catch(() => undefined);
+      if (strikeStaleTimerRef.current) clearTimeout(strikeStaleTimerRef.current);
     };
   }, []);
 
@@ -1251,6 +1452,8 @@ export function HoleTrackingPage() {
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
           shotEndPoints={shotEndPoints}
+          // Shot replay — bumped by the post-hole Recap button below.
+          recapToken={recapToken}
           // Hide the aim UI while reviewing a tap (pendingGps), after the
           // hole is complete, OR while moving the pin — in all three states
           // the handle / line / distance pill would either be misleading or
@@ -1261,11 +1464,11 @@ export function HoleTrackingPage() {
           showYardageMarkers={showYardageMarkers}
           pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
-          // Live "you are here" dot. Phone-side Track wins (the user is
-          // actively tracking on this device). When the WATCH is the
-          // one tracking, fall through to the watch-reported position
-          // so the phone map mirrors what the watch sees — same dot,
-          // same animation. Null when neither side is tracking.
+          // Live "you are here" dot, shown at all times while GPS is on.
+          // Priority: phone auto-track fix (active tracking on this device) →
+          // the WATCH-reported position (so the phone mirrors the watch) →
+          // the always-on `liveFix`. Marking a spot / recording a shot never
+          // clears it, because `liveFix` keeps updating independently.
           currentLocation={
             autoTrackEnabled && autoTrack.latestFix
               ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
@@ -1273,7 +1476,9 @@ export function HoleTrackingPage() {
                   watchTracking.currentLat != null &&
                   watchTracking.currentLng != null
                 ? [watchTracking.currentLng, watchTracking.currentLat]
-                : null
+                : liveFix
+                  ? [liveFix.lng, liveFix.lat]
+                  : null
           }
           // Reset the cached aim drag whenever the player edits par or
           // yardage. The handle re-anchors at the new defaults so the
@@ -1814,27 +2019,80 @@ export function HoleTrackingPage() {
         {/* Hole-complete banner — replaces the Add Shot FAB / Confirm bar once
             a putt is made. Pure status; no actions inside the map area. */}
         {holeComplete && (
-          <Box
+          <Stack
+            direction="column"
+            spacing={1}
+            alignItems="flex-end"
             sx={{
               position: 'absolute',
               bottom: 'calc(16px + env(safe-area-inset-bottom))',
               right: 16,
-              zIndex: 4,
-              px: 1.5,
-              py: 0.75,
-              bgcolor: 'rgba(46,125,50,0.9)',
-              color: 'common.white',
-              borderRadius: 1.5,
-              border: 1.5,
-              borderColor: 'rgba(165,214,167,0.55)',
-              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
-              fontWeight: 800,
-              fontSize: '0.85rem',
-              letterSpacing: 0.4
+              zIndex: 4
             }}
           >
-            HOLE COMPLETE
-          </Box>
+            {/* Recap — replays the hole's shots as a growing tee → landings →
+                pin line with the numbered dots popping in one by one. Only
+                shown when there are GPS-tracked shots to animate. */}
+            {shotEndPoints.length > 0 && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={<PlayArrowRoundedIcon />}
+                onClick={() => setRecapToken((t) => t + 1)}
+                sx={{
+                  textTransform: 'none',
+                  fontWeight: 800,
+                  borderRadius: 999,
+                  px: 2,
+                  bgcolor: 'rgba(11,20,16,0.92)',
+                  color: '#fbbf24',
+                  border: 1.5,
+                  borderColor: '#fbbf24',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+                  '&:hover': { bgcolor: 'rgba(11,20,16,1)' }
+                }}
+              >
+                Recap shots
+              </Button>
+            )}
+            {unverifiedShots.length > 0 && (
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={<CheckCircleRoundedIcon />}
+                onClick={() => setVerifyOpen(true)}
+                sx={{
+                  textTransform: 'none',
+                  fontWeight: 800,
+                  borderRadius: 999,
+                  px: 2,
+                  bgcolor: '#fbbf24',
+                  color: '#0b1410',
+                  boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+                  '&:hover': { bgcolor: '#f59e0b' }
+                }}
+              >
+                Verify {unverifiedShots.length}
+              </Button>
+            )}
+            <Box
+              sx={{
+                px: 1.5,
+                py: 0.75,
+                bgcolor: 'rgba(46,125,50,0.9)',
+                color: 'common.white',
+                borderRadius: 1.5,
+                border: 1.5,
+                borderColor: 'rgba(165,214,167,0.55)',
+                boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+                fontWeight: 800,
+                fontSize: '0.85rem',
+                letterSpacing: 0.4
+              }}
+            >
+              HOLE COMPLETE
+            </Box>
+          </Stack>
         )}
 
         {/* Pending landing-point confirm bar. Appears above the FABs when the
@@ -2071,6 +2329,121 @@ export function HoleTrackingPage() {
           setDetailsOpen(false);
         }}
       />
+
+      {/* Per-hole verification of auto-detected shots. Auto-opens at
+          hole-complete; reopenable via the "Verify N" button. Each shot can be
+          confirmed as-is, edited (opens the shot sheet — saving marks it
+          verified), or deleted (false positive). */}
+      <Dialog
+        open={verifyOpen}
+        onClose={() => setVerifyOpen(false)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { bgcolor: 'background.default', borderRadius: 2 } }}
+      >
+        <DialogTitle sx={{ fontWeight: 800, pb: 0.5 }}>
+          Verify shots
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ fontWeight: 500 }}>
+            Auto-detected from your watch — confirm, edit, or remove.
+          </Typography>
+        </DialogTitle>
+        <DialogContent dividers>
+          {unverifiedShots.length === 0 ? (
+            <Stack alignItems="center" spacing={1} sx={{ py: 3 }}>
+              <CheckCircleRoundedIcon sx={{ color: 'success.main', fontSize: 36 }} />
+              <Typography variant="body2" color="text.secondary">
+                All shots verified.
+              </Typography>
+            </Stack>
+          ) : (
+            <Stack spacing={1}>
+              {unverifiedShots.map((s) => {
+                const club =
+                  bagClubs.find((c) => c.clubId === s.clubId) ?? null;
+                const clubLabel = club
+                  ? club.customName || club.name
+                  : 'No club';
+                const distLabel =
+                  s.distance != null
+                    ? `${s.distance} ${s.distanceUnit === 'feet' ? 'ft' : 'yds'}`
+                    : '—';
+                const resultLabel = [s.targetType, s.targetResult]
+                  .filter(Boolean)
+                  .join(' ');
+                return (
+                  <Box
+                    key={s.tempId}
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 1,
+                      p: 1,
+                      borderRadius: 1.5,
+                      bgcolor: 'background.paper',
+                      border: 1,
+                      borderColor: 'rgba(251,191,36,0.4)'
+                    }}
+                  >
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography sx={{ fontWeight: 700, fontSize: '0.9rem' }}>
+                        Shot {s.shotNumber} · {clubLabel}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {distLabel}
+                        {resultLabel ? ` · ${resultLabel}` : ''}
+                      </Typography>
+                    </Box>
+                    <IconButton
+                      aria-label="edit shot"
+                      size="small"
+                      onClick={() => {
+                        setEditingShot(s);
+                        setShotSheet(true);
+                        setVerifyOpen(false);
+                      }}
+                    >
+                      <EditRoundedIcon fontSize="small" />
+                    </IconButton>
+                    <IconButton
+                      aria-label="delete shot"
+                      size="small"
+                      onClick={() => void onDeleteShot(s)}
+                    >
+                      <DeleteOutlineRoundedIcon fontSize="small" />
+                    </IconButton>
+                    <IconButton
+                      aria-label="verify shot"
+                      size="small"
+                      onClick={() => void verifyShot(s)}
+                      sx={{ color: 'success.main' }}
+                    >
+                      <CheckCircleRoundedIcon fontSize="small" />
+                    </IconButton>
+                  </Box>
+                );
+              })}
+            </Stack>
+          )}
+        </DialogContent>
+        <DialogActions sx={{ px: 2, py: 1.5 }}>
+          {unverifiedShots.length > 0 && (
+            <Button
+              onClick={() => void verifyAllOnHole()}
+              variant="contained"
+              startIcon={<CheckCircleRoundedIcon />}
+              sx={{ textTransform: 'none', fontWeight: 700, borderRadius: '6px' }}
+            >
+              Verify all
+            </Button>
+          )}
+          <Button
+            onClick={() => setVerifyOpen(false)}
+            sx={{ textTransform: 'none', fontWeight: 700 }}
+          >
+            Done
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }

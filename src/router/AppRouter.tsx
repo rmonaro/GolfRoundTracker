@@ -15,6 +15,12 @@ import { PastRoundsPage } from '@/pages/round/PastRoundsPage';
 import { StatsPage } from '@/pages/stats/StatsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
+import { PracticeStartPage } from '@/pages/practice/PracticeStartPage';
+import { PracticeLivePage } from '@/pages/practice/PracticeLivePage';
+import { SessionSummaryPage } from '@/pages/practice/SessionSummaryPage';
+import { PastPracticesPage } from '@/pages/practice/PastPracticesPage';
+import { PracticeSessionDetailPage } from '@/pages/practice/PracticeSessionDetailPage';
+import { SwingMetricsGuidePage } from '@/pages/practice/SwingMetricsGuidePage';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { AdminGuard } from '@/admin/AdminGuard';
 import { AdminLayout } from '@/admin/pages/AdminLayout';
@@ -78,6 +84,54 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <WatchPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice"
+        element={
+          <AuthGuard>
+            <PracticeStartPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/live"
+        element={
+          <AuthGuard>
+            <PracticeLivePage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/summary"
+        element={
+          <AuthGuard>
+            <SessionSummaryPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/guide"
+        element={
+          <AuthGuard>
+            <SwingMetricsGuidePage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/history"
+        element={
+          <AuthGuard>
+            <PastPracticesPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/practice/history/:sessionId"
+        element={
+          <AuthGuard>
+            <PracticeSessionDetailPage />
           </AuthGuard>
         }
       />

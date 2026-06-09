@@ -1,6 +1,7 @@
 import Foundation
 import Capacitor
 import WatchConnectivity
+import HealthKit
 
 /// Custom bridge controller — required so the in-app `WatchBridgePlugin`
 /// (which lives in the App target rather than a Pod / SPM module) gets
@@ -41,8 +42,11 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
     public let pluginMethods: [CAPPluginMethod] = [
         CAPPluginMethod(name: "activate", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isReachable", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "launchWatch", returnType: CAPPluginReturnPromise)
     ]
+
+    private let healthStore = HKHealthStore()
 
     /// Latest snapshot received from JS while the session was still
     /// activating. WCSession.activate() is async — the JS layer can (and
@@ -79,6 +83,56 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
             return
         }
         call.resolve(["reachable": WCSession.default.isReachable])
+    }
+
+    /// Launch the paired Apple Watch app via HealthKit's `startWatchApp(with:)`
+    /// — the only Apple-sanctioned way for an iOS app to launch its watch app.
+    /// Used for both starting a round (the watch then shows the round from its
+    /// synced state) and starting practice.
+    ///
+    /// `startPractice` (default false): when true, a `startPractice` command is
+    /// queued to the watch so it opens straight into a practice session. Round
+    /// launches send NO command, so launching for a round never kicks off
+    /// practice. Requires the HealthKit capability on the iOS app. Best-effort:
+    /// resolves `launched: false` (never rejects).
+    @objc func launchWatch(_ call: CAPPluginCall) {
+        let startPractice = call.getBool("startPractice") ?? false
+
+        guard HKHealthStore.isHealthDataAvailable() else {
+            call.resolve(["launched": false, "reason": "healthUnavailable"])
+            return
+        }
+
+        // Queue the practice-start command (guaranteed FIFO delivery) so the
+        // watch knows what to do once it wakes. Delivered after the launch.
+        if startPractice,
+           WCSession.isSupported(),
+           WCSession.default.activationState == .activated {
+            WCSession.default.transferUserInfo(["watchCommand": "startPractice"])
+        }
+
+        let config = HKWorkoutConfiguration()
+        config.activityType = .golf
+        config.locationType = .outdoor
+        // startWatchApp needs share authorization for the workout type. A
+        // missing HealthKit capability surfaces here as an entitlement error.
+        healthStore.requestAuthorization(toShare: [HKObjectType.workoutType()], read: []) { [weak self] _, authError in
+            guard let self else { return }
+            if let authError = authError {
+                call.resolve(["launched": false, "reason": "auth: \(authError.localizedDescription)"])
+                return
+            }
+            self.healthStore.startWatchApp(with: config) { success, error in
+                if success {
+                    call.resolve(["launched": true])
+                } else {
+                    call.resolve([
+                        "launched": false,
+                        "reason": error?.localizedDescription ?? "startWatchApp returned false"
+                    ])
+                }
+            }
+        }
     }
 
     /// Send the latest round-state snapshot to the watch. Uses

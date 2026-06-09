@@ -61,6 +61,9 @@ interface HoleLayoutCardProps {
   /** Enables drag-to-move on each numbered shot dot. Fires with the
    *  index + new [lng, lat] on drag-end. */
   onShotEndPointMoved?: (index: number, newPos: [number, number]) => void;
+  /** Recap replay trigger — bump to a fresh positive number to animate the
+   *  tee → shots → pin line with sequential dot reveals. See HoleLayout. */
+  recapToken?: number;
 }
 
 export function HoleLayoutCard({
@@ -84,7 +87,8 @@ export function HoleLayoutCard({
   currentLocation = null,
   aimResetKey = null,
   yardageScale = 1,
-  onShotEndPointMoved
+  onShotEndPointMoved,
+  recapToken
 }: HoleLayoutCardProps) {
   const { data, status } = useHoleLayout(courseId, holeNumber);
 
@@ -128,6 +132,7 @@ export function HoleLayoutCard({
             aimResetKey={aimResetKey}
             yardageScale={yardageScale}
             onShotEndPointMoved={onShotEndPointMoved}
+            recapToken={recapToken}
           />
         </Box>
       </Card>

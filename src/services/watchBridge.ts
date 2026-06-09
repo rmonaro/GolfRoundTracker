@@ -39,6 +39,13 @@ export interface WatchRoundState {
    */
   recordingShot?: boolean;
   /**
+   * Whether the user has Apple Watch shot detection enabled (settings). The
+   * watch reads this on round-active and starts/stops its motion-based strike
+   * detector accordingly — gating it here (rather than always-on) keeps watch
+   * battery in the user's control. Absent → watch treats it as enabled.
+   */
+  shotDetection?: boolean;
+  /**
    * Slim club list the watch can render. Putters land in their own bucket on
    * the watch UI so we mark them; everything else is just name + (optional)
    * typical-distance hint for inline display.
@@ -85,6 +92,67 @@ export type WatchInboundMessage =
        *  pick up the change. */
       type: 'selectClub';
       clubId: string;
+    }
+  | {
+      /** A confirmed ball-strike detected by the watch's round-mode motion
+       *  detector (real impact spike, NOT an air/practice swing). Phase 1
+       *  shot-detection gating: the phone's auto-track only treats a
+       *  "walked then stopped" pattern as a shot when one of these arrived
+       *  since the ball was last anchored — killing false positives like
+       *  cart rides. `impactId` is monotonic within a watch round session;
+       *  `capturedAt` is the watch clock (epoch ms) and is NOT trusted for
+       *  recency (the phone uses arrival time). `swingType`/`handSpeed`
+       *  are advisory; startLat/Lng are the watch's best fix at impact, if
+       *  any. */
+      type: 'roundImpact';
+      impactId: number;
+      capturedAt: number;
+      swingType?: string;
+      handSpeed?: number;
+      startLat?: number | null;
+      startLng?: number | null;
+    }
+  // --- Practice-mode swing feedback (motion-based) -----------------------
+  | { type: 'practiceStarted'; sessionId: string; clubId: string | null }
+  | { type: 'practiceClubSelected'; sessionId: string; clubId: string }
+  | {
+      type: 'practiceEnded';
+      sessionId: string;
+      swingCount: number;
+      // Optional health summary from the watch workout session.
+      avgHeartRate?: number;
+      maxHeartRate?: number;
+      minHeartRate?: number;
+      hrvSdnn?: number;
+      activeCalories?: number;
+      durationSeconds?: number;
+    }
+  | {
+      /** One detected swing's motion metrics. All values are relative /
+       *  estimated — NOT launch-monitor measurements. The phone applies
+       *  the rules engine and persists to `swing_metrics`. */
+      type: 'swingDetected';
+      sessionId: string;
+      swingIndex: number;
+      clubId: string | null;
+      capturedAt: number; // epoch seconds (watch clock)
+      backswingTimeMs: number;
+      downswingTimeMs: number;
+      tempoRatio: number;
+      transitionScore: number;
+      estimatedHandSpeed: number;
+      wristRotationScore: number;
+      finishStabilityScore: number;
+      planeAxis: number[];
+      // Derived (Phase 1)
+      swingType?: string;
+      isAirSwing?: boolean;
+      backswingRotation?: number;
+      releaseTimingScore?: number;
+      decelerationScore?: number;
+      transitionDirectionScore?: number;
+      addressGravity?: number[];
+      heartRate?: number;
     };
 
 interface WatchBridgeRawPlugin {
@@ -97,6 +165,7 @@ interface WatchBridgeRawPlugin {
   }>;
   isReachable(): Promise<{ reachable: boolean }>;
   sendState(args: { state: WatchRoundState }): Promise<void>;
+  launchWatch(args: { startPractice: boolean }): Promise<{ launched: boolean; reason?: string }>;
   addListener(
     eventName: 'messageFromWatch',
     listener: (event: { message: Record<string, unknown>; delivery: 'live' | 'queued' }) => void
@@ -153,6 +222,22 @@ export const watchBridge = {
     if (!isIOSNative) return false;
     const { reachable } = await Raw.isReachable();
     return reachable;
+  },
+
+  /**
+   * Launch the paired Apple Watch app via HealthKit's startWatchApp (the only
+   * iOS-sanctioned way to launch the watch app). Pass `startPractice: true` to
+   * have the watch open straight into a practice session; omit it for a round
+   * launch (the watch then shows the round from its synced state).
+   * Best-effort — resolves `{ launched: false }` off-iOS or on failure.
+   */
+  async launchWatch(startPractice = false): Promise<{ launched: boolean; reason?: string }> {
+    if (!isIOSNative) return { launched: false };
+    try {
+      return await Raw.launchWatch({ startPractice });
+    } catch (err) {
+      return { launched: false, reason: err instanceof Error ? err.message : 'failed' };
+    }
   },
 
   /** Push the latest round snapshot to the watch (latest-wins coalescing). */

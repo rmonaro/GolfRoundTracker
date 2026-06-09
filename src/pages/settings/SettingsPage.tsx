@@ -50,6 +50,8 @@ export function SettingsPage() {
   const setWatchMode = useSettingsStore((s) => s.setWatchMode);
   const gpsEnabled = useSettingsStore((s) => s.gpsEnabled);
   const setGpsEnabled = useSettingsStore((s) => s.setGpsEnabled);
+  const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
+  const setWatchShotDetection = useSettingsStore((s) => s.setWatchShotDetection);
   const { data: isAdmin } = useIsAdmin();
 
   const [firstName, setFirstName] = useState(profile?.first_name ?? '');
@@ -246,6 +248,32 @@ export function SettingsPage() {
                 Powers the Track button on the hole screen and the at-course
                 indicator. Off by default — flip on to be prompted for location
                 next time you open a hole.
+              </Typography>
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+          <CardContent>
+            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+              Apple Watch
+            </Typography>
+            <Stack mt={1} spacing={0.5}>
+              <FormControlLabel
+                control={
+                  <Switch
+                    checked={watchShotDetectionEnabled}
+                    onChange={(e) => setWatchShotDetection(e.target.checked)}
+                  />
+                }
+                label="Shot detection"
+              />
+              <Typography variant="caption" color="text.secondary">
+                Uses your Apple Watch to detect real club strikes so auto-track
+                only logs a shot when you actually hit — not when you walk to
+                the cart. Needs the watch worn and GPS tracking on. Runs a
+                workout session during the round, which uses extra watch
+                battery.
               </Typography>
             </Stack>
           </CardContent>

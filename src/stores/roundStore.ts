@@ -31,6 +31,12 @@ export interface LocalShot {
   createdAt: string;
   /** When set, the shot has been persisted to Supabase and has a real id. */
   remoteId?: string;
+  /**
+   * False for auto-detected (watch impact-primary) shots awaiting the golfer's
+   * review; true/undefined for manual + historical shots. Drives the per-hole
+   * and round-summary verification flows. Undefined is treated as verified.
+   */
+  verified?: boolean;
   // V2 GPS placeholders — undefined in V1
   startLat?: number | null;
   startLng?: number | null;
@@ -229,6 +235,7 @@ export const useRoundStore = create<RoundState>()(
               distanceUnit: s.distance_unit,
               notes: s.notes,
               createdAt: s.created_at,
+              verified: s.verified ?? true,
               startLat: s.start_lat,
               startLng: s.start_lng,
               endLat: s.end_lat,

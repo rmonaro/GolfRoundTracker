@@ -1,9 +1,25 @@
 import SwiftUI
+import WatchKit
+import HealthKit
+
+/// Handles the watch app being launched from the iPhone via
+/// `HKHealthStore.startWatchApp(with:)`. iOS hands us the workout
+/// configuration; we treat that as "the user tapped Start Watch Practice on
+/// the phone" and jump straight into a practice session.
+final class WatchAppDelegate: NSObject, WKApplicationDelegate {
+    func handle(_ workoutConfiguration: HKWorkoutConfiguration) {
+        // Launched from the iPhone via startWatchApp. What happens next is
+        // driven by the phone's WCSession command (a `startPractice` user-info
+        // for practice) or the synced round state (for a round) — NOT started
+        // here, so launching for a round never kicks off a practice session.
+    }
+}
 
 /// Entry point. Activates the WCSession on first appear and hands the
 /// shared session into the view tree via `@StateObject`.
 @main
 struct GolfWatchApp: App {
+    @WKApplicationDelegateAdaptor(WatchAppDelegate.self) private var appDelegate
     @StateObject private var session = WatchSession.shared
 
     var body: some Scene {
@@ -29,18 +45,35 @@ struct GolfWatchApp: App {
 /// live distance-to-pin without waiting on phone snapshots.
 struct RootView: View {
     @EnvironmentObject var session: WatchSession
+    @ObservedObject private var practice = PracticeController.shared
 
     var body: some View {
         Group {
             if session.state.active {
+                // During a live round, practice mode is intentionally out of
+                // reach — swing feedback is a separate, non-round flow.
                 HoleHomeView()
+            } else if practice.isActive {
+                // Launched into practice (e.g. from the phone's Start Watch
+                // Practice) or started on the watch — show the practice hub.
+                NavigationStack {
+                    PracticeHomeView()
+                }
             } else {
-                IdleView()
+                NavigationStack {
+                    IdleView()
+                }
             }
         }
         .onChange(of: session.state.active) { _, isActive in
             if isActive {
                 session.startContinuousLocation()
+                // A round taking over ends any practice session. The two modes
+                // are mutually exclusive: leaving practice armed keeps the
+                // motion sensors running and floods the shared WCSession
+                // channel the round needs for shot recording. endSession()
+                // also notifies the phone so its session is finalized.
+                PracticeController.shared.endSession()
             } else {
                 session.stopContinuousLocation()
             }
@@ -51,6 +84,7 @@ struct RootView: View {
             // after starting on the phone).
             if session.state.active {
                 session.startContinuousLocation()
+                PracticeController.shared.endSession()
             }
         }
     }
@@ -59,7 +93,7 @@ struct RootView: View {
 struct IdleView: View {
     @EnvironmentObject var session: WatchSession
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 10) {
             Image(systemName: "figure.golf")
                 .font(.system(size: 32))
                 .foregroundColor(.secondary)
@@ -69,6 +103,14 @@ struct IdleView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
+
+            // Practice mode is available off-round: motion-based swing feedback.
+            NavigationLink {
+                PracticeHomeView()
+            } label: {
+                Label("Practice", systemImage: "dot.radiowaves.left.and.right")
+            }
+            .buttonStyle(.borderedProminent)
         }
         .padding()
     }

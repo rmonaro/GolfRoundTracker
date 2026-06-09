@@ -19,6 +19,7 @@ import {
 } from '@mui/material';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
+import MoreVertRoundedIcon from '@mui/icons-material/MoreVertRounded';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -34,18 +35,24 @@ interface PendingDelete {
   startedAt: string;
 }
 
+/** How far the card slides left to reveal the delete button (px). */
+const REVEAL_WIDTH = 72;
+
 export function PastRoundsPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const userId = useAuthStore((s) => s.session?.user.id);
   const { data, isLoading } = useRounds();
   const [pending, setPending] = useState<PendingDelete | null>(null);
+  /** Id of the card currently slid open to reveal its delete button. */
+  const [revealedId, setRevealedId] = useState<string | null>(null);
 
   const deleteRound = useMutation({
     mutationFn: (roundId: string) => roundRepo.deleteRound(roundId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['rounds', userId] });
       setPending(null);
+      setRevealedId(null);
     }
   });
 
@@ -72,90 +79,133 @@ export function PastRoundsPage() {
         />
       ) : (
         <Stack spacing={1.5} px={2} pb={3}>
-          {completed.map((r) => (
-            <Card
-              key={r.id}
-              elevation={0}
-              sx={{ bgcolor: 'background.paper', position: 'relative', borderRadius: '5px' }}
-            >
-              {/* Delete affordance — absolute-positioned over the card so it
-                  stays a separate tap target from the CardActionArea (which
-                  would otherwise navigate to summary on any tap). */}
-              <IconButton
-                aria-label={`Delete round at ${r.course_name}`}
-                size="small"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setPending({
-                    id: r.id,
-                    courseName: r.course_name,
-                    startedAt: r.started_at
-                  });
-                }}
-                sx={{
-                  position: 'absolute',
-                  top: 6,
-                  right: 6,
-                  zIndex: 2,
-                  color: 'text.secondary'
-                }}
+          {completed.map((r) => {
+            const revealed = revealedId === r.id;
+            return (
+              <Box
+                key={r.id}
+                sx={{ position: 'relative', overflow: 'hidden', borderRadius: '5px' }}
               >
-                <DeleteOutlineRoundedIcon fontSize="small" />
-              </IconButton>
-              <CardActionArea
-                onClick={() => navigate(`/round/summary/${r.id}`)}
-                sx={{ p: 0.5 }}
-              >
-                <CardContent>
-                  <Stack
-                    direction="row"
-                    justifyContent="space-between"
-                    alignItems="flex-start"
-                    sx={{ pr: 4 /* keep title clear of the delete icon */ }}
+                {/* Delete action revealed behind the card on the right. */}
+                <Box
+                  sx={{
+                    position: 'absolute',
+                    top: 0,
+                    right: 0,
+                    bottom: 0,
+                    width: REVEAL_WIDTH,
+                    display: 'flex'
+                  }}
+                >
+                  <Button
+                    aria-label={`Delete round at ${r.course_name}`}
+                    color="error"
+                    variant="contained"
+                    onClick={() =>
+                      setPending({
+                        id: r.id,
+                        courseName: r.course_name,
+                        startedAt: r.started_at
+                      })
+                    }
+                    sx={{ minWidth: 0, width: '100%', height: '100%', borderRadius: 0 }}
                   >
-                    <Box sx={{ minWidth: 0 }}>
-                      <Typography variant="caption" color="text.secondary">
-                        {dayjs(r.started_at).format('ddd MMM D, YYYY')}
-                      </Typography>
-                      <Typography variant="h6" noWrap>
-                        {r.course_name}
-                      </Typography>
-                      <Stack direction="row" spacing={0.75} mt={0.5}>
-                        <Chip label={`${r.holes_played} holes`} size="small" />
-                        {r.handicap_differential != null && (
-                          <Chip
-                            label={`Δ ${r.handicap_differential.toFixed(1)}`}
-                            size="small"
-                            color="primary"
-                            variant="outlined"
-                          />
-                        )}
+                    <DeleteOutlineRoundedIcon />
+                  </Button>
+                </Box>
+
+                {/* The card slides left to expose the delete button. */}
+                <Card
+                  elevation={0}
+                  sx={{
+                    bgcolor: 'background.paper',
+                    position: 'relative',
+                    borderRadius: '5px',
+                    transform: revealed ? `translateX(-${REVEAL_WIDTH}px)` : 'translateX(0)',
+                    transition: 'transform 0.22s ease'
+                  }}
+                >
+                  {/* Vertical 3-dots — toggles the slide-to-reveal. */}
+                  <IconButton
+                    aria-label="Round options"
+                    size="small"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRevealedId(revealed ? null : r.id);
+                    }}
+                    sx={{
+                      position: 'absolute',
+                      top: 6,
+                      right: 6,
+                      zIndex: 2,
+                      color: 'text.secondary'
+                    }}
+                  >
+                    <MoreVertRoundedIcon fontSize="small" />
+                  </IconButton>
+                  <CardActionArea
+                    onClick={() => {
+                      // When open, a tap closes the row instead of navigating.
+                      if (revealed) {
+                        setRevealedId(null);
+                        return;
+                      }
+                      navigate(`/round/summary/${r.id}`);
+                    }}
+                    sx={{ p: 0.5 }}
+                  >
+                    <CardContent>
+                      <Stack
+                        direction="row"
+                        justifyContent="space-between"
+                        alignItems="flex-start"
+                        sx={{ pr: 4 /* keep title clear of the options icon */ }}
+                      >
+                        <Box sx={{ minWidth: 0 }}>
+                          <Typography variant="caption" color="text.secondary">
+                            {dayjs(r.started_at).format('ddd MMM D, YYYY')}
+                          </Typography>
+                          <Typography variant="h6" noWrap>
+                            {r.course_name}
+                          </Typography>
+                          <Stack direction="row" spacing={0.75} mt={0.5}>
+                            <Chip label={`${r.holes_played} holes`} size="small" />
+                            {r.handicap_differential != null && (
+                              <Chip
+                                label={`Δ ${r.handicap_differential.toFixed(1)}`}
+                                size="small"
+                                color="primary"
+                                variant="outlined"
+                              />
+                            )}
+                          </Stack>
+                        </Box>
+                        <Box sx={{ textAlign: 'right' }}>
+                          {/* Headline = score-to-par; raw stroke total below.
+                              Matches the HomePage Last Round card and the
+                              Round Summary final-score treatment. */}
+                          <Typography
+                            variant="h4"
+                            sx={{ fontWeight: 700 }}
+                            color={r.score_vs_par <= 0 ? 'primary' : 'warning.main'}
+                          >
+                            {scoreVsPar(r.score, r.par)}
+                          </Typography>
+                          <Typography
+                            variant="body2"
+                            color="text.secondary"
+                            sx={{ fontWeight: 600 }}
+                          >
+                            {r.score} strokes
+                          </Typography>
+                        </Box>
                       </Stack>
-                    </Box>
-                    <Box sx={{ textAlign: 'right' }}>
-                      {/* Headline = score-to-par; raw stroke total below.
-                          Matches the HomePage Last Round card and the
-                          Round Summary final-score treatment. */}
-                      <Typography
-                        variant="h4"
-                        sx={{ fontWeight: 700 }}
-                        color={r.score_vs_par <= 0 ? 'primary' : 'warning.main'}
-                      >
-                        {scoreVsPar(r.score, r.par)}
-                      </Typography>
-                      <Typography
-                        variant="body2"
-                        color="text.secondary"
-                        sx={{ fontWeight: 600 }}
-                      >
-                        {r.score} strokes
-                      </Typography>
-                    </Box>
-                  </Stack>
-                </CardContent>
-              </CardActionArea>
-            </Card>
-          ))}
+                    </CardContent>
+                  </CardActionArea>
+                </Card>
+              </Box>
+            );
+          })}
         </Stack>
       )}
 
