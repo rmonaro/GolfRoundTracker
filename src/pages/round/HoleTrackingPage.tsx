@@ -49,6 +49,7 @@ import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
 import { useTmRoundSync } from '@/features/tournaments/useTmRoundSync';
+import { useTournamentResumeReconcile } from '@/features/tournaments/useTournamentResumeReconcile';
 import {
   AddShotSheet,
   ClubPicker,
@@ -92,6 +93,8 @@ export function HoleTrackingPage() {
   // Tournament rounds push live scores + shots to TM as the round is played.
   // No-op for normal rounds (the hook checks the active round's TM linkage).
   const { syncHole, finalizeRound } = useTmRoundSync();
+  // Heal a stale/empty local store against the DB on resume (tournament rounds).
+  useTournamentResumeReconcile();
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);

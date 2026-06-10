@@ -204,6 +204,11 @@ function RoundRow({
         : null;
 
   const alreadySubmitted = round.scorecard?.status === 'SUBMITTED';
+  // A GRT round has already been started + linked for this tournament round
+  // (scorecard carries our round id) and isn't submitted → this is a RESUME,
+  // not a fresh start. handleStart resolves the existing round from the DB.
+  const hasLinkedRound =
+    !!round.scorecard?.round_tracking_round_id && !alreadySubmitted;
 
   const handleStart = async () => {
     setError(null);
@@ -265,6 +270,18 @@ function RoundRow({
           </Button>
         ) : alreadySubmitted ? (
           <Chip size="small" color="success" label="Submitted" variant="outlined" />
+        ) : hasLinkedRound ? (
+          // Round already started elsewhere (or local store was cleared) —
+          // handleStart resumes it from the DB rather than creating a new one.
+          <Button
+            variant="contained"
+            size="small"
+            startIcon={<PlayArrowRoundedIcon />}
+            disabled={startRound.isPending || isImporting}
+            onClick={handleStart}
+          >
+            {startRound.isPending || isImporting ? 'Resuming…' : 'Resume'}
+          </Button>
         ) : (
           <Button
             variant="contained"
@@ -283,12 +300,12 @@ function RoundRow({
       </Stack>
 
       {/* Why Start is locked. can_start is authoritative (now ≥ tee_time on TM). */}
-      {!round.can_start && !isActiveHere && !alreadySubmitted && gateReason && (
+      {!round.can_start && !isActiveHere && !alreadySubmitted && !hasLinkedRound && gateReason && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
           🔒 {gateReason}
         </Typography>
       )}
-      {otherActive && round.can_start && !alreadySubmitted && (
+      {otherActive && round.can_start && !alreadySubmitted && !hasLinkedRound && (
         <Typography variant="caption" color="warning.main" sx={{ mt: 0.5, display: 'block' }}>
           Finish your active round before starting this one.
         </Typography>

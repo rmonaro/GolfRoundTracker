@@ -60,6 +60,26 @@ export function useStartRound() {
     mutationFn: async ({ course, holesPlayed, playedAt, tm }: StartRoundInput) => {
       if (!userId) throw new Error('Not authenticated');
 
+      // Tournament round: if one is already in progress for this registration +
+      // round number, RESUME it (hydrate holes + shots from the DB) instead of
+      // creating a duplicate. This is what makes re-entering a tournament round
+      // show the holes/shots already recorded rather than a blank new round.
+      if (tm) {
+        const existing = await roundRepo.findBestTournamentRound(
+          userId,
+          tm.registrationId,
+          tm.roundNumber
+        );
+        if (existing) {
+          const [holes, shots] = await Promise.all([
+            roundRepo.listHoles(existing.id),
+            roundRepo.listShots(existing.id)
+          ]);
+          useRoundStore.getState().hydrateFromRemote(existing, holes, shots);
+          return existing;
+        }
+      }
+
       let courseId = course.id ?? null;
       if (!courseId) {
         const created: Course = await courseRepo.create({

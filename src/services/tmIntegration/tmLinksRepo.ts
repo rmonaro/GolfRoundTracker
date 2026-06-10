@@ -30,5 +30,17 @@ export const tmLinksRepo = {
       .order('updated_at', { ascending: false });
     if (error) throw toAppError(error, 'Could not load tournament links');
     return (data ?? []) as TmLinkRow[];
+  },
+
+  /** Single link by TM registration id — used to label an active tournament round. */
+  async getByRegistration(userId: string, registrationId: string): Promise<TmLinkRow | null> {
+    const { data, error } = await supabase
+      .from('tm_links')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('registration_id', registrationId)
+      .maybeSingle();
+    if (error) throw toAppError(error, 'Could not load tournament link');
+    return (data ?? null) as TmLinkRow | null;
   }
 };

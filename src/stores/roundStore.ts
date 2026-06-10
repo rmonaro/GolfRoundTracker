@@ -275,6 +275,16 @@ export const useRoundStore = create<RoundState>()(
         localHoles.sort((a, b) => a.holeNumber - b.holeNumber);
         void holeById; // currently unused but keeps mapping clear
 
+        // Resume at the first unplayed hole (no shots + no strokes) so a resumed
+        // round opens where the player left off — not back at hole 1 — and the
+        // earlier holes count as "completed" for running totals. Falls back to
+        // the last hole when every hole has data.
+        const firstUnplayed = localHoles.findIndex(
+          (h) => h.shots.length === 0 && (h.strokes ?? 0) === 0
+        );
+        const resumeIndex =
+          firstUnplayed === -1 ? Math.max(0, localHoles.length - 1) : firstUnplayed;
+
         set({
           active: {
             roundId: round.id,
@@ -287,7 +297,7 @@ export const useRoundStore = create<RoundState>()(
             totalPar: round.par,
             totalYardage: null,
             startedAt: round.started_at,
-            currentHoleIndex: 0,
+            currentHoleIndex: resumeIndex,
             holes: localHoles,
             tmRegistrationId: round.tm_registration_id ?? null,
             tmRoundNumber: round.tm_round_number ?? null,

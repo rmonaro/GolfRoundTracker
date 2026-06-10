@@ -7,6 +7,7 @@ import {
   Card,
   CardActionArea,
   CardContent,
+  Chip,
   Dialog,
   DialogActions,
   DialogContent,
@@ -21,10 +22,12 @@ import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
 import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useRoundStore } from '@/stores/roundStore';
 import { useAuthStore } from '@/stores/authStore';
+import { tmLinksRepo } from '@/services/tmIntegration/tmLinksRepo';
+import { useTournamentResumeReconcile } from '@/features/tournaments/useTournamentResumeReconcile';
 import { useRounds } from '@/features/stats/useRounds';
 import { scoreVsPar } from '@/utils/format';
 import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
@@ -39,6 +42,19 @@ export function RoundHomePage() {
   const { data: rounds } = useRounds();
   const lastRound = (rounds ?? []).filter((r) => r.completed_at)[0];
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // If the active round is a tournament round, reconcile it against the DB so a
+  // stale/empty local store (e.g. a duplicate round) is healed to the real one.
+  useTournamentResumeReconcile();
+
+  // When the active round is a tournament round, pull its TM link so the card
+  // can show the tournament name + round number.
+  const tmRegistrationId = active?.tmRegistrationId ?? null;
+  const { data: tmLink } = useQuery({
+    queryKey: ['tm', 'link', userId, tmRegistrationId],
+    enabled: !!userId && !!tmRegistrationId,
+    queryFn: () => tmLinksRepo.getByRegistration(userId!, tmRegistrationId!)
+  });
 
   // Tombstones the active round: deletes the row in Supabase (schema cascade
   // drops round_holes + shots) and clears the local store so the resume card
@@ -86,13 +102,36 @@ export function RoundHomePage() {
               <DeleteOutlineRoundedIcon fontSize="small" />
             </IconButton>
             <CardContent sx={{ pr: 5 }}>
-              <Typography
-                variant="caption"
-                color="primary"
-                sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
-              >
-                Active Round
-              </Typography>
+              <Stack direction="row" alignItems="center" spacing={1}>
+                <Typography
+                  variant="caption"
+                  color="primary"
+                  sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+                >
+                  Active Round
+                </Typography>
+                {active.tmRegistrationId && (
+                  <Chip
+                    size="small"
+                    color="warning"
+                    icon={<EmojiEventsRoundedIcon sx={{ fontSize: 14 }} />}
+                    label="Tournament"
+                    sx={{ height: 20, '.MuiChip-label': { px: 0.75, fontSize: '0.7rem' } }}
+                  />
+                )}
+              </Stack>
+              {active.tmRegistrationId && (tmLink?.tournament_name || active.tmRoundNumber != null) && (
+                <Typography
+                  variant="body2"
+                  color="warning.main"
+                  sx={{ fontWeight: 600, mt: 0.25 }}
+                  noWrap
+                >
+                  {tmLink?.tournament_name ?? 'Tournament'}
+                  {active.tmRoundNumber != null ? ` · Round ${active.tmRoundNumber}` : ''}
+                  {tmLink?.division_name ? ` · ${tmLink.division_name}` : ''}
+                </Typography>
+              )}
               <Typography variant="h5" sx={{ mt: 0.5 }}>
                 {active.courseName}
               </Typography>

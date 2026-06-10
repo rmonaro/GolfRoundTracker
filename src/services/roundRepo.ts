@@ -57,6 +57,54 @@ export const roundRepo = {
     return data ?? null;
   },
 
+  /**
+   * Find the best in-progress (not completed) round to RESUME for a TM
+   * tournament registration + round number. When more than one exists (e.g. an
+   * empty duplicate was created by an earlier version, or a re-entry raced),
+   * pick the one with the MOST recorded shots so a player's real progress is
+   * never shadowed by an empty round. Ties break to the earliest start.
+   */
+  async findBestTournamentRound(
+    userId: string,
+    tmRegistrationId: string,
+    tmRoundNumber: number
+  ): Promise<Round | null> {
+    const { data: rounds, error } = await supabase
+      .from('rounds')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('tm_registration_id', tmRegistrationId)
+      .eq('tm_round_number', tmRoundNumber)
+      .is('completed_at', null)
+      .order('started_at', { ascending: true });
+    if (error) throw toAppError(error, 'Could not look up tournament round');
+    if (!rounds || rounds.length === 0) return null;
+    if (rounds.length === 1) return rounds[0];
+
+    // Tally shots per candidate round in one query, then pick the richest.
+    const ids = rounds.map((r) => r.id);
+    const { data: shots } = await supabase
+      .from('shots')
+      .select('round_id')
+      .in('round_id', ids);
+    const counts = new Map<string, number>();
+    for (const s of shots ?? []) {
+      counts.set(s.round_id, (counts.get(s.round_id) ?? 0) + 1);
+    }
+    // rounds is ascending by started_at, so the first max encountered is the
+    // earliest — the natural tie-breaker.
+    let best = rounds[0];
+    let bestCount = counts.get(best.id) ?? 0;
+    for (const r of rounds) {
+      const c = counts.get(r.id) ?? 0;
+      if (c > bestCount) {
+        best = r;
+        bestCount = c;
+      }
+    }
+    return best;
+  },
+
   async listHoles(roundId: string): Promise<RoundHole[]> {
     const { data, error } = await supabase
       .from('round_holes')
