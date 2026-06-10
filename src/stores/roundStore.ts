@@ -86,6 +86,14 @@ export interface ActiveRound {
   startedAt: string;
   currentHoleIndex: number;
   holes: LocalHole[];
+  /**
+   * TournamentManagement (TM) linkage — present only when this round was started
+   * from "My Tournaments". Drives the live score/shot push to TM. The round's
+   * own id (`roundId`) is what we send to TM as `round_tracking_round_id`.
+   */
+  tmRegistrationId?: string | null;
+  tmRoundNumber?: number | null;
+  tmTournamentSlug?: string | null;
 }
 
 interface RoundState {
@@ -280,7 +288,10 @@ export const useRoundStore = create<RoundState>()(
             totalYardage: null,
             startedAt: round.started_at,
             currentHoleIndex: 0,
-            holes: localHoles
+            holes: localHoles,
+            tmRegistrationId: round.tm_registration_id ?? null,
+            tmRoundNumber: round.tm_round_number ?? null,
+            tmTournamentSlug: round.tm_tournament_slug ?? null
           }
         });
       }

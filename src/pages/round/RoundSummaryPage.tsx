@@ -42,6 +42,7 @@ import { calculateDifferential, isAbsurdDifferential } from '@/utils/handicap';
 import { roundRepo } from '@/services/roundRepo';
 import { useRoundStore } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
+import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAuthStore } from '@/stores/authStore';
 import { toAppError } from '@/services/errors';
 import { pct, scoreVsPar, durationLabel, fullName } from '@/utils/format';
@@ -1482,6 +1483,26 @@ function HoleMapDialog({
     [orderedShots, optimisticPositions]
   );
 
+  // Per-dot info-box labels (# / club / distance), aligned 1:1 with
+  // shotEndPoints (built from the same orderedShots list).
+  const shotLabels = useMemo(
+    () =>
+      orderedShots.map((s) => {
+        const club = s.club_id ? bag.find((c) => c.clubId === s.club_id) ?? null : null;
+        const clubName = club
+          ? abbreviateClubName(club.customName?.trim() || club.name, club.category)
+          : null;
+        const distance =
+          s.distance == null
+            ? null
+            : s.distance_unit === 'feet'
+              ? `${Math.round(s.distance)}ft`
+              : `${Math.round(s.distance)}y`;
+        return { club: clubName, distance };
+      }),
+    [orderedShots, bag]
+  );
+
   // Drag-end handler. Looks up the shot by index, recomputes the
   // GPS-calculated distance (haversine from start to the new end), and
   // patches the row in Supabase. Round-detail query invalidates so
@@ -1652,6 +1673,7 @@ function HoleMapDialog({
             holeNumber={holeNumber}
             par={hole?.par ?? null}
             shotEndPoints={shotEndPoints}
+            shotLabels={shotLabels}
             bagClubs={bag}
             // Read-only view by default; opt into drag with the Edit
             // toggle above. hideAim keeps the aim handle / yardage

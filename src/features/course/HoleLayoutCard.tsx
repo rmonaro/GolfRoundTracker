@@ -37,6 +37,8 @@ interface HoleLayoutCardProps {
   landingPoint?: [number, number] | null;
   /** Recorded-shot end positions. See HoleLayoutProps.shotEndPoints. */
   shotEndPoints?: Array<[number, number]>;
+  /** Per-shot label data (# / club / distance), aligned with shotEndPoints. */
+  shotLabels?: Array<{ club: string | null; distance: string | null }>;
   /** Suppress aim handle / line while a landing-point pin is active. */
   hideAim?: boolean;
   /** Render the aim handle as a compact dot instead of the crosshair. */
@@ -78,6 +80,7 @@ export function HoleLayoutCard({
   onShotLanded,
   landingPoint = null,
   shotEndPoints = [],
+  shotLabels = [],
   hideAim = false,
   useTargetDot = false,
   pinOverride = null,
@@ -122,6 +125,7 @@ export function HoleLayoutCard({
             onShotLanded={onShotLanded}
             landingPoint={landingPoint}
             shotEndPoints={shotEndPoints}
+            shotLabels={shotLabels}
             hideAim={hideAim}
             useTargetDot={useTargetDot}
             pinOverride={pinOverride}

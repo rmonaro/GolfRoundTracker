@@ -86,6 +86,15 @@ interface HoleLayoutProps {
    */
   shotEndPoints?: Array<[number, number]>;
   /**
+   * Per-shot label data, aligned by index with `shotEndPoints`. Each entry
+   * renders a segmented info box to the left of its numbered dot:
+   *   [ shot # | club | distance ]
+   * `club` / `distance` segments are omitted when null; `distance` is a
+   * preformatted string (e.g. "158y", "18ft"). Optional — when absent the dots
+   * render bare (just the number).
+   */
+  shotLabels?: Array<{ club: string | null; distance: string | null }>;
+  /**
    * Suppress the aim UI (handle, line, distance label) WITHOUT falling back
    * to the walkback markers. Used while the player has a pending landing
    * point on screen — they're reviewing the tap, not planning a new aim,
@@ -718,6 +727,7 @@ export function HoleLayout({
   onShotLanded,
   landingPoint = null,
   shotEndPoints = [],
+  shotLabels = [],
   hideAim = false,
   useTargetDot = false,
   pinOverride = null,
@@ -781,6 +791,10 @@ export function HoleLayout({
   // effect so the recap animation can hide them all, then reveal each in turn
   // as the growing line reaches it.
   const shotDotElsRef = useRef<HTMLDivElement[]>([]);
+  // DOM handles for the segmented info boxes (# / club / yards) that sit to the
+  // left of each dot — captured alongside the dots so the recap can hide them
+  // and fade each one in (after a beat) as its dot is revealed.
+  const shotBoxElsRef = useRef<(HTMLDivElement | null)[]>([]);
   // Ordered recap path `[tee, ...shotEndPoints, pin]` in [lng, lat]. Rebuilt
   // whenever the map effect re-runs so a replay always reflects current shots.
   const recapPathRef = useRef<Array<[number, number]>>([]);
@@ -1589,6 +1603,24 @@ export function HoleLayout({
     // once (whether dots should be draggable is decided per-marker).
     const moveCb = onShotEndPointMovedRef.current;
     const shotDots: HTMLDivElement[] = [];
+    const shotBoxes: (HTMLDivElement | null)[] = [];
+
+    // Build one segment of the info box: a padded cell with its own bg + text
+    // color. e.g. makeSeg('7I', '#2e7d32', '#ffffff').
+    const makeSeg = (text: string, bg: string, color: string): HTMLDivElement => {
+      const seg = document.createElement('div');
+      seg.textContent = text;
+      Object.assign(seg.style, {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '3px 6px',
+        background: bg,
+        color
+      } as Partial<CSSStyleDeclaration>);
+      return seg;
+    };
+
     for (let i = 0; i < shotEndPoints.length; i++) {
       const pt = shotEndPoints[i];
       // Mapbox drives the marker ROOT's `transform` (a translate that pins it
@@ -1623,8 +1655,65 @@ export function HoleLayout({
         transform: 'scale(1)',
         opacity: '1'
       } as Partial<CSSStyleDeclaration>);
-      inner.textContent = String(i + 1);
+      // The shot number now lives in the info box, so the dot stays a bare
+      // disk when a box is rendered. Fall back to numbering the dot itself when
+      // a consumer didn't supply label data for this shot.
+      if (!shotLabels[i]) inner.textContent = String(i + 1);
       dot.appendChild(inner);
+
+      // Segmented info box to the LEFT of the dot: [ # | club | yards ].
+      // Only built when the consumer passes per-shot label data for this index.
+      const label = shotLabels[i];
+      let boxInner: HTMLDivElement | null = null;
+      if (label) {
+        // Wrapper owns the static vertical-centering transform (never animated);
+        // the inner pill owns the recap reveal (opacity + slide), so the two
+        // transforms don't fight.
+        const boxWrap = document.createElement('div');
+        Object.assign(boxWrap.style, {
+          position: 'absolute',
+          // Sit the box fully to the RIGHT of the dot: left edge at the dot's
+          // right edge (left:100%) plus a 6px gap. Robust to the disk's exact
+          // rendered size (border included). Wrapper owns vertical centering.
+          left: '100%',
+          marginLeft: '6px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          pointerEvents: 'none'
+        } as Partial<CSSStyleDeclaration>);
+
+        boxInner = document.createElement('div');
+        Object.assign(boxInner.style, {
+          display: 'flex',
+          alignItems: 'stretch',
+          borderRadius: '5px',
+          overflow: 'hidden',
+          border: '1.5px solid #ffffff',
+          boxShadow: '0 2px 5px rgba(0,0,0,0.55)',
+          font: '800 11px system-ui, sans-serif',
+          lineHeight: '1',
+          whiteSpace: 'nowrap',
+          // Reveal emanates from the dot (left edge) outward to the right.
+          transformOrigin: 'left center',
+          transition: 'opacity 260ms ease, transform 260ms ease',
+          opacity: '1',
+          transform: 'translateX(0) scale(1)'
+        } as Partial<CSSStyleDeclaration>);
+
+        // # — white bg, black text.
+        boxInner.appendChild(makeSeg(String(i + 1), '#ffffff', '#0b1410'));
+        // Club — green bg, white text.
+        if (label.club) boxInner.appendChild(makeSeg(label.club, '#2e7d32', '#ffffff'));
+        // Distance (yards) — #FB7B34 bg, black text.
+        if (label.distance) {
+          boxInner.appendChild(makeSeg(label.distance, '#FB7B34', '#0b1410'));
+        }
+
+        boxWrap.appendChild(boxInner);
+        dot.appendChild(boxWrap);
+      }
+      shotBoxes.push(boxInner);
+
       const marker = new mapboxgl.Marker({
         element: dot,
         anchor: 'center',
@@ -1648,6 +1737,7 @@ export function HoleLayout({
     // and finishes at the flag. `centerlineCoords` is oriented tee→green, so
     // [0] is the tee end; `effectivePin` is the authoritative flag position.
     shotDotElsRef.current = shotDots;
+    shotBoxElsRef.current = shotBoxes;
     if (shotEndPoints.length > 0) {
       const path: Array<[number, number]> = [centerlineCoords[0], ...shotEndPoints];
       // Append the pin as the final vertex unless the last shot already
@@ -1728,6 +1818,7 @@ export function HoleLayout({
     puttingMode,
     bagClubs,
     shotEndPoints,
+    shotLabels,
     hideAim,
     useTargetDot,
     pinOverride,
@@ -1785,6 +1876,7 @@ export function HoleLayout({
     if (!map) return;
     const path = recapPathRef.current;
     const dots = shotDotElsRef.current;
+    const boxes = shotBoxElsRef.current;
     if (path.length < 2) return;
 
     const SEGMENT_MS = 520; // grow time per leg
@@ -1828,55 +1920,97 @@ export function HoleLayout({
       });
     }
 
-    // Dot index d sits at path vertex d+1 (path[0] is the tee).
+    // Pop a shot's numbered dot into view.
     const showDot = (d: number) => {
       const el = dots[d];
       if (!el) return;
       el.style.opacity = '1';
       el.style.transform = 'scale(1)';
     };
+    // Fade a shot's info box in, emanating from the dot (transform-origin is the
+    // box's left edge = the dot side). Called at the start of that shot's pause.
+    const revealBox = (d: number) => {
+      const box = boxes[d];
+      if (!box) return;
+      box.style.opacity = '1';
+      box.style.transform = 'translateX(0) scale(1)';
+    };
 
-    // Start state: nothing drawn, every dot hidden (fades back in as the line
-    // arrives). The CSS transition on each dot animates the pop.
+    // Start state: nothing drawn, every dot + box hidden. The CSS transitions
+    // animate each pop / fade. Boxes start nudged toward the dot so they slide
+    // outward as they appear.
     dots.forEach((el) => {
       el.style.opacity = '0';
       el.style.transform = 'scale(0.4)';
     });
+    boxes.forEach((box) => {
+      if (!box) return;
+      box.style.opacity = '0';
+      box.style.transform = 'translateX(-10px) scale(0.85)';
+    });
     setLine([path[0], path[0]]);
 
+    // The replay is a grow → pause state machine: the line grows one leg, then
+    // PAUSES on the shot it just reached while that shot's box fades in, then
+    // grows the next leg. Path vertex d+1 corresponds to dot index d (path[0] is
+    // the tee); a trailing pin vertex (when the last shot wasn't holed) has no
+    // dot, so it grows without a pause.
+    const PAUSE_MS = 1000; // hold on each shot while its box fades in
     const segments = path.length - 1;
-    let startTs: number | null = null;
+    let segIdx = 0;
+    let phase: 'grow' | 'pause' = 'grow';
+    let phaseStart: number | null = null;
 
     const frame = (ts: number) => {
       if (!mapRef.current) return; // map torn down mid-recap
-      if (startTs == null) startTs = ts;
-      const elapsed = ts - startTs;
-      const segFloat = elapsed / SEGMENT_MS;
-      const segIdx = Math.floor(segFloat);
+      if (phaseStart == null) phaseStart = ts;
+      const elapsed = ts - phaseStart;
 
-      if (segIdx >= segments) {
-        // Done — draw the full path and reveal every dot.
-        setLine(path);
-        for (let d = 0; d < dots.length; d++) showDot(d);
-        recapRafRef.current = null;
+      if (phase === 'grow') {
+        const t = easeInOut(Math.min(1, elapsed / SEGMENT_MS));
+        const a = path[segIdx];
+        const b = path[segIdx + 1];
+        const cur: [number, number] = [
+          a[0] + (b[0] - a[0]) * t,
+          a[1] + (b[1] - a[1]) * t
+        ];
+        setLine([...path.slice(0, segIdx + 1), cur]);
+
+        if (elapsed >= SEGMENT_MS) {
+          // Leg complete — snap the line to the vertex.
+          setLine(path.slice(0, segIdx + 2));
+          const dotIdx = segIdx; // vertex segIdx+1 → dot index segIdx
+          if (dotIdx < dots.length) {
+            // Reached a shot: pop the dot, then PAUSE while its box fades in.
+            showDot(dotIdx);
+            revealBox(dotIdx);
+            phase = 'pause';
+            phaseStart = ts;
+          } else {
+            // Trailing pin vertex — no dot, no pause.
+            segIdx += 1;
+            phaseStart = ts;
+            if (segIdx >= segments) {
+              recapRafRef.current = null;
+              return;
+            }
+          }
+        }
+        recapRafRef.current = requestAnimationFrame(frame);
         return;
       }
 
-      const t = easeInOut(Math.min(1, segFloat - segIdx));
-      const a = path[segIdx];
-      const b = path[segIdx + 1];
-      const cur: [number, number] = [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t
-      ];
-      setLine([...path.slice(0, segIdx + 1), cur]);
-
-      // Vertices the line has fully passed are visible; the dot at the end of
-      // the current leg pops in as the line arrives (t > 0.82).
-      let visible = segIdx; // vertices 1..segIdx reached → dots 0..segIdx-1
-      if (segFloat - segIdx > 0.82) visible = segIdx + 1;
-      for (let d = 0; d < Math.min(visible, dots.length); d++) showDot(d);
-
+      // phase === 'pause' — hold on the current shot, then advance.
+      if (elapsed >= PAUSE_MS) {
+        segIdx += 1;
+        if (segIdx >= segments) {
+          setLine(path);
+          recapRafRef.current = null;
+          return;
+        }
+        phase = 'grow';
+        phaseStart = ts;
+      }
       recapRafRef.current = requestAnimationFrame(frame);
     };
 

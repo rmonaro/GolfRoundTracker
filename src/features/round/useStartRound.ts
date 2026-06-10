@@ -4,6 +4,7 @@ import { roundRepo } from '@/services/roundRepo';
 import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/authStore';
 import { emptyHoles, useRoundStore } from '@/stores/roundStore';
+import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
 import type { Course } from '@/models';
 
 export function useCourses() {
@@ -37,6 +38,17 @@ interface StartRoundInput {
    * holes / shots through the normal flow afterward.
    */
   playedAt?: string | null;
+  /**
+   * TournamentManagement linkage. Present only when the round is launched from
+   * "My Tournaments". Stamps the TM registration + round number on the round and
+   * establishes the scorecard link early via a first /scores call.
+   */
+  tm?: {
+    registrationId: string;
+    roundNumber: number;
+    tournamentSlug?: string | null;
+    startingHole?: number | null;
+  };
 }
 
 export function useStartRound() {
@@ -45,7 +57,7 @@ export function useStartRound() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: async ({ course, holesPlayed, playedAt }: StartRoundInput) => {
+    mutationFn: async ({ course, holesPlayed, playedAt, tm }: StartRoundInput) => {
       if (!userId) throw new Error('Not authenticated');
 
       let courseId = course.id ?? null;
@@ -80,7 +92,10 @@ export function useStartRound() {
         course_rating: course.courseRating,
         slope_rating: course.slopeRating,
         estimated_handicap: null,
-        handicap_differential: null
+        handicap_differential: null,
+        tm_registration_id: tm?.registrationId ?? null,
+        tm_round_number: tm?.roundNumber ?? null,
+        tm_tournament_slug: tm?.tournamentSlug ?? null
       });
 
       // Per-hole par. Prefer the OSM-sourced public.holes.par (authoritative
@@ -117,7 +132,10 @@ export function useStartRound() {
         totalYardage: course.totalYardage,
         startedAt: round.started_at,
         currentHoleIndex: 0,
-        holes
+        holes,
+        tmRegistrationId: tm?.registrationId ?? null,
+        tmRoundNumber: tm?.roundNumber ?? null,
+        tmTournamentSlug: tm?.tournamentSlug ?? null
       });
 
       // Persist initial blank holes so RLS-bound queries can resolve hole ids.
@@ -136,6 +154,27 @@ export function useStartRound() {
       }));
       const persisted = await roundRepo.upsertHoles(initialHoles);
       useRoundStore.getState().applyHoleIds(persisted);
+
+      // Tournament round: establish the TM scorecard link early. We send the
+      // starting hole with a null score — enough for TM to create/resolve the
+      // scorecard and persist round_tracking_round_id (= our round id) before any
+      // real strokes are pushed. Best-effort: a failure here doesn't block play;
+      // the first live score push re-establishes the link (resolution falls back
+      // to registration_id + round_number).
+      if (tm) {
+        try {
+          await tmIntegrationRepo.pushScores({
+            round_tracking_round_id: round.id,
+            registration_id: tm.registrationId,
+            tournament_slug: tm.tournamentSlug ?? undefined,
+            round_number: tm.roundNumber,
+            status: 'IN_PROGRESS',
+            holes: [{ hole_number: tm.startingHole ?? 1, strokes: null }]
+          });
+        } catch (err) {
+          console.error('[tm] early scorecard link failed', err);
+        }
+      }
 
       return round;
     },

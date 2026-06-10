@@ -48,6 +48,7 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
+import { useTmRoundSync } from '@/features/tournaments/useTmRoundSync';
 import {
   AddShotSheet,
   ClubPicker,
@@ -88,6 +89,9 @@ export function HoleTrackingPage() {
   const setBagClubs = useBagStore((s) => s.setClubs);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // Tournament rounds push live scores + shots to TM as the round is played.
+  // No-op for normal rounds (the hook checks the active round's TM linkage).
+  const { syncHole, finalizeRound } = useTmRoundSync();
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -324,6 +328,29 @@ export function HoleTrackingPage() {
         .filter((s) => s.endLat != null && s.endLng != null)
         .map((s) => [s.endLng as number, s.endLat as number] as [number, number]),
     [hole.shots]
+  );
+
+  // Per-dot info-box labels (# / club / distance), aligned 1:1 with
+  // shotEndPoints (same filter + order). Club is abbreviated; distance is
+  // preformatted — yards for full shots, feet for putts.
+  const shotLabels = useMemo(
+    () =>
+      hole.shots
+        .filter((s) => s.endLat != null && s.endLng != null)
+        .map((s) => {
+          const club = s.clubId ? bagClubs.find((c) => c.clubId === s.clubId) ?? null : null;
+          const clubName = club
+            ? abbreviateClubName(club.customName?.trim() || club.name, club.category)
+            : null;
+          const distance =
+            s.distance == null
+              ? null
+              : s.distanceUnit === 'feet'
+                ? `${Math.round(s.distance)}ft`
+                : `${Math.round(s.distance)}y`;
+          return { club: clubName, distance };
+        }),
+    [hole.shots, bagClubs]
   );
 
   // Smart aim-handle hint: on 3rd+ shots, when the ball isn't on the green,
@@ -832,6 +859,7 @@ export function HoleTrackingPage() {
       });
       setShotSheet(false);
       setEditingShot(null);
+      syncHole(hole.holeNumber);
 
       if (editingShot.remoteId) {
         try {
@@ -900,6 +928,8 @@ export function HoleTrackingPage() {
       calculatedDistance
     });
     setShotSheet(false);
+    // Live-push this hole to TM (tournament rounds only; debounced + no-op otherwise).
+    syncHole(hole.holeNumber);
 
     try {
       // Ensure the hole row exists so we have a holeId to point the shot at.
@@ -1041,6 +1071,7 @@ export function HoleTrackingPage() {
 
   const onDeleteShot = async (shot: LocalShot) => {
     removeShotLocal(hole.holeNumber, shot.tempId);
+    syncHole(hole.holeNumber);
     if (shot.remoteId) {
       try {
         await roundRepo.deleteShot(shot.remoteId);
@@ -1261,6 +1292,13 @@ export function HoleTrackingPage() {
     } catch (err) {
       console.error('[round] finish failed', err);
     }
+    // Tournament rounds: final push of every played hole with SUBMITTED so TM
+    // locks the scorecard. Best-effort; never blocks navigation to the summary.
+    try {
+      await finalizeRound();
+    } catch (err) {
+      console.error('[round] TM finalize failed', err);
+    }
     navigate(`/round/summary/${active.roundId}`, { replace: true });
   };
 
@@ -1452,6 +1490,7 @@ export function HoleTrackingPage() {
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
           shotEndPoints={shotEndPoints}
+          shotLabels={shotLabels}
           // Shot replay — bumped by the post-hole Recap button below.
           recapToken={recapToken}
           // Hide the aim UI while reviewing a tap (pendingGps), after the

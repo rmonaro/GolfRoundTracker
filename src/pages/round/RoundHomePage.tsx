@@ -18,6 +18,7 @@ import {
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
+import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import { useNavigate } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
@@ -201,6 +202,17 @@ export function RoundHomePage() {
             </CardActionArea>
           </Card>
         )}
+
+        <Button
+          variant="outlined"
+          size="large"
+          fullWidth
+          startIcon={<EmojiEventsRoundedIcon />}
+          onClick={() => navigate('/tournaments')}
+          sx={{ minHeight: 56, borderRadius: '5px' }}
+        >
+          My Tournaments
+        </Button>
 
         <Button
           variant="outlined"

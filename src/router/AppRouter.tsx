@@ -12,6 +12,7 @@ import { StartRoundPage } from '@/pages/round/StartRoundPage';
 import { HoleTrackingPage } from '@/pages/round/HoleTrackingPage';
 import { RoundSummaryPage } from '@/pages/round/RoundSummaryPage';
 import { PastRoundsPage } from '@/pages/round/PastRoundsPage';
+import { MyTournamentsPage } from '@/pages/tournaments/MyTournamentsPage';
 import { StatsPage } from '@/pages/stats/StatsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
@@ -76,6 +77,14 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <PastRoundsPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/tournaments"
+        element={
+          <AuthGuard>
+            <MyTournamentsPage />
           </AuthGuard>
         }
       />
