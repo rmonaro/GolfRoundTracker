@@ -99,22 +99,41 @@ export function useTmRoundSync() {
    * so the caller can sequence it before navigating away.
    */
   const finalizeRound = useCallback(async () => {
+    const base = baseRef();
+    if (!base) return;
     const active = useRoundStore.getState().active;
-    if (!active?.tmRegistrationId) return;
+    if (!active) return;
     // Cancel in-flight debounces — we're about to push everything explicitly.
     for (const t of timers.current.values()) clearTimeout(t);
     timers.current.clear();
 
     const played = active.holes.filter(holeWasPlayed);
     if (!played.length) return;
-    // All but the last played hole: IN_PROGRESS; final hole carries SUBMITTED to
-    // lock the round on TM's side.
-    for (let i = 0; i < played.length; i++) {
-      const status = i === played.length - 1 ? 'SUBMITTED' : 'IN_PROGRESS';
+
+    // Pass 1 — push every played hole's scores + shots as IN_PROGRESS. The final
+    // hole's last-shot live push was just cancelled above, so this is the only
+    // chance to deliver it. We deliberately do NOT submit yet: TM locks the
+    // scorecard on SUBMITTED and rejects later writes, so submitting before the
+    // last hole's shots land silently drops the last shot.
+    for (const hole of played) {
       // eslint-disable-next-line no-await-in-loop
-      await pushHole(played[i], status);
+      await pushHole(hole, 'IN_PROGRESS');
     }
-  }, [pushHole]);
+
+    // Pass 2 — all shots are stored, so lock the round with a single scores-only
+    // SUBMITTED push covering every played hole. Scores are idempotent per hole,
+    // so re-sending them here is safe.
+    const submitPayload: TmScorePush = {
+      ...base,
+      status: 'SUBMITTED',
+      holes: played.map(toScoreHole)
+    };
+    try {
+      await tmIntegrationRepo.pushScores(submitPayload);
+    } catch (err) {
+      console.error('[tm-sync] final submit failed', err);
+    }
+  }, [pushHole, baseRef]);
 
   return { isTournamentRound, syncHole, finalizeRound };
 }

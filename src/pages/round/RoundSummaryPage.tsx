@@ -90,6 +90,7 @@ export function RoundSummaryPage() {
   const reset = useRoundStore((s) => s.reset);
   const bag = useBagStore((s) => s.clubs);
   const profile = useAuthStore((s) => s.profile);
+  const userId = useAuthStore((s) => s.session?.user.id);
   const pageQueryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
   const [verifyingAll, setVerifyingAll] = useState(false);
@@ -99,24 +100,50 @@ export function RoundSummaryPage() {
     if (!detail.data?.round) return;
     const { round, holes, shots } = detail.data;
     if (round.completed_at) {
-      // Compute differential from the shots list (source of truth)
-      // per hole, NOT the cached round_holes.strokes column — that
-      // column can lag by a shot or two if the autosave debounce
-      // was clipped at round-finalize.
-      const score = holes.reduce((s, h) => {
-        const liveStrokes = shots.filter((sh) => sh.hole_id === h.id).length;
-        return s + liveStrokes + h.penalty_strokes;
-      }, 0);
-      const computed = calculateDifferential(score, round.course_rating, round.slope_rating);
+      // Recompute score + par from the shots list (source of truth) — the same
+      // basis the summary headline shows. Strokes = shot count + stroke
+      // penalties; par is summed over PLAYED holes only. The cached
+      // round_holes.strokes column and rounds.score/par can both lag (a shot
+      // landing near finalize, or a course total_par that differs from the sum
+      // of per-hole pars), so we treat the shots as authoritative.
+      let totalScore = 0;
+      let totalPar = 0;
+      for (const h of holes) {
+        const holeShots = shots.filter((sh) => sh.hole_id === h.id);
+        const livePenalty = holeShots.filter(
+          (sh) =>
+            sh.penalty_type != null &&
+            (STROKE_PENALTY_TYPES as readonly string[]).includes(sh.penalty_type)
+        ).length;
+        const holeScore = holeShots.length + livePenalty;
+        totalScore += holeScore;
+        if (holeScore > 0) totalPar += h.par;
+      }
+      const scoreVsPar = totalScore - totalPar;
+
+      // Self-heal the denormalized score columns so every read site (tournament
+      // card, Home/last-round, past rounds) matches what the summary displays.
+      if (
+        round.score !== totalScore ||
+        round.par !== totalPar ||
+        round.score_vs_par !== scoreVsPar
+      ) {
+        roundRepo
+          .update(round.id, { score: totalScore, par: totalPar, score_vs_par: scoreVsPar })
+          .then(() =>
+            pageQueryClient.invalidateQueries({ queryKey: ['rounds', userId] })
+          )
+          .catch((err) => console.error('[summary] could not persist round score', err));
+      }
+
+      // Self-heal the handicap differential off the same authoritative score:
+      //   1) Nothing stored → persist a fresh computed value.
+      //   2) Stored value is out of the USGA-reasonable range (e.g. -226 from an
+      //      earlier bug) → overwrite, or clear to null when even the fresh
+      //      compute can't produce a sane number.
+      const computed = calculateDifferential(totalScore, round.course_rating, round.slope_rating);
       const stored = round.handicap_differential;
       const storedIsAbsurd = isAbsurdDifferential(stored);
-
-      // Self-heal cases:
-      //   1) Nothing stored → persist a fresh computed value.
-      //   2) Stored value is out of the USGA-reasonable range (e.g.
-      //      -226 from an earlier bug) → overwrite with the fresh
-      //      computed value, or clear to null when even the fresh
-      //      compute can't produce a sane number.
       if (computed != null && (stored == null || storedIsAbsurd)) {
         roundRepo
           .update(round.id, { handicap_differential: computed })
@@ -132,7 +159,7 @@ export function RoundSummaryPage() {
       }
       reset();
     }
-  }, [detail.data, reset]);
+  }, [detail.data, reset, pageQueryClient, userId]);
 
   if (!roundId) return <Navigate to="/round" replace />;
 
