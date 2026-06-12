@@ -134,10 +134,7 @@ struct HoleHomeView: View {
         // Same optimistic-local-override resolution as the home pill —
         // the recording card's title should reflect any just-picked
         // club without waiting for the phone snapshot.
-        let effectiveClubId = session.localSelectedClubId
-            ?? s.selectedClubId
-            ?? s.suggestedClubId
-        let club = s.bag.first(where: { $0.id == effectiveClubId })
+        let club = s.bag.first(where: { $0.id == effectiveClubId(s) })
 
         VStack(spacing: 8) {
             Text("Recording shot")
@@ -199,6 +196,14 @@ struct HoleHomeView: View {
 
     // MARK: - Pieces
 
+    /// The club id currently shown to the user. An optimistic local pick (made
+    /// on the watch, not yet confirmed by the phone) wins, then the phone's
+    /// selected club, then the suggested club. The add-shot buttons act on this
+    /// so they always use exactly the club that's displayed.
+    private func effectiveClubId(_ s: WatchRoundState) -> String? {
+        session.localSelectedClubId ?? s.selectedClubId ?? s.suggestedClubId
+    }
+
     /// Bottom controls row. Two modes:
     ///   • Idle      — prev / Track / Record (+) / next
     ///   • Tracking  — "Walking…" indicator + End Shot button
@@ -223,7 +228,12 @@ struct HoleHomeView: View {
                 }
                 Spacer()
                 Button {
-                    shotFlowStartingClubId = s.selectedClubId ?? s.suggestedClubId
+                    // Use the SAME club that's displayed (local override wins,
+                    // then the phone's selected, then suggested). Passing a
+                    // non-nil club id makes ShotRecordFlow open straight on the
+                    // result picker — so if the user is happy with the shown
+                    // club, adding a shot skips club selection entirely.
+                    shotFlowStartingClubId = effectiveClubId(s)
                     showingShotFlow = true
                 } label: {
                     Text("End Shot")
@@ -269,7 +279,12 @@ struct HoleHomeView: View {
                 .tint(.yellow)
 
                 Button {
-                    shotFlowStartingClubId = s.selectedClubId ?? s.suggestedClubId
+                    // Use the SAME club that's displayed (local override wins,
+                    // then the phone's selected, then suggested). Passing a
+                    // non-nil club id makes ShotRecordFlow open straight on the
+                    // result picker — so if the user is happy with the shown
+                    // club, adding a shot skips club selection entirely.
+                    shotFlowStartingClubId = effectiveClubId(s)
                     showingShotFlow = true
                 } label: {
                     Image(systemName: "plus")
@@ -338,10 +353,7 @@ struct HoleHomeView: View {
         // so a freshly-picked club on the watch shows up immediately —
         // before the phone roundtrip has finished. Falls back to the
         // snapshot when no override is set.
-        let effectiveClubId = session.localSelectedClubId
-            ?? s.selectedClubId
-            ?? s.suggestedClubId
-        let club = s.bag.first(where: { $0.id == effectiveClubId })
+        let club = s.bag.first(where: { $0.id == effectiveClubId(s) })
         Button {
             // Club-changer mode: open the picker, exit on pick (no
             // shot record, no GPS capture). The new selection rides
