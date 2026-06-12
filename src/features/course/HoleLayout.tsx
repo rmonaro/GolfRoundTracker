@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { Box, Typography } from '@mui/material';
 import type { HoleLayoutData } from '@/services/holesRepo';
 import type { BagClub, CourseHole, HoleFeature, Lie, LngLat, TargetResult, TargetType } from '@/models';
@@ -16,6 +16,20 @@ interface HoleLayoutProps {
   layout: HoleLayoutData;
   compact?: boolean;
   className?: string;
+  /**
+   * Allow the user to pan + pinch-zoom the map (rotation stays locked so the
+   * tee→green orientation is preserved). Mapbox-only. Default false keeps the
+   * legacy locked framing for read-only previews. Pair with `recenterRef` to
+   * drive a "recenter to overview" button from the parent.
+   */
+  interactive?: boolean;
+  /**
+   * When provided, HoleLayout assigns a "recenter on the hole overview"
+   * function to `recenterRef.current` (cleared on unmount). The parent renders
+   * its own button and calls it, so the control can be positioned alongside the
+   * page's other map overlays.
+   */
+  recenterRef?: MutableRefObject<(() => void) | null>;
   /**
    * Aim picker mode. When true, walkback distance-to-pin markers are hidden
    * and replaced with a draggable handle. A straight amber "aim line" runs
@@ -719,6 +733,8 @@ export function HoleLayout({
   layout,
   compact = false,
   className,
+  interactive = false,
+  recenterRef,
   aimMode = false,
   ballDistanceFromTeeM = 0,
   suggestedHandleDistanceM,
@@ -838,17 +854,20 @@ export function HoleLayout({
         zoom: 16.5,
         bearing,
         pitch: 0,
-        // `interactive: true` so map.on('click') fires for tap-to-record. All
-        // individual gestures disabled so the framing stays locked — user
-        // can't accidentally pan/zoom out of the hole view.
+        // `interactive: true` so map.on('click') fires for tap-to-record. When
+        // `interactive` (the prop) is true we additionally enable pan + zoom
+        // gestures so the player can explore the hole; the recenter button
+        // restores the overview framing. Rotation/pitch stay off in both modes
+        // so the tee→green orientation is preserved. Read-only previews keep
+        // every gesture locked (the legacy behavior).
         interactive: true,
-        dragPan: false,
-        scrollZoom: false,
-        boxZoom: false,
+        dragPan: interactive,
+        scrollZoom: interactive,
+        boxZoom: interactive,
         dragRotate: false,
-        keyboard: false,
-        doubleClickZoom: false,
-        touchZoomRotate: false,
+        keyboard: interactive,
+        doubleClickZoom: interactive,
+        touchZoomRotate: interactive,
         touchPitch: false,
         attributionControl: false
       });
@@ -861,6 +880,13 @@ export function HoleLayout({
     // Expose the map to side-effects (landing-point marker, etc.) so they
     // can update overlays without forcing this whole effect to re-fire.
     mapRef.current = map;
+
+    // Two-finger gestures should pinch-zoom only — never rotate the carefully
+    // computed tee→green bearing. (touchZoomRotate is enabled above when
+    // interactive; strip just the rotation half.)
+    if (interactive) {
+      map.touchZoomRotate.disableRotation();
+    }
 
     map.on('error', (e) => {
       console.warn('[mapbox] runtime error', e);
@@ -1416,6 +1442,11 @@ export function HoleLayout({
           didDrag = false;
           handleEl.setPointerCapture(e.pointerId);
           handleEl.style.cursor = 'grabbing';
+          // With pan/zoom enabled (interactive), Mapbox's own drag handler would
+          // otherwise grab this one-finger gesture and pan the map instead of
+          // moving the handle. Suspend map panning for the duration of the drag;
+          // re-enabled on pointer up/cancel below.
+          if (interactive) map.dragPan.disable();
           e.preventDefault();
           e.stopPropagation();
         };
@@ -1455,6 +1486,8 @@ export function HoleLayout({
           pointerStartPx = null;
           didDrag = false;
           handleEl.style.cursor = 'grab';
+          // Restore map panning now that the handle drag is over.
+          if (interactive) map.dragPan.enable();
           try {
             handleEl.releasePointerCapture(e.pointerId);
           } catch {
@@ -1487,6 +1520,13 @@ export function HoleLayout({
         handleEl.addEventListener('pointermove', onPointerMove);
         handleEl.addEventListener('pointerup', onPointerEnd);
         handleEl.addEventListener('pointercancel', onPointerEnd);
+        // Belt-and-suspenders for touch devices: stop touchstart/touchmove from
+        // bubbling to Mapbox's gesture handlers on the canvas container, so the
+        // map never even begins to pan/zoom while the finger is on the handle.
+        // (Pointer events still fire on the handle and drive the actual drag.)
+        const swallowTouch = (e: TouchEvent) => e.stopPropagation();
+        handleEl.addEventListener('touchstart', swallowTouch, { passive: true });
+        handleEl.addEventListener('touchmove', swallowTouch, { passive: true });
         // Belt-and-suspenders: kill the synthetic click that follows a tap so
         // it can't bubble up and trigger Mapbox's `map.on('click')` (which
         // opens the shot sheet). Without this the handle can both move AND
@@ -1550,46 +1590,51 @@ export function HoleLayout({
         }
       }
 
-      // Asymmetric padding anchors the hole near the top of the map:
-      //   • bottom padding pushes the geometry upward (rangefinder framing)
-      //   • right padding clears the floating stats column
-      // Critically: Mapbox `fitBounds` RESETS bearing to the value in options
-      // (defaulting to 0) unless explicitly passed — we re-pass `bearing` so
-      // the tee→green direction stays pointing up after the camera moves.
-      // `maxZoom` allows tight framing on short holes (par 3s).
+      // Frame the hole overview once the canvas is ready (see applyOverview).
+      applyOverview(false);
+    };
+
+    // Frame the hole overview (tee→green + any recorded shots). Extracted so
+    // the recenter button can re-run it after the user pans/zooms away. Uses
+    // cameraForBounds (rather than fitBounds + setZoom) so the ~10% normal-mode
+    // pullback can be folded into a single animated/instant camera move.
+    const applyOverview = (animate: boolean) => {
+      const targetBounds = puttingMode ? puttingBounds : bounds;
+      // Putting mode: small symmetric padding centers the green and lets it
+      // fill the viewport. Normal mode keeps asymmetric padding so the hole
+      // anchors near the top (rangefinder framing) with the stats column clear
+      // on the right.
+      const padding = puttingMode
+        ? { top: 16, bottom: 16, left: 16, right: 16 }
+        : { top: 24, bottom: 70, left: 16, right: 90 };
+      // Putting maxZoom up to 23 (Mapbox cap is 24) so even a small green fills
+      // the screen; normal mode caps at 19.
+      const maxZoom = puttingMode ? 23 : 19;
       try {
-        map.fitBounds(puttingMode ? puttingBounds : bounds, {
-          // Putting mode: small symmetric padding centers the green both
-          // horizontally and vertically and lets it fill the viewport for a
-          // close-up read of the surface. Normal mode keeps asymmetric padding
-          // so the hole anchors near the top (rangefinder framing) with the
-          // stats column clear on the right.
-          padding: puttingMode
-            ? { top: 16, bottom: 16, left: 16, right: 16 }
-            : { top: 24, bottom: 70, left: 16, right: 90 },
-          // Bump putting maxZoom up to 23 (Mapbox cap is 24) so even a small
-          // green still fills the screen — the symmetric padding above gives
-          // fitBounds room to push the zoom higher.
-          maxZoom: puttingMode ? 23 : 19,
-          // Both modes use the tee→green compass bearing so the tee box stays
-          // anchored at the bottom of the screen and the green sits above it
-          // — consistent orientation whether you're standing on the tee or
-          // lining up a putt.
-          bearing,
-          animate: false
-        });
-        // Pull the camera back ~10% in normal mode so the hole sits inside the
-        // viewport with more breathing room. Mapbox zoom is logarithmic (each
-        // level doubles scale) so a 10% scale reduction is log2(1.1) ≈ 0.137
-        // zoom units. Putting mode keeps its tight green-only framing.
-        if (!puttingMode) {
-          map.setZoom(map.getZoom() - Math.log2(1.1));
+        // Both modes use the tee→green bearing so the tee anchors at the bottom
+        // and the green sits above it.
+        const cam = map.cameraForBounds(targetBounds, { padding, maxZoom, bearing });
+        if (!cam) return;
+        // Pull back ~10% in normal mode for breathing room. Mapbox zoom is
+        // logarithmic (each level doubles scale) so a 10% scale reduction is
+        // log2(1.1) ≈ 0.137 zoom units. Putting mode keeps its tight framing.
+        const zoom =
+          (cam.zoom ?? map.getZoom()) - (puttingMode ? 0 : Math.log2(1.1));
+        const camera = { center: cam.center, zoom, bearing };
+        if (animate) {
+          map.easeTo({ ...camera, duration: 500 });
+        } else {
+          map.jumpTo(camera);
         }
       } catch {
         // Degenerate bbox (e.g. all points identical) — ignore; the initial
         // center/zoom is already a sensible view.
       }
     };
+
+    // Publish the recenter action so the parent's button can re-frame the hole
+    // overview (animated) after the user pans/zooms away.
+    if (recenterRef) recenterRef.current = () => applyOverview(true);
 
     map.on('load', onLoad);
 
@@ -1799,6 +1844,7 @@ export function HoleLayout({
       // the map (and its container) is torn down.
       landingMarkerRef.current?.remove();
       landingMarkerRef.current = null;
+      if (recenterRef) recenterRef.current = null;
       mapRef.current = null;
       map.remove();
     };
@@ -1830,7 +1876,9 @@ export function HoleLayout({
     // (callback flips from undefined ↔ defined) so the numbered shot
     // dots get recreated with the correct `draggable` flag. Stable
     // across renders within a mode via the ref above.
-    onShotEndPointMoved != null
+    onShotEndPointMoved != null,
+    interactive,
+    recenterRef
   ]);
 
   // Landing-point marker — add/move/remove imperatively on the live map so a

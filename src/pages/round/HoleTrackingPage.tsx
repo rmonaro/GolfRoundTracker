@@ -29,6 +29,7 @@ import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBullete
 import MyLocationRoundedIcon from '@mui/icons-material/MyLocationRounded';
 import StopCircleRoundedIcon from '@mui/icons-material/StopCircleRounded';
 import StraightenRoundedIcon from '@mui/icons-material/StraightenRounded';
+import CenterFocusStrongRoundedIcon from '@mui/icons-material/CenterFocusStrongRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
@@ -182,6 +183,9 @@ export function HoleTrackingPage() {
   // tap is unambiguous.
   const [pinEditMode, setPinEditMode] = useState(false);
   const [showYardageMarkers, setShowYardageMarkers] = useState(false);
+  // HoleLayout publishes its "recenter on the hole overview" action here so the
+  // floating recenter button (above the yardage toggle) can call it.
+  const recenterMapRef = useRef<(() => void) | null>(null);
   // Bumped by the post-hole "Recap" button to replay the shots as a growing
   // tee → landings → pin line with the numbered dots popping in one by one.
   const [recapToken, setRecapToken] = useState(0);
@@ -1484,6 +1488,8 @@ export function HoleTrackingPage() {
           par={hole.par}
           yardage={displayYards}
           compact
+          interactive
+          recenterRef={recenterMapRef}
           aimMode
           ballDistanceFromTeeM={ballDistanceFromTeeM}
           suggestedHandleDistanceM={suggestedHandleDistanceM}
@@ -2031,6 +2037,32 @@ export function HoleTrackingPage() {
             }}
           >
             <StraightenRoundedIcon fontSize="small" />
+          </Fab>
+        )}
+
+        {/* Recenter map — small FAB stacked directly on top of the yardage
+            toggle. Re-frames the hole overview after the user has panned /
+            pinch-zoomed the map. Sits one slot (68px) above the ruler button. */}
+        {!holeComplete && (
+          <Fab
+            size="small"
+            aria-label="recenter map on hole"
+            onClick={() => recenterMapRef.current?.()}
+            sx={{
+              position: 'absolute',
+              bottom: lastShotOnGreen
+                ? 'calc(220px + env(safe-area-inset-bottom))'
+                : 'calc(152px + env(safe-area-inset-bottom))',
+              right: 16,
+              zIndex: 4,
+              bgcolor: 'rgba(11,20,16,0.85)',
+              color: '#fbbf24',
+              border: '1.5px solid #fbbf24',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+              '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
+            }}
+          >
+            <CenterFocusStrongRoundedIcon fontSize="small" />
           </Fab>
         )}
 

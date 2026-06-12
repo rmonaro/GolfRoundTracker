@@ -1,3 +1,4 @@
+import type { MutableRefObject } from 'react';
 import { Box, Card, CardContent, CircularProgress, Typography } from '@mui/material';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import { useHoleLayout } from './useHoleLayout';
@@ -12,6 +13,10 @@ interface HoleLayoutCardProps {
   yardage?: number | null;
   /** When true: smaller markers, tighter padding, fills width — used inside HoleTracking. */
   compact?: boolean;
+  /** Allow pan + pinch-zoom. See HoleLayout. */
+  interactive?: boolean;
+  /** Receives a "recenter on overview" fn so the parent can drive its own button. */
+  recenterRef?: MutableRefObject<(() => void) | null>;
   /**
    * Tee-shot planning mode — hides the walkback markers and shows a draggable
    * distance-from-tee handle on the centerline. See HoleLayout for details.
@@ -72,6 +77,8 @@ export function HoleLayoutCard({
   courseId,
   holeNumber,
   compact = false,
+  interactive = false,
+  recenterRef,
   aimMode = false,
   ballDistanceFromTeeM = 0,
   suggestedHandleDistanceM,
@@ -117,6 +124,8 @@ export function HoleLayoutCard({
           <HoleLayout
             layout={data}
             compact={compact}
+            interactive={interactive}
+            recenterRef={recenterRef}
             aimMode={aimMode}
             ballDistanceFromTeeM={ballDistanceFromTeeM}
             suggestedHandleDistanceM={suggestedHandleDistanceM}
