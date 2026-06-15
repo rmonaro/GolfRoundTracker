@@ -678,17 +678,25 @@ export function HoleTrackingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoTrackEnabled, autoTrackInitialBallPos?.lat, autoTrackInitialBallPos?.lng]);
 
-  // Always-on live-location watch. Runs while GPS is enabled and auto-track is
-  // OFF (auto-track runs its own watch and feeds the dot directly). This keeps
-  // a persistent "you are here" dot on the map regardless of tracking/marking
-  // state — marking a spot or recording a shot no longer makes the dot vanish.
+  // Always-on live-location watch. Runs whenever GPS is enabled — including
+  // during auto-track — so the "you are here" dot is ALWAYS on the map for the
+  // player to tap and mark a shot. It feeds `liveFix`, the guaranteed fallback
+  // in the currentLocation priority chain below auto-track's own (accurate) fix.
+  //
+  // Accuracy is intentionally NOT filtered here: the default watch drops fixes
+  // worse than 25m, which on a course (tree cover, cold-start lock, valleys)
+  // routinely hid the dot entirely. The dot is just a "tap roughly here" marker
+  // — the player taps to set the precise spot — so a coarse fix is far better
+  // than no dot. Strict accuracy still applies to auto-track's shot DETECTION
+  // watch; this relaxation only affects where the dot is drawn. The generous
+  // 100m cap still rejects clearly-bogus fixes (e.g. web IP geolocation).
   useEffect(() => {
-    if (!gpsEnabled || autoTrackEnabled) {
+    if (!gpsEnabled) {
       return;
     }
-    const stop = watchPosition((fix) => setLiveFix(fix));
+    const stop = watchPosition((fix) => setLiveFix(fix), { maxAccuracyM: 100 });
     return stop;
-  }, [gpsEnabled, autoTrackEnabled]);
+  }, [gpsEnabled]);
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
