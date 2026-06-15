@@ -395,6 +395,10 @@ export function HoleTrackingPage() {
   // green view rather than the wide tee→green framing.
   const greenLat = layoutQuery.data?.hole.green_lat ?? null;
   const greenLng = layoutQuery.data?.hole.green_lng ?? null;
+  // Tee coords — the start anchor for shot 1's GPS auto-measure (the player is
+  // at the tee before the drive, so the drive's start is the tee).
+  const teeLat = layoutQuery.data?.hole.tee_lat ?? null;
+  const teeLng = layoutQuery.data?.hole.tee_lng ?? null;
   const AROUND_GREEN_THRESHOLD_M = 27;
   let lastShotEndDistFromGreenM: number | null = null;
   if (
@@ -2083,7 +2087,40 @@ export function HoleTrackingPage() {
             aria-label="add shot"
             onClick={() => {
               setEditingShot(null);
-              setPendingGps(null);
+              // Auto-measure the shot the player just played. They've hit and
+              // walked up to the ball, so their CURRENT position (liveFix) is
+              // where this shot ended; the start is where the ball was — the
+              // previous shot's landing, or the tee for shot 1. Haversine
+              // between them gives the distance (e.g. a 210-yd drive) which
+              // pre-fills the sheet. This makes the manual "+" flow GPS-aware
+              // without auto-track. Putts are skipped (GPS noise dwarfs a putt)
+              // and we fall back to blank manual entry when GPS, an anchor, or
+              // a live fix is unavailable.
+              const ballStart =
+                autoTrackInitialBallPos ??
+                (teeLat != null && teeLng != null
+                  ? { lat: teeLat, lng: teeLng }
+                  : null);
+              if (
+                gpsEnabled &&
+                upcomingTargetType !== 'putt' &&
+                ballStart &&
+                liveFix
+              ) {
+                const calculatedDistanceM = haversineMeters(
+                  { lat: ballStart.lat, lng: ballStart.lng, accuracyM: 0, timestamp: 0 },
+                  { lat: liveFix.lat, lng: liveFix.lng, accuracyM: 0, timestamp: 0 }
+                );
+                setPendingGps({
+                  startLat: ballStart.lat,
+                  startLng: ballStart.lng,
+                  endLat: liveFix.lat,
+                  endLng: liveFix.lng,
+                  calculatedDistanceM
+                });
+              } else {
+                setPendingGps(null);
+              }
               setShotSheet(true);
             }}
             sx={{
