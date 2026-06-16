@@ -308,7 +308,7 @@ function pointInPolygon(point: [number, number], polygon: [number, number][]): b
 }
 
 /** Compass bearing (degrees CW from north) from tee to green. Null if either is missing. */
-function teeToGreenBearing(hole: CourseHole): number | null {
+export function teeToGreenBearing(hole: CourseHole): number | null {
   if (
     hole.tee_lng == null ||
     hole.tee_lat == null ||
@@ -655,14 +655,19 @@ function pointAlongFromEndProjected(
  *     If the tap is on the green polygon, we treat it as 'hit' regardless of
  *     position — the user can correct it in the shot sheet.
  */
-function classifyTap(
-  tap: [number, number],
-  features: HoleFeature[],
-  bearing: number,
-  green: [number, number],
-  targetType: TargetType
-): { lie: Lie | null; targetResult: TargetResult | null } {
-  // Walk features by priority so the topmost polygon wins.
+/**
+ * Determine the lie at a point by ray-casting it against the mapped course
+ * feature polygons, walking them by priority so the topmost (green > bunker >
+ * hazard > fairway > tee > rough) wins. Returns null when nothing matched so
+ * callers can decide whether to default (taps default to 'rough'; GPS callers
+ * may prefer to leave it unset). Shared by `classifyTap` (map taps) and the
+ * GPS-based shot paths (auto-track, "Record Shot", watch auto-commit) so every
+ * recording route classifies the lie identically from the same geometry.
+ */
+export function classifyLie(
+  point: [number, number],
+  features: HoleFeature[]
+): Lie | null {
   const priority: Array<{ type: string; lie: Lie }> = [
     { type: 'green', lie: 'green' },
     { type: 'bunker', lie: 'bunker' },
@@ -673,25 +678,30 @@ function classifyTap(
     { type: 'rough', lie: 'rough' }
   ];
 
-  let matchedLie: Lie | null = null;
   for (const p of priority) {
     for (const f of features) {
       if (f.feature_type !== p.type || f.is_line) continue;
       // Polygon coords are LngLat[][] (outer ring first). Test outer ring only;
       // donut holes (e.g. a bunker carved into the fairway) are good enough for
-      // a tap classification — exact hazard nesting is rare in OSM data.
+      // a classification — exact hazard nesting is rare in OSM data.
       const rings = f.coords as [number, number][][];
       const outer = Array.isArray(rings[0]) ? rings[0] : null;
       if (!outer) continue;
-      if (pointInPolygon(tap, outer)) {
-        matchedLie = p.lie;
-        break;
-      }
+      if (pointInPolygon(point, outer)) return p.lie;
     }
-    if (matchedLie) break;
   }
+  return null;
+}
+
+export function classifyTap(
+  tap: [number, number],
+  features: HoleFeature[],
+  bearing: number,
+  green: [number, number],
+  targetType: TargetType
+): { lie: Lie | null; targetResult: TargetResult | null } {
   // Default to rough when nothing matched — better than leaving lie null.
-  const lie: Lie = matchedLie ?? 'rough';
+  const lie: Lie = classifyLie(tap, features) ?? 'rough';
 
   // Direction relative to the green. Decompose (tap - green) onto the
   // tee→green unit vector (along) and its right-perpendicular (across).

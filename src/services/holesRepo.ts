@@ -1,10 +1,72 @@
 import { supabase } from '@/lib/supabase';
-import type { CourseHole, HoleFeature, CourseOsmStatus, OrientationConfidence } from '@/models';
+import type {
+  CourseHole,
+  HoleFeature,
+  CourseOsmStatus,
+  OrientationConfidence,
+  LngLat
+} from '@/models';
 import { toAppError } from './errors';
 
 export interface HoleLayoutData {
   hole: CourseHole;
   features: HoleFeature[];
+}
+
+/** Flatten a feature's coords (line ring OR polygon rings) into a flat point list. */
+function flattenFeatureCoords(coords: unknown): LngLat[] {
+  if (!Array.isArray(coords) || coords.length === 0) return [];
+  // Polygon: [[ [lng,lat], ... ], ...]  →  first element is a ring (array of points).
+  // Line:    [ [lng,lat], ... ]         →  first element is a point (array of numbers).
+  const first = coords[0] as unknown;
+  if (Array.isArray(first) && Array.isArray((first as unknown[])[0])) {
+    // Polygon rings — flatten every ring.
+    return (coords as LngLat[][]).flat();
+  }
+  return coords as LngLat[];
+}
+
+function centroidOf(points: LngLat[]): LngLat | null {
+  if (points.length === 0) return null;
+  let sx = 0;
+  let sy = 0;
+  for (const [lng, lat] of points) {
+    sx += lng;
+    sy += lat;
+  }
+  return [sx / points.length, sy / points.length];
+}
+
+/** Anchor points that represent a hole's geometry: centerline vertices + tee + green. */
+function holeAnchors(h: {
+  tee_lng: number | null;
+  tee_lat: number | null;
+  green_lng: number | null;
+  green_lat: number | null;
+  centerline: Array<[number, number]> | null;
+}): LngLat[] {
+  const pts: LngLat[] = [];
+  if (Array.isArray(h.centerline)) pts.push(...(h.centerline as LngLat[]));
+  if (h.tee_lng != null && h.tee_lat != null) pts.push([h.tee_lng, h.tee_lat]);
+  if (h.green_lng != null && h.green_lat != null) pts.push([h.green_lng, h.green_lat]);
+  return pts;
+}
+
+/** Squared planar distance with cos-lat correction so lng/lat scales match locally. */
+function sqDist(a: LngLat, b: LngLat, cosLat: number): number {
+  const dx = (a[0] - b[0]) * cosLat;
+  const dy = a[1] - b[1];
+  return dx * dx + dy * dy;
+}
+
+/** Min squared distance from a point to any of a hole's anchor points. */
+function minSqDistToHole(c: LngLat, anchors: LngLat[], cosLat: number): number {
+  let best = Infinity;
+  for (const a of anchors) {
+    const d = sqDist(c, a, cosLat);
+    if (d < best) best = d;
+  }
+  return best;
 }
 
 export const holesRepo = {
@@ -39,14 +101,50 @@ export const holesRepo = {
     if (holeErr) throw toAppError(holeErr, 'Could not load hole geometry');
     if (!hole) return { data: null, courseStatus };
 
-    const { data: features, error: featErr } = await supabase
+    // Load EVERY feature for the course, then assign each to its nearest hole
+    // here on read — we deliberately ignore the stored `hole_id`. The OSM sync
+    // assigns features by "first hole whose (60m-expanded) bbox contains the
+    // centroid", but adjacent holes' bboxes overlap, so a feature often lands
+    // on the wrong hole (or none) — leaving some holes with zero features, which
+    // made tap-to-record always fall back to 'rough'. Nearest-hole assignment
+    // is overlap-proof and fixes already-synced courses without a re-sync.
+    const { data: allFeatures, error: featErr } = await supabase
       .from('hole_features')
       .select('*')
-      .eq('hole_id', hole.id);
+      .eq('course_id', courseId);
     if (featErr) throw toAppError(featErr, 'Could not load hole features');
 
+    const { data: allHoles, error: holesErr } = await supabase
+      .from('holes')
+      .select('id, tee_lng, tee_lat, green_lng, green_lat, centerline')
+      .eq('course_id', courseId);
+    if (holesErr) throw toAppError(holesErr, 'Could not load course holes');
+
+    const cosLat = Math.cos(((hole.green_lat ?? hole.tee_lat ?? 0) * Math.PI) / 180);
+    const holeAnchorList = (allHoles ?? []).map((h) => ({
+      id: h.id as string,
+      anchors: holeAnchors(h)
+    }));
+
+    const features = (allFeatures ?? []).filter((f) => {
+      const c = centroidOf(flattenFeatureCoords(f.coords));
+      if (!c) return false;
+      // Pick the hole whose geometry is closest to this feature's centroid.
+      let bestId: string | null = null;
+      let bestDist = Infinity;
+      for (const h of holeAnchorList) {
+        if (h.anchors.length === 0) continue;
+        const d = minSqDistToHole(c, h.anchors, cosLat);
+        if (d < bestDist) {
+          bestDist = d;
+          bestId = h.id;
+        }
+      }
+      return bestId === hole.id;
+    }) as HoleFeature[];
+
     return {
-      data: { hole: hole as CourseHole, features: (features ?? []) as HoleFeature[] },
+      data: { hole: hole as CourseHole, features },
       courseStatus
     };
   },
