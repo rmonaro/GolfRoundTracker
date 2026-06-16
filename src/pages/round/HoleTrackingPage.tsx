@@ -655,7 +655,14 @@ export function HoleTrackingPage() {
         return { lie: classifyTap([lng, lat], feats, 0, [lng, lat], upcomingTargetType).lie, targetResult: null };
       }
       const bearing = teeToGreenBearing(data!.hole) ?? 0;
-      return classifyTap([lng, lat], feats, bearing, green, upcomingTargetType);
+      return classifyTap(
+        [lng, lat],
+        feats,
+        bearing,
+        green,
+        upcomingTargetType,
+        data!.hole.centerline
+      );
     },
     [layoutQuery.data, pinOverride, upcomingTargetType]
   );

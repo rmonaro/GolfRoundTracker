@@ -656,6 +656,55 @@ function pointAlongFromEndProjected(
  *     position — the user can correct it in the shot sheet.
  */
 /**
+ * Which side of the line of play a point is on, judged against a tee→green
+ * polyline (the centerline). Projects the point onto its NEAREST segment and
+ * takes the 2D cross product of that segment's direction with the point offset,
+ * so the answer follows the fairway through doglegs instead of a straight
+ * tee→green line. We need the centerline (not the straight line) because the
+ * green centroid is often offset from the fairway — referencing the straight
+ * line then reports the whole fairway as one side. `centerline` MUST already be
+ * oriented tee→green. Returns null when it's too short to define a direction.
+ */
+function crossTrackSide(
+  tap: [number, number],
+  centerline: [number, number][]
+): 'left' | 'right' | null {
+  if (!Array.isArray(centerline) || centerline.length < 2) return null;
+  // cos-lat keeps the (east, north) frame Euclidean at golf scales.
+  const cosLat = Math.cos((tap[1] * Math.PI) / 180);
+  const px = tap[0] * cosLat;
+  const py = tap[1];
+  let bestDist = Infinity;
+  let bestCross = 0;
+  for (let i = 0; i < centerline.length - 1; i++) {
+    const ax = centerline[i][0] * cosLat;
+    const ay = centerline[i][1];
+    const bx = centerline[i + 1][0] * cosLat;
+    const by = centerline[i + 1][1];
+    const sx = bx - ax;
+    const sy = by - ay;
+    const segLen2 = sx * sx + sy * sy;
+    if (segLen2 === 0) continue;
+    const wx = px - ax;
+    const wy = py - ay;
+    // Clamp the projection to the segment so the nearest POINT is well-defined.
+    let t = (wx * sx + wy * sy) / segLen2;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    const dx = px - (ax + sx * t);
+    const dy = py - (ay + sy * t);
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      // z-component of segment × offset. Facing tee→green, >0 = the golfer's
+      // LEFT (CCW side), <0 = their right.
+      bestCross = sx * wy - sy * wx;
+    }
+  }
+  return bestCross > 0 ? 'left' : 'right';
+}
+
+/**
  * Determine the lie at a point by ray-casting it against the mapped course
  * feature polygons, walking them by priority so the topmost (green > bunker >
  * hazard > fairway > tee > rough) wins. Returns null when nothing matched so
@@ -698,7 +747,8 @@ export function classifyTap(
   features: HoleFeature[],
   bearing: number,
   green: [number, number],
-  targetType: TargetType
+  targetType: TargetType,
+  centerline?: [number, number][] | null
 ): { lie: Lie | null; targetResult: TargetResult | null } {
   // Default to rough when nothing matched — better than leaving lie null.
   const lie: Lie = classifyLie(tap, features) ?? 'rough';
@@ -718,22 +768,53 @@ export function classifyTap(
   const along = dx * Math.sin(br) + dy * Math.cos(br);
   const across = dx * Math.cos(br) - dy * Math.sin(br);
 
-  // Any tap on the green counts as a 'hit', regardless of what the player
-  // was actually aiming at — landing on the green is the same outcome
-  // whether the intended target was the green or the fairway (e.g.
-  // driveable par 4 / mishit short par 5). Tee polygons report as
-  // lie='fairway', so a tee-shot tap on the tee box of a par-4/5 also
-  // counts as a fairway hit. Anything else → directional miss vs the pin.
+  // Side of the line of play, judged against the centerline (follows the
+  // fairway through doglegs) rather than the straight tee→green line — the
+  // green centroid is frequently offset from the fairway, which skews the
+  // straight-line `across` and made the whole fairway read as one side. Falls
+  // back to the straight-line `across` sign when no centerline is available.
+  const oriented =
+    centerline && centerline.length >= 2
+      ? orientCenterlineTeeToGreen(centerline, green)
+      : null;
+  const side: 'left' | 'right' =
+    (oriented ? crossTrackSide(tap, oriented) : null) ?? (across > 0 ? 'right' : 'left');
+
+  // Resolve the shot outcome vs the intended target:
+  //
+  //   • On the green → 'hit', regardless of intended target — landing on the
+  //     green is the same good outcome whether aiming at the green or the
+  //     fairway (driveable par 4 / mishit short par 5).
+  //   • Fairway target (tee / lay-up): on the fairway — or a tee box, which
+  //     reports lie='fairway' — is a 'hit'. A miss only cares which SIDE of the
+  //     fairway you ended up, not how far short → left / right (vs centerline).
+  //   • Green target (approach): report the DOMINANT miss axis vs the pin —
+  //     short / long along the line of play, or left / right across it.
   let targetResult: TargetResult | null;
   if (lie === 'green') {
     targetResult = 'hit';
-  } else if (targetType === 'fairway' && lie === 'fairway') {
-    targetResult = 'hit';
+  } else if (targetType === 'fairway') {
+    targetResult = lie === 'fairway' ? 'hit' : side;
   } else if (Math.abs(along) > Math.abs(across)) {
     targetResult = along > 0 ? 'long' : 'short';
   } else {
-    targetResult = across > 0 ? 'right' : 'left';
+    targetResult = side;
   }
+  // TEMP [dir-debug] — remove after diagnosing left/right sign. Click once
+  // clearly LEFT and once clearly RIGHT of the fairway and report both lines.
+  // eslint-disable-next-line no-console
+  console.log('[dir-debug]', {
+    bearing: Math.round(bearing),
+    green,
+    tap,
+    along: Math.round(along * 111000),
+    across: Math.round(across * 111000),
+    hasCenterline: !!oriented,
+    side,
+    targetType,
+    lie,
+    targetResult
+  });
   return { lie, targetResult };
 }
 
@@ -1407,7 +1488,8 @@ export function HoleLayout({
             layout.features,
             bearing,
             effectivePin,
-            targetType
+            targetType,
+            layout.hole.centerline
           );
           cb({
             start: aimStartLL,
@@ -1515,7 +1597,8 @@ export function HoleLayout({
               layout.features,
               bearing,
               effectivePin,
-              targetType
+              targetType,
+              layout.hole.centerline
             );
             onShotLanded({
               start: aimStartLL,
@@ -1834,7 +1917,8 @@ export function HoleLayout({
         layout.features,
         bearing,
         greenLL,
-        targetType
+        targetType,
+        layout.hole.centerline
       );
       cb({
         start: aimStartLL,
