@@ -48,8 +48,10 @@ export function PracticeStartPage() {
 
   return (
     <Box sx={practicePageSx()}>
-      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
-        Watch Practice
+      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '45px', lineHeight: 1.1 }}>
+        Practice
+        <br />
+        Session
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
         Uses {watchName()} motion sensors to estimate your swing tempo and
