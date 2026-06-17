@@ -1,10 +1,6 @@
 import { Box, Button, Card, CardActionArea, CardContent, IconButton, Stack, Typography } from '@mui/material';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
-import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
-import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
-import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
-import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -148,37 +144,7 @@ export function HomePage() {
             </CardActionArea>
           </Card>
         )}
-
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1.5 }}>
-          <QuickAction icon={<HistoryRoundedIcon />} label="Past" onClick={() => navigate('/round/history')} />
-          <QuickAction icon={<InsightsRoundedIcon />} label="Stats" onClick={() => navigate('/stats')} />
-          <QuickAction icon={<SportsGolfRoundedIcon />} label="Bag" onClick={() => navigate('/bag')} />
-          <QuickAction icon={<WatchRoundedIcon />} label="Practice" onClick={() => navigate('/practice')} />
-        </Box>
       </Stack>
     </Box>
-  );
-}
-
-function QuickAction({
-  icon,
-  label,
-  onClick
-}: {
-  icon: React.ReactNode;
-  label: string;
-  onClick: () => void;
-}) {
-  return (
-    <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-      <CardActionArea onClick={onClick} sx={{ p: 1.5 }}>
-        <Stack alignItems="center" spacing={0.5}>
-          <Box sx={{ color: 'primary.main', display: 'flex' }}>{icon}</Box>
-          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-            {label}
-          </Typography>
-        </Stack>
-      </CardActionArea>
-    </Card>
   );
 }
