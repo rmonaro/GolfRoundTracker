@@ -30,6 +30,7 @@ import type { RangeSession } from '@/types/range';
 interface PendingDelete {
   id: string;
   startedAt: string;
+  kind: 'swing' | 'range';
 }
 
 type RangeSessionWithCount = RangeSession & { shotCount: number };
@@ -114,8 +115,13 @@ export function PastPracticesPage() {
     setDeleting(true);
     setDeleteError(null);
     try {
-      await swingRepo.deleteSession(pending.id);
-      setSessions((prev) => prev.filter((s) => s.id !== pending.id));
+      if (pending.kind === 'range') {
+        await rangeRepo.deleteSession(pending.id);
+        setRangeSessions((prev) => prev.filter((s) => s.id !== pending.id));
+      } else {
+        await swingRepo.deleteSession(pending.id);
+        setSessions((prev) => prev.filter((s) => s.id !== pending.id));
+      }
       setPending(null);
     } catch (err) {
       setDeleteError(err instanceof Error ? err.message : 'Could not delete session');
@@ -171,20 +177,22 @@ export function PastPracticesPage() {
               variant="outlined"
               sx={{ borderRadius: '3px', position: 'relative' }}
             >
-              {isSwing && (
-                <IconButton
-                  aria-label={`Delete practice session from ${dayjs(startedAt).format('MMM D, YYYY')}`}
-                  size="small"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setDeleteError(null);
-                    setPending({ id: item.swing.id, startedAt });
-                  }}
-                  sx={{ position: 'absolute', top: 6, right: 6, zIndex: 2, color: 'text.secondary' }}
-                >
-                  <DeleteOutlineRoundedIcon fontSize="small" />
-                </IconButton>
-              )}
+              <IconButton
+                aria-label={`Delete ${title} session from ${dayjs(startedAt).format('MMM D, YYYY')}`}
+                size="small"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setDeleteError(null);
+                  setPending({
+                    id: isSwing ? item.swing.id : item.range.id,
+                    startedAt,
+                    kind: item.kind
+                  });
+                }}
+                sx={{ position: 'absolute', top: 6, right: 6, zIndex: 2, color: 'text.secondary' }}
+              >
+                <DeleteOutlineRoundedIcon fontSize="small" />
+              </IconButton>
               <CardActionArea onClick={onOpen}>
                 <CardContent sx={{ pr: 5 }}>
                   <Stack direction="row" spacing={1.5} alignItems="center">
@@ -238,8 +246,8 @@ export function PastPracticesPage() {
         <DialogContent>
           <Typography variant="body2" color="text.secondary">
             This permanently removes the session from{' '}
-            {pending ? dayjs(pending.startedAt).format('MMM D, YYYY') : ''} and all of its
-            swings. This can't be undone.
+            {pending ? dayjs(pending.startedAt).format('MMM D, YYYY') : ''} and all of its{' '}
+            {pending?.kind === 'range' ? 'shots' : 'swings'}. This can't be undone.
           </Typography>
           {deleteError && (
             <Alert severity="error" sx={{ mt: 2 }}>

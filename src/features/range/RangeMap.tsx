@@ -17,16 +17,22 @@ interface RangeMapProps {
   /** Map orientation: degrees so the target line points up. */
   bearing: number;
   shots: ShotMarker[];
-  /** Show the labelled yardage arcs (Phase C only). */
+  /** Show the labelled yardage semicircle arcs. */
   showArcs?: boolean;
+  /** Reserve the lower screen for the session bar (logging phase) when framing. */
+  bottomBar?: boolean;
   /** Called on every map tap with the tapped {lat, lng}. */
   onMapTap: (p: LatLng) => void;
 }
 
 const ARC_YARDS = [50, 100, 150, 200, 250, 300, 350];
 const FORWARD_YARDS = 350;
-const ARC_COLOR = '#FFFFFF';
-const TARGET_LINE_COLOR = '#FFD54F';
+// PDI palette accents (used directly — the satellite imagery isn't themed).
+const ARC_COLOR = '#ffd580'; // warm gold yardage rings
+const TARGET_LINE_COLOR = '#f88930'; // PDI orange aim line
+const MAT_COLOR = '#324279'; // PDI navy origin marker
+const TARGET_COLOR = '#f88930'; // PDI orange target marker
+const SHOT_COLOR = '#ff5a52'; // landed shot dots
 
 function el(html: string, style: Partial<CSSStyleDeclaration>): HTMLDivElement {
   const node = document.createElement('div');
@@ -35,7 +41,7 @@ function el(html: string, style: Partial<CSSStyleDeclaration>): HTMLDivElement {
   return node;
 }
 
-export function RangeMap({ origin, target, bearing, shots, showArcs, onMapTap }: RangeMapProps) {
+export function RangeMap({ origin, target, bearing, shots, showArcs, bottomBar, onMapTap }: RangeMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const readyRef = useRef(false);
@@ -58,7 +64,7 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, onMapTap }:
     const h = map.getContainer().clientHeight || 700;
     // Reserve the lower screen for the session bar (Phase C) so the mat isn't
     // hidden behind it; otherwise just a small bottom margin.
-    const bottomReserve = showArcs ? Math.round(h * 0.42) : Math.round(h * 0.05);
+    const bottomReserve = bottomBar ? Math.round(h * 0.42) : Math.round(h * 0.05);
     const topPad = 56;
     const margin = 12;
     const yMat = h - bottomReserve - margin; // screen y (px from top) for the mat
@@ -113,7 +119,7 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, onMapTap }:
       originMarkerRef.current = new mapboxgl.Marker({
         element: el('MAT', {
           padding: '2px 6px',
-          background: '#1B5E20',
+          background: MAT_COLOR,
           color: '#fff',
           fontSize: '11px',
           fontWeight: '700',
@@ -158,7 +164,7 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, onMapTap }:
         source: 'range-shots',
         paint: {
           'circle-radius': 6,
-          'circle-color': '#FF5252',
+          'circle-color': SHOT_COLOR,
           'circle-stroke-color': '#fff',
           'circle-stroke-width': 2
         }
@@ -199,7 +205,7 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, onMapTap }:
   useEffect(() => {
     frameForward(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bearing, showArcs, origin.lat, origin.lng]);
+  }, [bearing, showArcs, bottomBar, origin.lat, origin.lng]);
 
   // --- target marker + line ----------------------------------------------
   function syncTargetLine() {
@@ -222,7 +228,14 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, onMapTap }:
         targetMarkerRef.current.setLngLat([target.lng, target.lat]);
       } else {
         targetMarkerRef.current = new mapboxgl.Marker({
-          element: el('🎯', { fontSize: '22px', lineHeight: '1' }),
+          element: el('', {
+            width: '16px',
+            height: '16px',
+            borderRadius: '50%',
+            background: TARGET_COLOR,
+            border: '3px solid #fff',
+            boxShadow: '0 0 0 1px rgba(0,0,0,0.25)'
+          }),
           anchor: 'center'
         })
           .setLngLat([target.lng, target.lat])

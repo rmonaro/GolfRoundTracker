@@ -124,6 +124,18 @@ export const rangeRepo = {
     });
   },
 
+  /** Delete a single logged shot. */
+  async deleteShot(shotId: string): Promise<void> {
+    const { error } = await supabase.from('range_shots').delete().eq('id', shotId);
+    if (error) throw toAppError(error, 'Could not delete shot');
+  },
+
+  /** Delete a range session. Cascades to its range_shots via the FK. */
+  async deleteSession(sessionId: string): Promise<void> {
+    const { error } = await supabase.from('range_sessions').delete().eq('id', sessionId);
+    if (error) throw toAppError(error, 'Could not delete range session');
+  },
+
   async getSession(sessionId: string): Promise<RangeSession | null> {
     const { data, error } = await supabase
       .from('range_sessions')

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { Box, Button, Card, CardActionArea, CardContent, IconButton, Stack, Typography } from '@mui/material';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
@@ -7,6 +8,8 @@ import { PageHeader } from '@/components/layout/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
 import { HomeTournamentCard } from '@/components/home/HomeTournamentCard';
 import { useAuthStore } from '@/stores/authStore';
+import { swingRepo } from '@/services/swingRepo';
+import type { SwingSession } from '@/types/swing';
 import { useRounds } from '@/features/stats/useRounds';
 import { useBag } from '@/features/bag/useBag';
 import { useMyTournaments, useCachedTournaments } from '@/features/tournaments/useMyTournaments';
@@ -35,6 +38,23 @@ export function HomePage() {
   const completed = (rounds ?? []).filter((r) => r.completed_at);
   const lastRound = completed[0];
   const handicap = estimateHandicap(completed.slice(0, 20).map((r) => r.handicap_differential));
+
+  // Most recent practice session for the "Last Practice" card.
+  const userId = useAuthStore((s) => s.session?.user.id ?? null);
+  const [lastPractice, setLastPractice] = useState<SwingSession | null>(null);
+  useEffect(() => {
+    if (!userId) return;
+    let cancelled = false;
+    swingRepo
+      .listSessions(userId)
+      .then((s) => {
+        if (!cancelled) setLastPractice(s[0] ?? null);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [userId]);
 
   return (
     <Box>
@@ -137,6 +157,43 @@ export function HomePage() {
                       sx={{ fontWeight: 600 }}
                     >
                       {lastRound.score} strokes
+                    </Typography>
+                  </Box>
+                </Stack>
+              </CardContent>
+            </CardActionArea>
+          </Card>
+        )}
+
+        {lastPractice && (
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+            <CardActionArea onClick={() => navigate(`/practice/history/${lastPractice.id}`)}>
+              <CardContent>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+                >
+                  Last Practice
+                </Typography>
+                <Stack direction="row" justifyContent="space-between" alignItems="flex-end" mt={0.5}>
+                  <Box sx={{ minWidth: 0 }}>
+                    <Typography variant="h6" noWrap>
+                      Swing/Net
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary">
+                      {dayjs(lastPractice.startedAt).format('MMM D, YYYY')}
+                      {lastPractice.avgTempoRatio != null
+                        ? ` · ${lastPractice.avgTempoRatio.toFixed(1)}:1 tempo`
+                        : ''}
+                    </Typography>
+                  </Box>
+                  <Box textAlign="right">
+                    <Typography variant="h4" sx={{ fontWeight: 700 }} color="primary">
+                      {lastPractice.swingCount}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
+                      {lastPractice.swingCount === 1 ? 'swing' : 'swings'}
                     </Typography>
                   </Box>
                 </Stack>
