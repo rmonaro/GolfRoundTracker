@@ -10,6 +10,7 @@ import {
   CircularProgress,
   Drawer,
   IconButton,
+  Slider,
   Stack,
   Tab,
   Tabs,
@@ -20,6 +21,9 @@ import type { SxProps, Theme } from '@mui/material';
 import LocationOnRoundedIcon from '@mui/icons-material/LocationOnRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
+import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
+import AddRoundedIcon from '@mui/icons-material/AddRounded';
+import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
 import { useNavigate } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { useAuthStore } from '@/stores/authStore';
@@ -40,13 +44,12 @@ import {
 } from '@/services/rangeSwingBridge';
 import { targetCenter } from '@/services/rangeRepo';
 import { RangeMap, type ShotMarker, type TargetShape } from '@/features/range/RangeMap';
-import { shotChipLabel } from '@/features/range/rangeStats';
+import { classifyShotVsTarget, clubColor, shotChipLabel } from '@/features/range/rangeStats';
 import {
   circleRing,
   computeBearing,
   destinationPoint,
   haversineMeters,
-  pointInPolygon,
   yardsToM
 } from '@/features/range/rangeGeo';
 import type { LatLng, RangeSession, RangeShot, RangeTarget } from '@/types/range';
@@ -282,11 +285,16 @@ export function RangeSessionPage() {
       setBusy(true);
       setError(null);
       try {
-        // Lazily open the session on the first shot. Aim at the selected target
-        // if there is one, else straight up the range (north).
+        // Current aim: the selected target wins (so re-aiming mid-session works),
+        // else the session's saved line, else straight up the range (north).
         let activeSession = session;
+        const aim = aimTarget
+          ? targetCenter(aimTarget)
+          : activeSession
+            ? activeSession.target
+            : destinationPoint(origin, 0, yardsToM(250));
+        // Lazily open the session on the first shot.
         if (!activeSession) {
-          const aim = aimTarget ? targetCenter(aimTarget) : destinationPoint(origin, 0, yardsToM(250));
           activeSession = await rangeRepo.createSession(userId, origin, aim);
           setSession(activeSession);
         }
@@ -296,9 +304,22 @@ export function RangeSessionPage() {
         const club = swing?.club ?? clubLabel(selectedClubId);
         // Only link a real (persisted) swing_metrics uuid; null otherwise.
         const swingEventId = swing ? resolveSwingEventId(swing.id) : null;
-        const shot = await rangeRepo.logShot({ session: activeSession, land: p, club, swingEventId });
+        const shot = await rangeRepo.logShot({
+          session: activeSession,
+          land: p,
+          club,
+          swingEventId,
+          aim,
+          targetId: aimTarget?.id ?? null
+        });
         setShots((prev) => [...prev, shot]);
-        setLastChip(shotChipLabel(shot.totalYards, shot.offlineYards));
+        // When aimed at a target, report the result vs the target; else the
+        // straight carry/offline relative to the range line.
+        setLastChip(
+          aimTarget
+            ? `${Math.round(shot.totalYards)} yds · ${classifyShotVsTarget(origin, aimTarget, p).label}`
+            : shotChipLabel(shot.totalYards, shot.offlineYards)
+        );
         pendingSwingRef.current = null;
         setPendingSwing(null);
       } catch (err) {
@@ -340,7 +361,7 @@ export function RangeSessionPage() {
   }, [session, navigate]);
 
   const shotMarkers: ShotMarker[] = useMemo(
-    () => shots.map((s, i) => ({ lng: s.land.lng, lat: s.land.lat, n: i + 1 })),
+    () => shots.map((s, i) => ({ lng: s.land.lng, lat: s.land.lat, n: i + 1, color: clubColor(s.club) })),
     [shots]
   );
   const lastShotYards = shots.length ? Math.round(shots[shots.length - 1].totalYards) : null;
@@ -434,13 +455,15 @@ export function RangeSessionPage() {
           ? 'Swing detected — tap where the ball landed.'
           : 'Tap where the ball landed.';
 
-  // Aim point/bearing: the selected target (or the active session's line).
-  const aimPoint = session ? session.target : aimTarget ? targetCenter(aimTarget) : null;
-  const aimBearing = session
-    ? session.targetBearing
-    : aimPoint
-      ? computeBearing(origin, aimPoint)
-      : 0;
+  // Aim point/bearing: the selected target always wins (so switching targets
+  // re-aims the line mid-session), then the active session's saved line, else
+  // straight up the range. Shots are decomposed relative to this current aim.
+  const aimPoint: LatLng = aimTarget
+    ? targetCenter(aimTarget)
+    : session
+      ? session.target
+      : destinationPoint(origin, 0, yardsToM(250));
+  const aimBearing = computeBearing(origin, aimPoint);
 
   const targetShapes: TargetShape[] = targets.map((t) => ({
     id: t.id,
@@ -471,7 +494,6 @@ export function RangeSessionPage() {
         targets={targetShapes}
         draftRing={draftRing}
         drawing={drawMode !== 'none'}
-        onTargetTap={(id) => setSelectedTargetId(id)}
         onMapTap={handleTap}
       />
 
@@ -484,7 +506,7 @@ export function RangeSessionPage() {
           right: 8,
           display: 'flex',
           gap: 1,
-          alignItems: 'center'
+          alignItems: 'flex-start'
         }}
       >
         <Box
@@ -502,15 +524,13 @@ export function RangeSessionPage() {
           </Typography>
         </Box>
         {drawMode === 'none' && (
-          <Button
-            size="small"
-            variant="contained"
-            color="inherit"
-            onClick={() => setTargetsDrawerOpen(true)}
-            sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff' }}
+          <IconButton
+            aria-label="How the range works"
+            onClick={() => navigate('/range/guide')}
+            sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff', '&:hover': { bgcolor: 'rgba(0,0,0,0.75)' } }}
           >
-            Targets
-          </Button>
+            <HelpOutlineRoundedIcon fontSize="small" />
+          </IconButton>
         )}
         <Button
           size="small"
@@ -572,27 +592,29 @@ export function RangeSessionPage() {
           }}
         >
           {drawMode === 'circle' ? (
-            <Stack direction="row" alignItems="center" spacing={1}>
-              <Typography variant="body2" sx={{ flex: 1 }} fontWeight={700}>
-                Radius
-              </Typography>
-              <IconButton size="small" onClick={() => setDraftRadiusYd((r) => Math.max(3, r - 1))}>
-                <Typography fontWeight={800}>−</Typography>
-              </IconButton>
-              <Typography fontWeight={800} sx={{ minWidth: 48, textAlign: 'center' }}>
-                {draftRadiusYd}y
-              </Typography>
-              <IconButton size="small" onClick={() => setDraftRadiusYd((r) => Math.min(80, r + 1))}>
-                <Typography fontWeight={800}>+</Typography>
-              </IconButton>
-              <Button
-                variant="contained"
-                disabled={!draftCenter}
-                onClick={saveTarget}
-                sx={{ ml: 1 }}
-              >
-                Save
-              </Button>
+            <Stack spacing={1}>
+              <Stack direction="row" alignItems="center" justifyContent="space-between">
+                <Typography variant="body2" fontWeight={700}>
+                  Radius
+                </Typography>
+                <Typography fontWeight={800}>{draftRadiusYd}y</Typography>
+              </Stack>
+              <Stack direction="row" alignItems="center" spacing={2}>
+                <Slider
+                  aria-label="Radius (yards)"
+                  value={draftRadiusYd}
+                  min={3}
+                  max={80}
+                  step={1}
+                  valueLabelDisplay="auto"
+                  valueLabelFormat={(v) => `${v}y`}
+                  onChange={(_, v) => setDraftRadiusYd(v as number)}
+                  sx={{ flex: 1 }}
+                />
+                <Button variant="contained" disabled={!draftCenter} onClick={saveTarget}>
+                  Save
+                </Button>
+              </Stack>
             </Stack>
           ) : (
             <Stack direction="row" alignItems="center" spacing={1}>
@@ -660,6 +682,26 @@ export function RangeSessionPage() {
               Consistency
             </Typography>
           </Box>
+          {drawMode === 'none' && (
+            <Button
+              onClick={() => setTargetsDrawerOpen(true)}
+              startIcon={targets.length > 0 ? <VisibilityRoundedIcon /> : undefined}
+              endIcon={targets.length === 0 ? <AddRoundedIcon /> : undefined}
+              sx={{
+                borderRadius: '5px',
+                bgcolor: (theme) => alpha(theme.palette.primary.main, 0.78),
+                color: '#fff',
+                backdropFilter: 'blur(6px)',
+                WebkitBackdropFilter: 'blur(6px)',
+                fontWeight: 700,
+                textTransform: 'none',
+                py: 0.75,
+                '&:hover': { bgcolor: (theme) => alpha(theme.palette.primary.main, 0.9) }
+              }}
+            >
+              Targets
+            </Button>
+          )}
         </Box>
       )}
 
@@ -687,9 +729,14 @@ export function RangeSessionPage() {
             <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
               <Stack direction="row" justifyContent="space-between" alignItems="center">
                 <Box sx={{ minWidth: 0 }}>
-                  <Typography fontWeight={700} noWrap>
-                    {currentClub ?? 'No club'}
-                  </Typography>
+                  <Stack direction="row" alignItems="center" spacing={1}>
+                    <Box
+                      sx={{ width: 10, height: 10, borderRadius: '50%', flexShrink: 0, bgcolor: clubColor(currentClub) }}
+                    />
+                    <Typography fontWeight={700} noWrap>
+                      {currentClub ?? 'No club'}
+                    </Typography>
+                  </Stack>
                   <Typography variant="caption" color="text.secondary">
                     {clubSummary.count} shot{clubSummary.count === 1 ? '' : 's'} tracked · tap to view
                   </Typography>
@@ -841,18 +888,32 @@ export function RangeSessionPage() {
                 {tabShots.map(({ shot: s, n }) => {
                   const off = Math.round(s.offlineYards);
                   const offLabel = off === 0 ? 'straight' : `${Math.abs(off)} ${off > 0 ? 'R' : 'L'}`;
+                  const tgt = s.targetId ? targets.find((t) => t.id === s.targetId) ?? null : null;
+                  const resultLabel = tgt ? classifyShotVsTarget(origin, tgt, s.land).label : null;
                   return (
                     <Card key={s.id} variant="outlined" sx={{ borderRadius: '5px' }}>
                       <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
                         <Stack direction="row" alignItems="center" justifyContent="space-between">
-                          <Box sx={{ minWidth: 0 }}>
-                            <Typography fontWeight={700} noWrap>
-                              #{n} · {Math.round(s.totalYards)}y
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              {s.club ?? 'No club'} · {offLabel}
-                            </Typography>
-                          </Box>
+                          <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
+                            <Box
+                              sx={{
+                                width: 10,
+                                height: 10,
+                                borderRadius: '50%',
+                                flexShrink: 0,
+                                bgcolor: clubColor(s.club)
+                              }}
+                            />
+                            <Box sx={{ minWidth: 0 }}>
+                              <Typography fontWeight={700} noWrap>
+                                #{n} · {Math.round(s.totalYards)}y
+                                {resultLabel ? ` · ${resultLabel}` : ''}
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {s.club ?? 'No club'} · {offLabel}
+                              </Typography>
+                            </Box>
+                          </Stack>
                           <IconButton
                             aria-label="Delete shot"
                             onClick={() => deleteShot(s.id)}
@@ -928,15 +989,11 @@ export function RangeSessionPage() {
             <Stack spacing={1}>
               {targets.map((t, i) => {
                 const c = targetCenter(t);
-                const hits = shots.filter((s) =>
-                  t.kind === 'circle' && t.center
-                    ? haversineMeters(t.center, s.land) <= (t.radiusM ?? 0)
-                    : t.points
-                      ? pointInPolygon(s.land, t.points)
-                      : false
-                ).length;
-                const closest = shots.length
-                  ? Math.round(Math.min(...shots.map((s) => haversineMeters(c, s.land))) / 0.9144)
+                // Shots actually aimed at this target, and how they finished.
+                const aimed = shots.filter((s) => s.targetId === t.id);
+                const onTarget = aimed.filter((s) => classifyShotVsTarget(origin, t, s.land).hit).length;
+                const closest = aimed.length
+                  ? Math.round(Math.min(...aimed.map((s) => haversineMeters(c, s.land))) / 0.9144)
                   : null;
                 const name = t.label || `${t.kind === 'circle' ? 'Circle' : 'Shape'} ${i + 1}`;
                 return (
@@ -958,7 +1015,7 @@ export function RangeSessionPage() {
                             {t.id === selectedTargetId ? ' · aiming' : ''}
                           </Typography>
                           <Typography variant="caption" color="text.secondary">
-                            {hits} hit{hits === 1 ? '' : 's'}
+                            {aimed.length ? `${onTarget}/${aimed.length} on target` : 'No shots yet'}
                             {closest != null ? ` · closest ${closest}y` : ''}
                           </Typography>
                         </CardContent>

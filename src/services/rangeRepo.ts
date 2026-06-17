@@ -32,6 +32,7 @@ function mapShot(r: RangeShotRow): RangeShot {
     userId: r.user_id,
     swingEventId: r.swing_event_id,
     club: r.club,
+    targetId: r.target_id,
     land: { lat: r.land_lat, lng: r.land_lng },
     carryYards: mToYards(r.carry_m),
     offlineYards: mToYards(r.offline_m),
@@ -102,9 +103,14 @@ export const rangeRepo = {
     land: LatLng;
     club?: string | null;
     swingEventId?: string | null;
+    /** Override the aim point for carry/offline decomposition (re-aim mid-session). */
+    aim?: LatLng | null;
+    /** The aim target this shot was hit at (for per-shot result), if any. */
+    targetId?: string | null;
   }): Promise<RangeShot> {
     const { session, land } = input;
-    const { carryM, offlineM, totalM } = computeShot(session.origin, session.target, land);
+    const aim = input.aim ?? session.target;
+    const { carryM, offlineM, totalM } = computeShot(session.origin, aim, land);
     const { data, error } = await supabase
       .from('range_shots')
       .insert({
@@ -112,6 +118,7 @@ export const rangeRepo = {
         user_id: session.userId,
         swing_event_id: input.swingEventId ?? null,
         club: input.club ?? null,
+        target_id: input.targetId ?? null,
         land_lat: land.lat,
         land_lng: land.lng,
         carry_m: carryM,

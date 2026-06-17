@@ -48,6 +48,8 @@ export interface RangeShot {
   swingEventId: string | null;
   /** Club label (manual in v1; watch-supplied later). */
   club: string | null;
+  /** The aim target this shot was hit at, if one was selected. */
+  targetId: string | null;
   land: LatLng;
   /** Carry along the target line, yards. */
   carryYards: number;

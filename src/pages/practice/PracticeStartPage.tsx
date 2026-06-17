@@ -220,7 +220,7 @@ export function PracticeStartPage() {
       </IconButton>
       <Typography
         variant="h5"
-        sx={{ fontWeight: 900, fontSize: "45px", lineHeight: 1.1 }}
+        sx={{ fontWeight: 900, fontSize: "35px", lineHeight: 1.1 }}
       >
         Practice Session
       </Typography>
@@ -297,9 +297,7 @@ export function PracticeStartPage() {
 
       <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
         Uses {watchName()} motion sensors to estimate your swing{" "}
-        <strong>tempo</strong> and <strong>consistency</strong>. It is not a
-        launch monitor and does not measure ball flight, club path, or
-        swing-plane angle.
+        <strong>tempo</strong> and <strong>consistency</strong>.
       </Typography>
 
       <MotionDisclaimer />
@@ -498,7 +496,7 @@ export function PracticeStartPage() {
           </Button>
         </Stack>
       ) : (
-        <Stack spacing={2} sx={{ mt: 3 }}>
+        <Stack spacing={2} sx={{ mt: 2 }}>
           <Button
             variant="contained"
             size="large"
@@ -511,7 +509,7 @@ export function PracticeStartPage() {
       )}
 
       <Button
-        sx={{ mt: 3 }}
+        sx={{ mt: 2 }}
         variant="outlined"
         fullWidth
         onClick={() => navigate("/practice/history")}
@@ -580,6 +578,16 @@ export function PracticeStartPage() {
               sx={{ color: "text.disabled", flexShrink: 0 }}
             />
           </ListItemButton>
+          <Button
+            size="small"
+            onClick={() => {
+              setDrawerOpen(false);
+              navigate("/range/guide");
+            }}
+            sx={{ alignSelf: "flex-start", textTransform: "none", mt: -0.5, mb: 0.5, ml: 0.5 }}
+          >
+            How the range works
+          </Button>
 
           <ListItemButton
             disabled={starting}

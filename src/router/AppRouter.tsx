@@ -24,6 +24,7 @@ import { PracticeSessionDetailPage } from '@/pages/practice/PracticeSessionDetai
 import { SwingMetricsGuidePage } from '@/pages/practice/SwingMetricsGuidePage';
 import { RangeSessionPage } from '@/pages/range/RangeSessionPage';
 import { RangeSummaryPage } from '@/pages/range/RangeSummaryPage';
+import { RangeGuidePage } from '@/pages/range/RangeGuidePage';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { AdminGuard } from '@/admin/AdminGuard';
 import { AdminLayout } from '@/admin/pages/AdminLayout';
@@ -163,6 +164,14 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <RangeSummaryPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/range/guide"
+        element={
+          <AuthGuard>
+            <RangeGuidePage />
           </AuthGuard>
         }
       />

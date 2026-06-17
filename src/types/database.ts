@@ -330,6 +330,8 @@ export interface RangeShotRow {
   swing_event_id: string | null;
   /** Manual club label for v1; null until selected/supplied. */
   club: string | null;
+  /** The aim target this shot was hit at, if one was selected. */
+  target_id: string | null;
   land_lat: number;
   land_lng: number;
   /** Along the target line, meters. */

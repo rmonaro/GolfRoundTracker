@@ -9,6 +9,8 @@ export interface ShotMarker {
   lng: number;
   lat: number;
   n: number;
+  /** Dot color (per club). Falls back to the default shot color. */
+  color?: string;
 }
 
 /** A target shape to render: a closed ring of [lng,lat] plus selection state. */
@@ -205,7 +207,7 @@ export function RangeMap({
         source: 'range-shots',
         paint: {
           'circle-radius': 6,
-          'circle-color': SHOT_COLOR,
+          'circle-color': ['coalesce', ['get', 'color'], SHOT_COLOR],
           'circle-stroke-color': '#fff',
           'circle-stroke-width': 2
         }
@@ -394,7 +396,7 @@ export function RangeMap({
       type: 'FeatureCollection',
       features: shots.map((s) => ({
         type: 'Feature',
-        properties: { n: s.n },
+        properties: { n: s.n, color: s.color ?? null },
         geometry: { type: 'Point', coordinates: [s.lng, s.lat] }
       }))
     });
