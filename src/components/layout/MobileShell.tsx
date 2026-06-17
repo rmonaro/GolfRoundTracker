@@ -4,15 +4,31 @@ import HomeRoundedIcon from '@mui/icons-material/HomeRounded';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
-import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
+import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
+import { Capacitor } from '@capacitor/core';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+
+// Practice tab icon: Apple Watch silhouette on iOS, generic round watch on
+// Android/web — mirrors the platform watch treatment on the practice screen.
+// Uses currentColor so it tints with the active/inactive nav state.
+const AppleWatchNavIcon = (
+  <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+    <rect x="6.5" y="6" width="11" height="12" rx="3.2" stroke="currentColor" strokeWidth="1.7" />
+    <path
+      d="M8.5 6 9 3.2A1.4 1.4 0 0 1 10.4 2h3.2a1.4 1.4 0 0 1 1.4 1.2L15.5 6M8.5 18l.5 2.8A1.4 1.4 0 0 0 10.4 22h3.2a1.4 1.4 0 0 0 1.4-1.2L15.5 18"
+      stroke="currentColor"
+      strokeWidth="1.7"
+    />
+  </svg>
+);
+const watchTabIcon = Capacitor.getPlatform() === 'ios' ? AppleWatchNavIcon : <WatchRoundedIcon />;
 
 const NAV_TABS = [
   { value: '/', label: 'Home', icon: <HomeRoundedIcon /> },
   { value: '/round', label: 'Round', icon: <GolfCourseRoundedIcon /> },
   { value: '/stats', label: 'Stats', icon: <InsightsRoundedIcon /> },
   { value: '/bag', label: 'Bag', icon: <SportsGolfRoundedIcon /> },
-  { value: '/settings', label: 'Settings', icon: <SettingsRoundedIcon /> }
+  { value: '/practice', label: 'Practice', icon: watchTabIcon }
 ];
 
 export function MobileShell() {

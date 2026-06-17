@@ -1,4 +1,5 @@
-import { Box, Button, Card, CardActionArea, CardContent, Stack, Typography } from '@mui/material';
+import { Box, Button, Card, CardActionArea, CardContent, IconButton, Stack, Typography } from '@mui/material';
+import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
 import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
@@ -44,6 +45,11 @@ export function HomePage() {
       <PageHeader
         title={`Hi, ${fullName(profile?.first_name, profile?.last_name)}`}
         subtitle="Ready to play?"
+        action={
+          <IconButton aria-label="Settings" onClick={() => navigate('/settings')}>
+            <SettingsRoundedIcon />
+          </IconButton>
+        }
       />
       <Stack spacing={2} px={2} pb={4}>
         {active ? (
