@@ -120,5 +120,33 @@ export function forwardArcRing(
   return ring;
 }
 
+/** Ray-casting point-in-polygon test. `ring` is a list of {lat,lng} vertices. */
+export function pointInPolygon(point: LatLng, ring: LatLng[]): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i].lng;
+    const yi = ring[i].lat;
+    const xj = ring[j].lng;
+    const yj = ring[j].lat;
+    const intersect =
+      yi > point.lat !== yj > point.lat &&
+      point.lng < ((xj - xi) * (point.lat - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/** Simple average centroid of a polygon ring (good enough for green-sized shapes). */
+export function polygonCentroid(ring: LatLng[]): LatLng {
+  const n = ring.length || 1;
+  let lat = 0;
+  let lng = 0;
+  for (const p of ring) {
+    lat += p.lat;
+    lng += p.lng;
+  }
+  return { lat: lat / n, lng: lng / n };
+}
+
 export const mToYards = (m: number): number => m / M_PER_YARD;
 export const yardsToM = (y: number): number => y * M_PER_YARD;

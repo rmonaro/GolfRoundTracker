@@ -11,6 +11,14 @@ export interface ShotMarker {
   n: number;
 }
 
+/** A target shape to render: a closed ring of [lng,lat] plus selection state. */
+export interface TargetShape {
+  id: string;
+  ring: [number, number][];
+  label: string | null;
+  selected: boolean;
+}
+
 interface RangeMapProps {
   origin: LatLng;
   target: LatLng | null;
@@ -21,6 +29,14 @@ interface RangeMapProps {
   showArcs?: boolean;
   /** Reserve the lower screen for the session bar (logging phase) when framing. */
   bottomBar?: boolean;
+  /** Saved target shapes (greens/spots). */
+  targets?: TargetShape[];
+  /** In-progress shape being drawn (ring of [lng,lat]); rendered distinctly. */
+  draftRing?: [number, number][] | null;
+  /** When true, taps add geometry (drawing) rather than selecting/logging. */
+  drawing?: boolean;
+  /** Tapped an existing target (selection) — only fires when not drawing. */
+  onTargetTap?: (id: string) => void;
   /** Called on every map tap with the tapped {lat, lng}. */
   onMapTap: (p: LatLng) => void;
 }
@@ -41,12 +57,28 @@ function el(html: string, style: Partial<CSSStyleDeclaration>): HTMLDivElement {
   return node;
 }
 
-export function RangeMap({ origin, target, bearing, shots, showArcs, bottomBar, onMapTap }: RangeMapProps) {
+export function RangeMap({
+  origin,
+  target,
+  bearing,
+  shots,
+  showArcs,
+  bottomBar,
+  targets,
+  draftRing,
+  drawing,
+  onTargetTap,
+  onMapTap
+}: RangeMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const readyRef = useRef(false);
   const tapRef = useRef(onMapTap);
   tapRef.current = onMapTap;
+  const targetTapRef = useRef(onTargetTap);
+  targetTapRef.current = onTargetTap;
+  const drawingRef = useRef(drawing);
+  drawingRef.current = drawing;
 
   const originMarkerRef = useRef<mapboxgl.Marker | null>(null);
   const targetMarkerRef = useRef<mapboxgl.Marker | null>(null);
@@ -62,9 +94,9 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, bottomBar, 
     if (!map) return;
     const forwardM = yardsToM(FORWARD_YARDS);
     const h = map.getContainer().clientHeight || 700;
-    // Reserve the lower screen for the session bar (Phase C) so the mat isn't
-    // hidden behind it; otherwise just a small bottom margin.
-    const bottomReserve = bottomBar ? Math.round(h * 0.42) : Math.round(h * 0.05);
+    // Reserve just enough at the bottom to clear the floating summary card +
+    // controls, so the mat sits near the bottom edge (not mid-screen).
+    const bottomReserve = bottomBar ? 132 : 24;
     const topPad = 56;
     const margin = 12;
     const yMat = h - bottomReserve - margin; // screen y (px from top) for the mat
@@ -109,6 +141,15 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, bottomBar, 
     map.on('error', (e) => console.warn('[range-map] runtime error', e));
 
     map.on('click', (e: mapboxgl.MapMouseEvent) => {
+      // Not drawing → a tap on an existing target selects it (aim).
+      if (!drawingRef.current && targetTapRef.current) {
+        const hits = map.queryRenderedFeatures(e.point, { layers: ['range-targets-fill'] });
+        const tid = hits[0]?.properties?.tid;
+        if (tid) {
+          targetTapRef.current(String(tid));
+          return;
+        }
+      }
       tapRef.current({ lat: e.lngLat.lat, lng: e.lngLat.lng });
     });
 
@@ -185,9 +226,58 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, bottomBar, 
         paint: { 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1 }
       });
 
+      // Saved targets (fill + outline + labels), data-driven by `sel`.
+      map.addSource('range-targets', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({
+        id: 'range-targets-fill',
+        type: 'fill',
+        source: 'range-targets',
+        paint: {
+          'fill-color': ['case', ['==', ['get', 'sel'], 1], TARGET_COLOR, ARC_COLOR],
+          'fill-opacity': ['case', ['==', ['get', 'sel'], 1], 0.35, 0.18]
+        }
+      });
+      map.addLayer({
+        id: 'range-targets-line',
+        type: 'line',
+        source: 'range-targets',
+        paint: {
+          'line-color': ['case', ['==', ['get', 'sel'], 1], TARGET_COLOR, ARC_COLOR],
+          'line-width': ['case', ['==', ['get', 'sel'], 1], 2.5, 1.5]
+        }
+      });
+      map.addLayer({
+        id: 'range-targets-label',
+        type: 'symbol',
+        source: 'range-targets',
+        layout: {
+          'text-field': ['get', 'label'],
+          'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+          'text-size': 12
+        },
+        paint: { 'text-color': '#fff', 'text-halo-color': '#000', 'text-halo-width': 1.2 }
+      });
+
+      // In-progress draft shape.
+      map.addSource('range-draft', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+      map.addLayer({
+        id: 'range-draft-fill',
+        type: 'fill',
+        source: 'range-draft',
+        paint: { 'fill-color': TARGET_COLOR, 'fill-opacity': 0.25 }
+      });
+      map.addLayer({
+        id: 'range-draft-line',
+        type: 'line',
+        source: 'range-draft',
+        paint: { 'line-color': TARGET_COLOR, 'line-width': 2 }
+      });
+
       syncTargetLine();
       syncArcs();
       syncShots();
+      syncTargets();
+      syncDraft();
       frameRef.current(false);
     });
 
@@ -310,6 +400,40 @@ export function RangeMap({ origin, target, bearing, shots, showArcs, bottomBar, 
     });
   }
   useEffect(syncShots, [shots]);
+
+  // --- targets ------------------------------------------------------------
+  function syncTargets() {
+    const map = mapRef.current;
+    if (!map || !readyRef.current) return;
+    const src = map.getSource('range-targets') as mapboxgl.GeoJSONSource | undefined;
+    src?.setData({
+      type: 'FeatureCollection',
+      features: (targets ?? []).map((t) => ({
+        type: 'Feature',
+        properties: { tid: t.id, sel: t.selected ? 1 : 0, label: t.label ?? '' },
+        geometry: { type: 'Polygon', coordinates: [t.ring] }
+      }))
+    });
+  }
+  useEffect(syncTargets, [targets]);
+
+  // --- draft (in-progress drawing) ----------------------------------------
+  function syncDraft() {
+    const map = mapRef.current;
+    if (!map || !readyRef.current) return;
+    const src = map.getSource('range-draft') as mapboxgl.GeoJSONSource | undefined;
+    if (!draftRing || draftRing.length < 2) {
+      src?.setData({ type: 'FeatureCollection', features: [] });
+      return;
+    }
+    // >=3 points → polygon (fills); 2 points → line only.
+    const geometry: GeoJSON.Geometry =
+      draftRing.length >= 3
+        ? { type: 'Polygon', coordinates: [draftRing] }
+        : { type: 'LineString', coordinates: draftRing };
+    src?.setData({ type: 'Feature', properties: {}, geometry });
+  }
+  useEffect(syncDraft, [draftRing]);
 
   if (!hasMapbox()) {
     return (

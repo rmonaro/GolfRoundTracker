@@ -253,6 +253,9 @@ export interface SwingSessionRow {
   hrv_sdnn: number | null;
   active_calories: number | null;
   duration_seconds: number | null;
+  /** Origin of the session: 'practice' (Swing/Net) or 'range' (GPS range mode).
+   *  Range-originated sessions are hidden from the Swing/Net history. */
+  source: string;
 }
 
 export interface SwingMetricRow {
@@ -338,6 +341,21 @@ export interface RangeShotRow {
   created_at: string;
 }
 
+export interface RangeTargetRow {
+  id: string;
+  user_id: string;
+  label: string | null;
+  kind: string; // 'circle' | 'polygon'
+  anchor_lat: number;
+  anchor_lng: number;
+  center_lat: number | null;
+  center_lng: number | null;
+  radius_m: number | null;
+  /** Polygon ring as [lng, lat] pairs. */
+  points: Array<[number, number]> | null;
+  created_at: string;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -353,6 +371,7 @@ export interface Database {
       swing_feedback: { Row: SwingFeedbackRow; Insert: Omit<SwingFeedbackRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<SwingFeedbackRow> };
       range_sessions: { Row: RangeSessionRow; Insert: Omit<RangeSessionRow, 'id' | 'created_at' | 'started_at' | 'ended_at'> & { id?: string; created_at?: string; started_at?: string; ended_at?: string | null }; Update: Partial<RangeSessionRow> };
       range_shots: { Row: RangeShotRow; Insert: Omit<RangeShotRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<RangeShotRow> };
+      range_targets: { Row: RangeTargetRow; Insert: Omit<RangeTargetRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<RangeTargetRow> };
     };
   };
 }

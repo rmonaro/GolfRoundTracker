@@ -1,7 +1,13 @@
 import { supabase } from '@/lib/supabase';
-import type { RangeSessionRow, RangeShotRow } from '@/types/database';
-import type { LatLng, RangeSession, RangeShot } from '@/types/range';
-import { computeBearing, computeShot, mToYards } from '@/features/range/rangeGeo';
+import type { RangeSessionRow, RangeShotRow, RangeTargetRow } from '@/types/database';
+import type { LatLng, RangeSession, RangeShot, RangeTarget } from '@/types/range';
+import {
+  computeBearing,
+  computeShot,
+  haversineMeters,
+  mToYards,
+  polygonCentroid
+} from '@/features/range/rangeGeo';
 import { toAppError } from './errors';
 
 // --- row <-> domain mapping ------------------------------------------------
@@ -32,6 +38,25 @@ function mapShot(r: RangeShotRow): RangeShot {
     totalYards: mToYards(r.total_m),
     createdAt: r.created_at
   };
+}
+
+function mapTarget(r: RangeTargetRow): RangeTarget {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    label: r.label,
+    kind: r.kind === 'polygon' ? 'polygon' : 'circle',
+    anchor: { lat: r.anchor_lat, lng: r.anchor_lng },
+    center: r.center_lat != null && r.center_lng != null ? { lat: r.center_lat, lng: r.center_lng } : null,
+    radiusM: r.radius_m,
+    points: r.points ? r.points.map(([lng, lat]) => ({ lat, lng })) : null
+  };
+}
+
+/** The aim point for a target: circle center, or polygon centroid. */
+export function targetCenter(t: RangeTarget): LatLng {
+  if (t.kind === 'polygon' && t.points && t.points.length) return polygonCentroid(t.points);
+  return t.center ?? t.anchor;
 }
 
 export const rangeRepo = {
@@ -134,6 +159,49 @@ export const rangeRepo = {
   async deleteSession(sessionId: string): Promise<void> {
     const { error } = await supabase.from('range_sessions').delete().eq('id', sessionId);
     if (error) throw toAppError(error, 'Could not delete range session');
+  },
+
+  /** Save a drawn target, anchored to the mat origin for later reuse. */
+  async createTarget(
+    userId: string,
+    anchor: LatLng,
+    input: { label?: string | null; kind: 'circle' | 'polygon'; center?: LatLng | null; radiusM?: number | null; points?: LatLng[] | null }
+  ): Promise<RangeTarget> {
+    const { data, error } = await supabase
+      .from('range_targets')
+      .insert({
+        user_id: userId,
+        label: input.label ?? null,
+        kind: input.kind,
+        anchor_lat: anchor.lat,
+        anchor_lng: anchor.lng,
+        center_lat: input.center?.lat ?? null,
+        center_lng: input.center?.lng ?? null,
+        radius_m: input.radiusM ?? null,
+        points: input.points ? input.points.map((p) => [p.lng, p.lat]) : null
+      })
+      .select('*')
+      .single();
+    if (error) throw toAppError(error, 'Could not save target');
+    return mapTarget(data as RangeTargetRow);
+  },
+
+  /** Targets the user drew within `maxMeters` of `origin` (same range). */
+  async listTargetsNear(userId: string, origin: LatLng, maxMeters = 200): Promise<RangeTarget[]> {
+    const { data, error } = await supabase
+      .from('range_targets')
+      .select('*')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: true });
+    if (error) throw toAppError(error, 'Could not load targets');
+    return (data ?? [])
+      .map((r) => mapTarget(r as RangeTargetRow))
+      .filter((t) => haversineMeters(t.anchor, origin) <= maxMeters);
+  },
+
+  async deleteTarget(targetId: string): Promise<void> {
+    const { error } = await supabase.from('range_targets').delete().eq('id', targetId);
+    if (error) throw toAppError(error, 'Could not delete target');
   },
 
   async getSession(sessionId: string): Promise<RangeSession | null> {

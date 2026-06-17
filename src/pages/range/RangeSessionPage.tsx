@@ -21,12 +21,16 @@ import LocationOnRoundedIcon from '@mui/icons-material/LocationOnRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import { useNavigate } from 'react-router-dom';
+import { Capacitor } from '@capacitor/core';
 import { useAuthStore } from '@/stores/authStore';
 import { useBagStore } from '@/stores/bagStore';
+import { useSwingSessionStore } from '@/stores/swingSessionStore';
 import { ClubPicker, type ClubTier1 } from '@/features/round/AddShotSheet';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { ensureGpsPermission, getCurrentPosition } from '@/services/gpsService';
 import { rangeRepo } from '@/services/rangeRepo';
+import { practiceController } from '@/features/practice/practiceController';
+import { watchBridge } from '@/services/watchBridge';
 import {
   onSwing,
   offSwing,
@@ -34,10 +38,18 @@ import {
   __devEmitSwing,
   type SwingEvent
 } from '@/services/rangeSwingBridge';
-import { RangeMap, type ShotMarker } from '@/features/range/RangeMap';
+import { targetCenter } from '@/services/rangeRepo';
+import { RangeMap, type ShotMarker, type TargetShape } from '@/features/range/RangeMap';
 import { shotChipLabel } from '@/features/range/rangeStats';
-import { destinationPoint, yardsToM } from '@/features/range/rangeGeo';
-import type { LatLng, RangeSession, RangeShot } from '@/types/range';
+import {
+  circleRing,
+  computeBearing,
+  destinationPoint,
+  haversineMeters,
+  pointInPolygon,
+  yardsToM
+} from '@/features/range/rangeGeo';
+import type { LatLng, RangeSession, RangeShot, RangeTarget } from '@/types/range';
 
 type Phase = 'locating' | 'denied' | 'logging';
 
@@ -58,6 +70,7 @@ export function RangeSessionPage() {
   const navigate = useNavigate();
   const userId = useAuthStore((s) => s.session?.user.id ?? null);
   const bag = useBagStore((s) => s.clubs);
+  const swings = useSwingSessionStore((s) => s.swings);
 
   const [phase, setPhase] = useState<Phase>('locating');
   const [origin, setOrigin] = useState<LatLng | null>(null);
@@ -71,6 +84,17 @@ export function RangeSessionPage() {
   const [error, setError] = useState<string | null>(null);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
   const [shotsTab, setShotsTab] = useState<string | null>(null);
+
+  // Aim targets (greens/spots drawn on the range).
+  const [targets, setTargets] = useState<RangeTarget[]>([]);
+  const [selectedTargetId, setSelectedTargetId] = useState<string | null>(null);
+  const [targetsDrawerOpen, setTargetsDrawerOpen] = useState(false);
+  const [drawMode, setDrawMode] = useState<'none' | 'circle' | 'polygon'>('none');
+  const [draftCenter, setDraftCenter] = useState<LatLng | null>(null);
+  const [draftRadiusYd, setDraftRadiusYd] = useState(12);
+  const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
+
+  const aimTarget = selectedTargetId ? targets.find((t) => t.id === selectedTargetId) ?? null : null;
 
   // When a swing event arrives (deferred bridge), it drives the next tap:
   // pre-fill club + swing_event_id. In v1 the stub never fires, so the manual
@@ -90,6 +114,19 @@ export function RangeSessionPage() {
   const selectedClubObj = selectedClubId
     ? bag.find((c) => c.clubId === selectedClubId) ?? null
     : null;
+
+  // Live watch-swing stats for the right-side HUD (same as Swing/Net).
+  const tempos = swings
+    .map((s) => s.tempoRatio)
+    .filter((v): v is number => typeof v === 'number' && !Number.isNaN(v));
+  const avgTempo = tempos.length ? tempos.reduce((a, b) => a + b, 0) / tempos.length : null;
+  let consistency: number | null = null;
+  if (tempos.length >= 2) {
+    const mean = tempos.reduce((a, b) => a + b, 0) / tempos.length;
+    const variance = tempos.reduce((a, b) => a + (b - mean) ** 2, 0) / tempos.length;
+    const cv = mean ? Math.sqrt(variance) / mean : 0;
+    consistency = Math.max(0, Math.min(100, Math.round(100 * (1 - cv * 3))));
+  }
 
   // --- Phase A: capture origin once (or restore an open session) ----------
   // The aim line is auto-set straight up the range, so the user logs shots
@@ -144,19 +181,113 @@ export function RangeSessionPage() {
     return () => offSwing();
   }, []);
 
+  // Load saved targets near this mat (reuse across sessions at the same range).
+  useEffect(() => {
+    if (!origin || !userId) return;
+    let cancelled = false;
+    rangeRepo
+      .listTargetsNear(userId, origin)
+      .then((t) => {
+        if (!cancelled) setTargets(t);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [origin?.lat, origin?.lng, userId]);
+
+  const cancelDraw = useCallback(() => {
+    setDrawMode('none');
+    setDraftCenter(null);
+    setDraftPoints([]);
+  }, []);
+
+  const saveTarget = useCallback(async () => {
+    if (!origin || !userId) return;
+    try {
+      let created: RangeTarget | null = null;
+      if (drawMode === 'circle' && draftCenter) {
+        created = await rangeRepo.createTarget(userId, origin, {
+          kind: 'circle',
+          center: draftCenter,
+          radiusM: yardsToM(draftRadiusYd)
+        });
+      } else if (drawMode === 'polygon' && draftPoints.length >= 3) {
+        created = await rangeRepo.createTarget(userId, origin, { kind: 'polygon', points: draftPoints });
+      }
+      if (created) {
+        setTargets((prev) => [...prev, created as RangeTarget]);
+        setSelectedTargetId(created.id);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save target');
+    } finally {
+      cancelDraw();
+    }
+  }, [origin, userId, drawMode, draftCenter, draftRadiusYd, draftPoints, cancelDraw]);
+
+  const removeTarget = useCallback(
+    async (id: string) => {
+      try {
+        await rangeRepo.deleteTarget(id);
+        setTargets((prev) => prev.filter((t) => t.id !== id));
+        setSelectedTargetId((cur) => (cur === id ? null : cur));
+      } catch (err) {
+        setError(err instanceof Error ? err.message : 'Could not delete target');
+      }
+    },
+    []
+  );
+
+  // --- Watch practice: track tempo/consistency during the range session ----
+  // Started tagged source='range' so it stays out of the Swing/Net history.
+  // Swings flow in via the root usePracticeWatchSync. Native-only.
+  const watchStartedRef = useRef(false);
+  useEffect(() => {
+    if (phase !== 'logging' || watchStartedRef.current) return;
+    if (!Capacitor.isNativePlatform()) return;
+    watchStartedRef.current = true;
+    void (async () => {
+      // Only track via the watch when its companion app is actually installed —
+      // otherwise WCSession can't deliver the startPractice command and we'd
+      // create an empty session that never receives swings.
+      const status = await watchBridge.activate();
+      const installed = 'isWatchAppInstalled' in status && Boolean(status.isWatchAppInstalled);
+      if (!installed) return;
+      // Open the phone session first so it exists when the watch connects back,
+      // then launch the watch straight into practice mode.
+      void practiceController.start(selectedClubId, 'range');
+      void watchBridge.launchWatch(true);
+    })();
+  }, [phase, selectedClubId]);
+
+  // Keep the watch session's club in sync with the range club selector.
+  useEffect(() => {
+    if (phase === 'logging') practiceController.setClub(selectedClubId);
+  }, [selectedClubId, phase]);
+
   // --- taps ---------------------------------------------------------------
   const handleTap = useCallback(
     async (p: LatLng) => {
+      // Drawing modes consume taps as geometry, not shots.
+      if (drawMode === 'circle') {
+        setDraftCenter(p);
+        return;
+      }
+      if (drawMode === 'polygon') {
+        setDraftPoints((prev) => [...prev, p]);
+        return;
+      }
       if (busy || phase !== 'logging' || !origin || !userId) return;
       setBusy(true);
       setError(null);
       try {
-        // Lazily open the session on the first shot, aiming straight up the
-        // range (north). Avoids empty sessions if the user never logs a shot.
+        // Lazily open the session on the first shot. Aim at the selected target
+        // if there is one, else straight up the range (north).
         let activeSession = session;
         if (!activeSession) {
-          const target = destinationPoint(origin, 0, yardsToM(250));
-          activeSession = await rangeRepo.createSession(userId, origin, target);
+          const aim = aimTarget ? targetCenter(aimTarget) : destinationPoint(origin, 0, yardsToM(250));
+          activeSession = await rangeRepo.createSession(userId, origin, aim);
           setSession(activeSession);
         }
         // A pending swing event (from the watch bridge) wins over the manual
@@ -176,7 +307,7 @@ export function RangeSessionPage() {
         setBusy(false);
       }
     },
-    [busy, phase, origin, userId, session, selectedClubId, clubLabel]
+    [drawMode, busy, phase, origin, userId, session, aimTarget, selectedClubId, clubLabel]
   );
 
   // End the range session (idempotent) and go to the summary.
@@ -190,6 +321,15 @@ export function RangeSessionPage() {
     endingRef.current = true;
     setBusy(true);
     try {
+      // Finalize the watch session too (stop the watch + persist rollups).
+      void watchBridge.endWatchPractice();
+      if (useSwingSessionStore.getState().session) {
+        try {
+          await practiceController.end();
+        } catch (err) {
+          console.warn('[range] ending watch practice failed', err);
+        }
+      }
       await rangeRepo.endSession(session.id);
       navigate(`/range/summary/${session.id}`);
     } catch (err) {
@@ -283,19 +423,55 @@ export function RangeSessionPage() {
   }
 
   // --- Phase B/C: map + overlays ------------------------------------------
-  const instruction = pendingSwing
-    ? 'Swing detected — tap where the ball landed.'
-    : 'Tap where the ball landed.';
+  const instruction =
+    drawMode === 'circle'
+      ? draftCenter
+        ? 'Adjust the radius, then save.'
+        : 'Tap the center of the green.'
+      : drawMode === 'polygon'
+        ? 'Tap around the green, then finish.'
+        : pendingSwing
+          ? 'Swing detected — tap where the ball landed.'
+          : 'Tap where the ball landed.';
+
+  // Aim point/bearing: the selected target (or the active session's line).
+  const aimPoint = session ? session.target : aimTarget ? targetCenter(aimTarget) : null;
+  const aimBearing = session
+    ? session.targetBearing
+    : aimPoint
+      ? computeBearing(origin, aimPoint)
+      : 0;
+
+  const targetShapes: TargetShape[] = targets.map((t) => ({
+    id: t.id,
+    ring:
+      t.kind === 'circle' && t.center
+        ? circleRing(t.center, t.radiusM ?? yardsToM(12))
+        : (t.points ?? []).map((p) => [p.lng, p.lat] as [number, number]),
+    label: t.label,
+    selected: t.id === selectedTargetId
+  }));
+
+  const draftRing: [number, number][] | null =
+    drawMode === 'circle' && draftCenter
+      ? circleRing(draftCenter, yardsToM(draftRadiusYd))
+      : drawMode === 'polygon' && draftPoints.length
+        ? draftPoints.map((p) => [p.lng, p.lat] as [number, number])
+        : null;
 
   return (
     <Box sx={{ position: 'fixed', inset: 0, overflow: 'hidden' }}>
       <RangeMap
         origin={origin}
-        target={session ? session.target : null}
-        bearing={session ? session.targetBearing : 0}
+        target={aimPoint}
+        bearing={aimBearing}
         shots={shotMarkers}
         showArcs
-        bottomBar={phase === 'logging'}
+        bottomBar={phase === 'logging' && drawMode === 'none'}
+        targets={targetShapes}
+        draftRing={draftRing}
+        drawing={drawMode !== 'none'}
+        onTargetTap={(id) => setSelectedTargetId(id)}
         onMapTap={handleTap}
       />
 
@@ -325,19 +501,31 @@ export function RangeSessionPage() {
             {instruction}
           </Typography>
         </Box>
+        {drawMode === 'none' && (
+          <Button
+            size="small"
+            variant="contained"
+            color="inherit"
+            onClick={() => setTargetsDrawerOpen(true)}
+            sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff' }}
+          >
+            Targets
+          </Button>
+        )}
         <Button
           size="small"
           variant="contained"
           color="inherit"
           disabled={busy}
-          onClick={onEnd}
+          onClick={drawMode === 'none' ? onEnd : cancelDraw}
           sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff' }}
         >
-          End
+          {drawMode === 'none' ? 'End' : 'Cancel'}
         </Button>
       </Box>
 
       {/* Club selection — always present from load, just the circle. */}
+      {drawMode === 'none' && (
       <Button
         onClick={() => setClubPickerOpen(true)}
         sx={{
@@ -366,6 +554,65 @@ export function RangeSessionPage() {
           ? abbreviateClubName(selectedClubObj.customName || selectedClubObj.name, selectedClubObj.category)
           : '+'}
       </Button>
+      )}
+
+      {/* Draft control panel while drawing a target. */}
+      {drawMode !== 'none' && (
+        <Box
+          sx={{
+            position: 'absolute',
+            left: 8,
+            right: 8,
+            bottom: 'calc(env(safe-area-inset-bottom) + 8px)',
+            zIndex: 5,
+            bgcolor: 'background.paper',
+            borderRadius: '5px',
+            p: 1.5,
+            boxShadow: 6
+          }}
+        >
+          {drawMode === 'circle' ? (
+            <Stack direction="row" alignItems="center" spacing={1}>
+              <Typography variant="body2" sx={{ flex: 1 }} fontWeight={700}>
+                Radius
+              </Typography>
+              <IconButton size="small" onClick={() => setDraftRadiusYd((r) => Math.max(3, r - 1))}>
+                <Typography fontWeight={800}>−</Typography>
+              </IconButton>
+              <Typography fontWeight={800} sx={{ minWidth: 48, textAlign: 'center' }}>
+                {draftRadiusYd}y
+              </Typography>
+              <IconButton size="small" onClick={() => setDraftRadiusYd((r) => Math.min(80, r + 1))}>
+                <Typography fontWeight={800}>+</Typography>
+              </IconButton>
+              <Button
+                variant="contained"
+                disabled={!draftCenter}
+                onClick={saveTarget}
+                sx={{ ml: 1 }}
+              >
+                Save
+              </Button>
+            </Stack>
+          ) : (
+            <Stack direction="row" alignItems="center" spacing={1}>
+              <Typography variant="body2" sx={{ flex: 1 }} fontWeight={700}>
+                {draftPoints.length} point{draftPoints.length === 1 ? '' : 's'}
+              </Typography>
+              <Button
+                size="small"
+                disabled={!draftPoints.length}
+                onClick={() => setDraftPoints((p) => p.slice(0, -1))}
+              >
+                Undo
+              </Button>
+              <Button variant="contained" disabled={draftPoints.length < 3} onClick={saveTarget}>
+                Finish
+              </Button>
+            </Stack>
+          )}
+        </Box>
+      )}
 
       {/* Right-side live stats — each its own card. */}
       {phase === 'logging' && (
@@ -397,11 +644,27 @@ export function RangeSessionPage() {
               Yards
             </Typography>
           </Box>
+          <Box sx={hudCardSx}>
+            <Typography sx={{ fontWeight: 800, fontSize: '1.25rem', lineHeight: 1 }}>
+              {avgTempo != null ? `${avgTempo.toFixed(1)}:1` : '—'}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Avg Tempo
+            </Typography>
+          </Box>
+          <Box sx={hudCardSx}>
+            <Typography sx={{ fontWeight: 800, fontSize: '1.25rem', lineHeight: 1 }}>
+              {consistency != null ? consistency : '—'}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              Consistency
+            </Typography>
+          </Box>
         </Box>
       )}
 
       {/* Single running summary card for the current club — tap to manage shots. */}
-      {phase === 'logging' && clubSummary && (
+      {phase === 'logging' && drawMode === 'none' && clubSummary && (
         <Card
           elevation={0}
           sx={{
@@ -604,6 +867,114 @@ export function RangeSessionPage() {
                 })}
               </Stack>
             </>
+          )}
+        </Box>
+      </Drawer>
+
+      {/* Targets — pick one to aim at, draw new ones, or delete. */}
+      <Drawer
+        anchor="bottom"
+        open={targetsDrawerOpen}
+        onClose={() => setTargetsDrawerOpen(false)}
+        PaperProps={{
+          sx: {
+            borderTopLeftRadius: 16,
+            borderTopRightRadius: 16,
+            maxHeight: '70dvh',
+            bgcolor: 'background.default'
+          }
+        }}
+      >
+        <Box sx={{ p: 2, pb: 'calc(16px + env(safe-area-inset-bottom))' }}>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" sx={{ mb: 1.5 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+              Targets
+            </Typography>
+            <IconButton size="small" onClick={() => setTargetsDrawerOpen(false)}>
+              <CloseRoundedIcon />
+            </IconButton>
+          </Stack>
+
+          <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+            <Button
+              fullWidth
+              variant="outlined"
+              onClick={() => {
+                cancelDraw();
+                setDrawMode('circle');
+                setTargetsDrawerOpen(false);
+              }}
+            >
+              Draw circle
+            </Button>
+            <Button
+              fullWidth
+              variant="outlined"
+              onClick={() => {
+                cancelDraw();
+                setDrawMode('polygon');
+                setTargetsDrawerOpen(false);
+              }}
+            >
+              Draw shape
+            </Button>
+          </Stack>
+
+          {targets.length === 0 ? (
+            <Typography variant="body2" color="text.secondary">
+              No targets yet — draw a circle or shape around a green.
+            </Typography>
+          ) : (
+            <Stack spacing={1}>
+              {targets.map((t, i) => {
+                const c = targetCenter(t);
+                const hits = shots.filter((s) =>
+                  t.kind === 'circle' && t.center
+                    ? haversineMeters(t.center, s.land) <= (t.radiusM ?? 0)
+                    : t.points
+                      ? pointInPolygon(s.land, t.points)
+                      : false
+                ).length;
+                const closest = shots.length
+                  ? Math.round(Math.min(...shots.map((s) => haversineMeters(c, s.land))) / 0.9144)
+                  : null;
+                const name = t.label || `${t.kind === 'circle' ? 'Circle' : 'Shape'} ${i + 1}`;
+                return (
+                  <Card
+                    key={t.id}
+                    variant={t.id === selectedTargetId ? 'elevation' : 'outlined'}
+                    sx={{ borderRadius: '5px', bgcolor: t.id === selectedTargetId ? 'action.selected' : undefined }}
+                  >
+                    <Stack direction="row" alignItems="center">
+                      <CardActionArea
+                        onClick={() => {
+                          setSelectedTargetId(t.id);
+                          setTargetsDrawerOpen(false);
+                        }}
+                      >
+                        <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+                          <Typography fontWeight={700} noWrap>
+                            {name}
+                            {t.id === selectedTargetId ? ' · aiming' : ''}
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {hits} hit{hits === 1 ? '' : 's'}
+                            {closest != null ? ` · closest ${closest}y` : ''}
+                          </Typography>
+                        </CardContent>
+                      </CardActionArea>
+                      <IconButton
+                        aria-label="Delete target"
+                        onClick={() => removeTarget(t.id)}
+                        sx={{ color: 'text.secondary', mr: 0.5 }}
+                      >
+                        <DeleteOutlineRoundedIcon />
+                      </IconButton>
+                    </Stack>
+                  </Card>
+                );
+              })}
+            </Stack>
           )}
         </Box>
       </Drawer>

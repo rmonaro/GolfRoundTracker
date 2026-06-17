@@ -39,7 +39,7 @@ let creating: Promise<string | null> | null = null;
  * dropped — whoever arrives first (a `practiceStarted` message or the first
  * `swingDetected`) lazily opens the session.
  */
-async function ensureSession(clubId: string | null): Promise<string | null> {
+async function ensureSession(clubId: string | null, source?: string): Promise<string | null> {
   const existing = store.getState().session;
   if (existing) return existing.sessionId;
   if (creating) return creating;
@@ -48,7 +48,7 @@ async function ensureSession(clubId: string | null): Promise<string | null> {
   if (!userId) return null;
 
   creating = swingRepo
-    .createSession({ userId, primaryClubId: clubId })
+    .createSession({ userId, primaryClubId: clubId, source })
     .then((remote) => {
       // Guard against a concurrent caller having already opened one.
       if (!store.getState().session) {
@@ -72,9 +72,10 @@ async function ensureSession(clubId: string | null): Promise<string | null> {
 }
 
 export const practiceController = {
-  /** Start a practice session (phone-initiated). Reuses one if already open. */
-  async start(clubId: string | null): Promise<string | null> {
-    return ensureSession(clubId);
+  /** Start a practice session (phone-initiated). Reuses one if already open.
+   *  `source` tags the origin ('range' hides it from the Swing/Net history). */
+  async start(clubId: string | null, source?: string): Promise<string | null> {
+    return ensureSession(clubId, source);
   },
 
   /** Watch started practice: open/correlate the phone session. */

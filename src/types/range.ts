@@ -10,6 +10,21 @@ export interface LatLng {
   lng: number;
 }
 
+/** A user-drawn aim target on the range (a green or spot). */
+export interface RangeTarget {
+  id: string;
+  userId: string;
+  label: string | null;
+  kind: 'circle' | 'polygon';
+  /** Mat origin where this target was drawn (used to reload it at the range). */
+  anchor: LatLng;
+  /** Circle geometry. */
+  center: LatLng | null;
+  radiusM: number | null;
+  /** Polygon ring (freeform shape). */
+  points: LatLng[] | null;
+}
+
 /** One practice session at a mat: a fixed origin + a tapped target line. */
 export interface RangeSession {
   id: string;
