@@ -284,6 +284,35 @@ alter table public.shots add column if not exists penalty_type text
 create index if not exists shots_round_hole_idx on public.shots(round_id, hole_id, shot_number);
 
 -- ---------------------------------------------------------------------------
+-- TournamentManagement (TM) integration (migration 021)
+-- ---------------------------------------------------------------------------
+-- TM linkage stamped on a round when it's started from "My Tournaments". The
+-- round's own id is what we send to TM as round_tracking_round_id.
+alter table public.rounds add column if not exists tm_registration_id uuid;
+alter table public.rounds add column if not exists tm_round_number integer;
+alter table public.rounds add column if not exists tm_tournament_slug text;
+create index if not exists rounds_tm_registration_idx
+  on public.rounds(tm_registration_id);
+
+-- One row per (user, TM registration). Written by the tm-integration edge fn.
+create table if not exists public.tm_links (
+  id uuid primary key default uuid_generate_v4(),
+  user_id uuid not null references public.profiles(id) on delete cascade,
+  registration_id uuid not null,
+  tournament_id uuid,
+  tournament_slug text,
+  tournament_name text,
+  registration_status text,
+  external_course_id text,
+  division_name text,
+  snapshot jsonb,
+  linked_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, registration_id)
+);
+create index if not exists tm_links_user_idx on public.tm_links(user_id);
+
+-- ---------------------------------------------------------------------------
 -- Row Level Security
 -- ---------------------------------------------------------------------------
 alter table public.profiles enable row level security;
@@ -295,6 +324,7 @@ alter table public.round_holes enable row level security;
 alter table public.shots enable row level security;
 alter table public.holes enable row level security;
 alter table public.hole_features enable row level security;
+alter table public.tm_links enable row level security;
 
 -- is_admin helper (migration 007) — used by RLS policies + edge functions.
 create or replace function public.is_admin(uid uuid)
@@ -410,4 +440,9 @@ do $$ begin
   drop policy if exists "courses_api_read" on public.courses;
   create policy "courses_api_read" on public.courses
     for select using (source = 'api');
+
+  -- TM links — owner-scoped (migration 021).
+  drop policy if exists "tm_links_owner_rw" on public.tm_links;
+  create policy "tm_links_owner_rw" on public.tm_links
+    for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 end $$;

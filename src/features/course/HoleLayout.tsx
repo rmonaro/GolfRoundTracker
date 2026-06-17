@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { Box, Typography } from '@mui/material';
 import type { HoleLayoutData } from '@/services/holesRepo';
 import type { BagClub, CourseHole, HoleFeature, Lie, LngLat, TargetResult, TargetType } from '@/models';
@@ -16,6 +16,20 @@ interface HoleLayoutProps {
   layout: HoleLayoutData;
   compact?: boolean;
   className?: string;
+  /**
+   * Allow the user to pan + pinch-zoom the map (rotation stays locked so the
+   * tee→green orientation is preserved). Mapbox-only. Default false keeps the
+   * legacy locked framing for read-only previews. Pair with `recenterRef` to
+   * drive a "recenter to overview" button from the parent.
+   */
+  interactive?: boolean;
+  /**
+   * When provided, HoleLayout assigns a "recenter on the hole overview"
+   * function to `recenterRef.current` (cleared on unmount). The parent renders
+   * its own button and calls it, so the control can be positioned alongside the
+   * page's other map overlays.
+   */
+  recenterRef?: MutableRefObject<(() => void) | null>;
   /**
    * Aim picker mode. When true, walkback distance-to-pin markers are hidden
    * and replaced with a draggable handle. A straight amber "aim line" runs
@@ -85,6 +99,15 @@ interface HoleLayoutProps {
    * caller before passing here.
    */
   shotEndPoints?: Array<[number, number]>;
+  /**
+   * Per-shot label data, aligned by index with `shotEndPoints`. Each entry
+   * renders a segmented info box to the left of its numbered dot:
+   *   [ shot # | club | distance ]
+   * `club` / `distance` segments are omitted when null; `distance` is a
+   * preformatted string (e.g. "158y", "18ft"). Optional — when absent the dots
+   * render bare (just the number).
+   */
+  shotLabels?: Array<{ club: string | null; distance: string | null }>;
   /**
    * Suppress the aim UI (handle, line, distance label) WITHOUT falling back
    * to the walkback markers. Used while the player has a pending landing
@@ -285,7 +308,7 @@ function pointInPolygon(point: [number, number], polygon: [number, number][]): b
 }
 
 /** Compass bearing (degrees CW from north) from tee to green. Null if either is missing. */
-function teeToGreenBearing(hole: CourseHole): number | null {
+export function teeToGreenBearing(hole: CourseHole): number | null {
   if (
     hole.tee_lng == null ||
     hole.tee_lat == null ||
@@ -632,14 +655,68 @@ function pointAlongFromEndProjected(
  *     If the tap is on the green polygon, we treat it as 'hit' regardless of
  *     position — the user can correct it in the shot sheet.
  */
-function classifyTap(
+/**
+ * Which side of the line of play a point is on, judged against a tee→green
+ * polyline (the centerline). Projects the point onto its NEAREST segment and
+ * takes the 2D cross product of that segment's direction with the point offset,
+ * so the answer follows the fairway through doglegs instead of a straight
+ * tee→green line. We need the centerline (not the straight line) because the
+ * green centroid is often offset from the fairway — referencing the straight
+ * line then reports the whole fairway as one side. `centerline` MUST already be
+ * oriented tee→green. Returns null when it's too short to define a direction.
+ */
+function crossTrackSide(
   tap: [number, number],
-  features: HoleFeature[],
-  bearing: number,
-  green: [number, number],
-  targetType: TargetType
-): { lie: Lie | null; targetResult: TargetResult | null } {
-  // Walk features by priority so the topmost polygon wins.
+  centerline: [number, number][]
+): 'left' | 'right' | null {
+  if (!Array.isArray(centerline) || centerline.length < 2) return null;
+  // cos-lat keeps the (east, north) frame Euclidean at golf scales.
+  const cosLat = Math.cos((tap[1] * Math.PI) / 180);
+  const px = tap[0] * cosLat;
+  const py = tap[1];
+  let bestDist = Infinity;
+  let bestCross = 0;
+  for (let i = 0; i < centerline.length - 1; i++) {
+    const ax = centerline[i][0] * cosLat;
+    const ay = centerline[i][1];
+    const bx = centerline[i + 1][0] * cosLat;
+    const by = centerline[i + 1][1];
+    const sx = bx - ax;
+    const sy = by - ay;
+    const segLen2 = sx * sx + sy * sy;
+    if (segLen2 === 0) continue;
+    const wx = px - ax;
+    const wy = py - ay;
+    // Clamp the projection to the segment so the nearest POINT is well-defined.
+    let t = (wx * sx + wy * sy) / segLen2;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    const dx = px - (ax + sx * t);
+    const dy = py - (ay + sy * t);
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      // z-component of segment × offset. Facing tee→green, >0 = the golfer's
+      // LEFT (CCW side), <0 = their right.
+      bestCross = sx * wy - sy * wx;
+    }
+  }
+  return bestCross > 0 ? 'left' : 'right';
+}
+
+/**
+ * Determine the lie at a point by ray-casting it against the mapped course
+ * feature polygons, walking them by priority so the topmost (green > bunker >
+ * hazard > fairway > tee > rough) wins. Returns null when nothing matched so
+ * callers can decide whether to default (taps default to 'rough'; GPS callers
+ * may prefer to leave it unset). Shared by `classifyTap` (map taps) and the
+ * GPS-based shot paths (auto-track, "Record Shot", watch auto-commit) so every
+ * recording route classifies the lie identically from the same geometry.
+ */
+export function classifyLie(
+  point: [number, number],
+  features: HoleFeature[]
+): Lie | null {
   const priority: Array<{ type: string; lie: Lie }> = [
     { type: 'green', lie: 'green' },
     { type: 'bunker', lie: 'bunker' },
@@ -650,25 +727,31 @@ function classifyTap(
     { type: 'rough', lie: 'rough' }
   ];
 
-  let matchedLie: Lie | null = null;
   for (const p of priority) {
     for (const f of features) {
       if (f.feature_type !== p.type || f.is_line) continue;
       // Polygon coords are LngLat[][] (outer ring first). Test outer ring only;
       // donut holes (e.g. a bunker carved into the fairway) are good enough for
-      // a tap classification — exact hazard nesting is rare in OSM data.
+      // a classification — exact hazard nesting is rare in OSM data.
       const rings = f.coords as [number, number][][];
       const outer = Array.isArray(rings[0]) ? rings[0] : null;
       if (!outer) continue;
-      if (pointInPolygon(tap, outer)) {
-        matchedLie = p.lie;
-        break;
-      }
+      if (pointInPolygon(point, outer)) return p.lie;
     }
-    if (matchedLie) break;
   }
+  return null;
+}
+
+export function classifyTap(
+  tap: [number, number],
+  features: HoleFeature[],
+  bearing: number,
+  green: [number, number],
+  targetType: TargetType,
+  centerline?: [number, number][] | null
+): { lie: Lie | null; targetResult: TargetResult | null } {
   // Default to rough when nothing matched — better than leaving lie null.
-  const lie: Lie = matchedLie ?? 'rough';
+  const lie: Lie = classifyLie(tap, features) ?? 'rough';
 
   // Direction relative to the green. Decompose (tap - green) onto the
   // tee→green unit vector (along) and its right-perpendicular (across).
@@ -685,22 +768,53 @@ function classifyTap(
   const along = dx * Math.sin(br) + dy * Math.cos(br);
   const across = dx * Math.cos(br) - dy * Math.sin(br);
 
-  // Any tap on the green counts as a 'hit', regardless of what the player
-  // was actually aiming at — landing on the green is the same outcome
-  // whether the intended target was the green or the fairway (e.g.
-  // driveable par 4 / mishit short par 5). Tee polygons report as
-  // lie='fairway', so a tee-shot tap on the tee box of a par-4/5 also
-  // counts as a fairway hit. Anything else → directional miss vs the pin.
+  // Side of the line of play, judged against the centerline (follows the
+  // fairway through doglegs) rather than the straight tee→green line — the
+  // green centroid is frequently offset from the fairway, which skews the
+  // straight-line `across` and made the whole fairway read as one side. Falls
+  // back to the straight-line `across` sign when no centerline is available.
+  const oriented =
+    centerline && centerline.length >= 2
+      ? orientCenterlineTeeToGreen(centerline, green)
+      : null;
+  const side: 'left' | 'right' =
+    (oriented ? crossTrackSide(tap, oriented) : null) ?? (across > 0 ? 'right' : 'left');
+
+  // Resolve the shot outcome vs the intended target:
+  //
+  //   • On the green → 'hit', regardless of intended target — landing on the
+  //     green is the same good outcome whether aiming at the green or the
+  //     fairway (driveable par 4 / mishit short par 5).
+  //   • Fairway target (tee / lay-up): on the fairway — or a tee box, which
+  //     reports lie='fairway' — is a 'hit'. A miss only cares which SIDE of the
+  //     fairway you ended up, not how far short → left / right (vs centerline).
+  //   • Green target (approach): report the DOMINANT miss axis vs the pin —
+  //     short / long along the line of play, or left / right across it.
   let targetResult: TargetResult | null;
   if (lie === 'green') {
     targetResult = 'hit';
-  } else if (targetType === 'fairway' && lie === 'fairway') {
-    targetResult = 'hit';
+  } else if (targetType === 'fairway') {
+    targetResult = lie === 'fairway' ? 'hit' : side;
   } else if (Math.abs(along) > Math.abs(across)) {
     targetResult = along > 0 ? 'long' : 'short';
   } else {
-    targetResult = across > 0 ? 'right' : 'left';
+    targetResult = side;
   }
+  // TEMP [dir-debug] — remove after diagnosing left/right sign. Click once
+  // clearly LEFT and once clearly RIGHT of the fairway and report both lines.
+  // eslint-disable-next-line no-console
+  console.log('[dir-debug]', {
+    bearing: Math.round(bearing),
+    green,
+    tap,
+    along: Math.round(along * 111000),
+    across: Math.round(across * 111000),
+    hasCenterline: !!oriented,
+    side,
+    targetType,
+    lie,
+    targetResult
+  });
   return { lie, targetResult };
 }
 
@@ -710,6 +824,8 @@ export function HoleLayout({
   layout,
   compact = false,
   className,
+  interactive = false,
+  recenterRef,
   aimMode = false,
   ballDistanceFromTeeM = 0,
   suggestedHandleDistanceM,
@@ -718,6 +834,7 @@ export function HoleLayout({
   onShotLanded,
   landingPoint = null,
   shotEndPoints = [],
+  shotLabels = [],
   hideAim = false,
   useTargetDot = false,
   pinOverride = null,
@@ -781,6 +898,10 @@ export function HoleLayout({
   // effect so the recap animation can hide them all, then reveal each in turn
   // as the growing line reaches it.
   const shotDotElsRef = useRef<HTMLDivElement[]>([]);
+  // DOM handles for the segmented info boxes (# / club / yards) that sit to the
+  // left of each dot — captured alongside the dots so the recap can hide them
+  // and fade each one in (after a beat) as its dot is revealed.
+  const shotBoxElsRef = useRef<(HTMLDivElement | null)[]>([]);
   // Ordered recap path `[tee, ...shotEndPoints, pin]` in [lng, lat]. Rebuilt
   // whenever the map effect re-runs so a replay always reflects current shots.
   const recapPathRef = useRef<Array<[number, number]>>([]);
@@ -824,17 +945,20 @@ export function HoleLayout({
         zoom: 16.5,
         bearing,
         pitch: 0,
-        // `interactive: true` so map.on('click') fires for tap-to-record. All
-        // individual gestures disabled so the framing stays locked — user
-        // can't accidentally pan/zoom out of the hole view.
+        // `interactive: true` so map.on('click') fires for tap-to-record. When
+        // `interactive` (the prop) is true we additionally enable pan + zoom
+        // gestures so the player can explore the hole; the recenter button
+        // restores the overview framing. Rotation/pitch stay off in both modes
+        // so the tee→green orientation is preserved. Read-only previews keep
+        // every gesture locked (the legacy behavior).
         interactive: true,
-        dragPan: false,
-        scrollZoom: false,
-        boxZoom: false,
+        dragPan: interactive,
+        scrollZoom: interactive,
+        boxZoom: interactive,
         dragRotate: false,
-        keyboard: false,
-        doubleClickZoom: false,
-        touchZoomRotate: false,
+        keyboard: interactive,
+        doubleClickZoom: interactive,
+        touchZoomRotate: interactive,
         touchPitch: false,
         attributionControl: false
       });
@@ -847,6 +971,13 @@ export function HoleLayout({
     // Expose the map to side-effects (landing-point marker, etc.) so they
     // can update overlays without forcing this whole effect to re-fire.
     mapRef.current = map;
+
+    // Two-finger gestures should pinch-zoom only — never rotate the carefully
+    // computed tee→green bearing. (touchZoomRotate is enabled above when
+    // interactive; strip just the rotation half.)
+    if (interactive) {
+      map.touchZoomRotate.disableRotation();
+    }
 
     map.on('error', (e) => {
       console.warn('[mapbox] runtime error', e);
@@ -1357,7 +1488,8 @@ export function HoleLayout({
             layout.features,
             bearing,
             effectivePin,
-            targetType
+            targetType,
+            layout.hole.centerline
           );
           cb({
             start: aimStartLL,
@@ -1402,6 +1534,11 @@ export function HoleLayout({
           didDrag = false;
           handleEl.setPointerCapture(e.pointerId);
           handleEl.style.cursor = 'grabbing';
+          // With pan/zoom enabled (interactive), Mapbox's own drag handler would
+          // otherwise grab this one-finger gesture and pan the map instead of
+          // moving the handle. Suspend map panning for the duration of the drag;
+          // re-enabled on pointer up/cancel below.
+          if (interactive) map.dragPan.disable();
           e.preventDefault();
           e.stopPropagation();
         };
@@ -1441,6 +1578,8 @@ export function HoleLayout({
           pointerStartPx = null;
           didDrag = false;
           handleEl.style.cursor = 'grab';
+          // Restore map panning now that the handle drag is over.
+          if (interactive) map.dragPan.enable();
           try {
             handleEl.releasePointerCapture(e.pointerId);
           } catch {
@@ -1458,7 +1597,8 @@ export function HoleLayout({
               layout.features,
               bearing,
               effectivePin,
-              targetType
+              targetType,
+              layout.hole.centerline
             );
             onShotLanded({
               start: aimStartLL,
@@ -1473,6 +1613,13 @@ export function HoleLayout({
         handleEl.addEventListener('pointermove', onPointerMove);
         handleEl.addEventListener('pointerup', onPointerEnd);
         handleEl.addEventListener('pointercancel', onPointerEnd);
+        // Belt-and-suspenders for touch devices: stop touchstart/touchmove from
+        // bubbling to Mapbox's gesture handlers on the canvas container, so the
+        // map never even begins to pan/zoom while the finger is on the handle.
+        // (Pointer events still fire on the handle and drive the actual drag.)
+        const swallowTouch = (e: TouchEvent) => e.stopPropagation();
+        handleEl.addEventListener('touchstart', swallowTouch, { passive: true });
+        handleEl.addEventListener('touchmove', swallowTouch, { passive: true });
         // Belt-and-suspenders: kill the synthetic click that follows a tap so
         // it can't bubble up and trigger Mapbox's `map.on('click')` (which
         // opens the shot sheet). Without this the handle can both move AND
@@ -1536,46 +1683,51 @@ export function HoleLayout({
         }
       }
 
-      // Asymmetric padding anchors the hole near the top of the map:
-      //   • bottom padding pushes the geometry upward (rangefinder framing)
-      //   • right padding clears the floating stats column
-      // Critically: Mapbox `fitBounds` RESETS bearing to the value in options
-      // (defaulting to 0) unless explicitly passed — we re-pass `bearing` so
-      // the tee→green direction stays pointing up after the camera moves.
-      // `maxZoom` allows tight framing on short holes (par 3s).
+      // Frame the hole overview once the canvas is ready (see applyOverview).
+      applyOverview(false);
+    };
+
+    // Frame the hole overview (tee→green + any recorded shots). Extracted so
+    // the recenter button can re-run it after the user pans/zooms away. Uses
+    // cameraForBounds (rather than fitBounds + setZoom) so the ~10% normal-mode
+    // pullback can be folded into a single animated/instant camera move.
+    const applyOverview = (animate: boolean) => {
+      const targetBounds = puttingMode ? puttingBounds : bounds;
+      // Putting mode: small symmetric padding centers the green and lets it
+      // fill the viewport. Normal mode keeps asymmetric padding so the hole
+      // anchors near the top (rangefinder framing) with the stats column clear
+      // on the right.
+      const padding = puttingMode
+        ? { top: 16, bottom: 16, left: 16, right: 16 }
+        : { top: 24, bottom: 70, left: 16, right: 90 };
+      // Putting maxZoom up to 23 (Mapbox cap is 24) so even a small green fills
+      // the screen; normal mode caps at 19.
+      const maxZoom = puttingMode ? 23 : 19;
       try {
-        map.fitBounds(puttingMode ? puttingBounds : bounds, {
-          // Putting mode: small symmetric padding centers the green both
-          // horizontally and vertically and lets it fill the viewport for a
-          // close-up read of the surface. Normal mode keeps asymmetric padding
-          // so the hole anchors near the top (rangefinder framing) with the
-          // stats column clear on the right.
-          padding: puttingMode
-            ? { top: 16, bottom: 16, left: 16, right: 16 }
-            : { top: 24, bottom: 70, left: 16, right: 90 },
-          // Bump putting maxZoom up to 23 (Mapbox cap is 24) so even a small
-          // green still fills the screen — the symmetric padding above gives
-          // fitBounds room to push the zoom higher.
-          maxZoom: puttingMode ? 23 : 19,
-          // Both modes use the tee→green compass bearing so the tee box stays
-          // anchored at the bottom of the screen and the green sits above it
-          // — consistent orientation whether you're standing on the tee or
-          // lining up a putt.
-          bearing,
-          animate: false
-        });
-        // Pull the camera back ~10% in normal mode so the hole sits inside the
-        // viewport with more breathing room. Mapbox zoom is logarithmic (each
-        // level doubles scale) so a 10% scale reduction is log2(1.1) ≈ 0.137
-        // zoom units. Putting mode keeps its tight green-only framing.
-        if (!puttingMode) {
-          map.setZoom(map.getZoom() - Math.log2(1.1));
+        // Both modes use the tee→green bearing so the tee anchors at the bottom
+        // and the green sits above it.
+        const cam = map.cameraForBounds(targetBounds, { padding, maxZoom, bearing });
+        if (!cam) return;
+        // Pull back ~10% in normal mode for breathing room. Mapbox zoom is
+        // logarithmic (each level doubles scale) so a 10% scale reduction is
+        // log2(1.1) ≈ 0.137 zoom units. Putting mode keeps its tight framing.
+        const zoom =
+          (cam.zoom ?? map.getZoom()) - (puttingMode ? 0 : Math.log2(1.1));
+        const camera = { center: cam.center, zoom, bearing };
+        if (animate) {
+          map.easeTo({ ...camera, duration: 500 });
+        } else {
+          map.jumpTo(camera);
         }
       } catch {
         // Degenerate bbox (e.g. all points identical) — ignore; the initial
         // center/zoom is already a sensible view.
       }
     };
+
+    // Publish the recenter action so the parent's button can re-frame the hole
+    // overview (animated) after the user pans/zooms away.
+    if (recenterRef) recenterRef.current = () => applyOverview(true);
 
     map.on('load', onLoad);
 
@@ -1589,6 +1741,24 @@ export function HoleLayout({
     // once (whether dots should be draggable is decided per-marker).
     const moveCb = onShotEndPointMovedRef.current;
     const shotDots: HTMLDivElement[] = [];
+    const shotBoxes: (HTMLDivElement | null)[] = [];
+
+    // Build one segment of the info box: a padded cell with its own bg + text
+    // color. e.g. makeSeg('7I', '#2e7d32', '#ffffff').
+    const makeSeg = (text: string, bg: string, color: string): HTMLDivElement => {
+      const seg = document.createElement('div');
+      seg.textContent = text;
+      Object.assign(seg.style, {
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '3px 6px',
+        background: bg,
+        color
+      } as Partial<CSSStyleDeclaration>);
+      return seg;
+    };
+
     for (let i = 0; i < shotEndPoints.length; i++) {
       const pt = shotEndPoints[i];
       // Mapbox drives the marker ROOT's `transform` (a translate that pins it
@@ -1623,8 +1793,65 @@ export function HoleLayout({
         transform: 'scale(1)',
         opacity: '1'
       } as Partial<CSSStyleDeclaration>);
-      inner.textContent = String(i + 1);
+      // The shot number now lives in the info box, so the dot stays a bare
+      // disk when a box is rendered. Fall back to numbering the dot itself when
+      // a consumer didn't supply label data for this shot.
+      if (!shotLabels[i]) inner.textContent = String(i + 1);
       dot.appendChild(inner);
+
+      // Segmented info box to the LEFT of the dot: [ # | club | yards ].
+      // Only built when the consumer passes per-shot label data for this index.
+      const label = shotLabels[i];
+      let boxInner: HTMLDivElement | null = null;
+      if (label) {
+        // Wrapper owns the static vertical-centering transform (never animated);
+        // the inner pill owns the recap reveal (opacity + slide), so the two
+        // transforms don't fight.
+        const boxWrap = document.createElement('div');
+        Object.assign(boxWrap.style, {
+          position: 'absolute',
+          // Sit the box fully to the RIGHT of the dot: left edge at the dot's
+          // right edge (left:100%) plus a 6px gap. Robust to the disk's exact
+          // rendered size (border included). Wrapper owns vertical centering.
+          left: '100%',
+          marginLeft: '6px',
+          top: '50%',
+          transform: 'translateY(-50%)',
+          pointerEvents: 'none'
+        } as Partial<CSSStyleDeclaration>);
+
+        boxInner = document.createElement('div');
+        Object.assign(boxInner.style, {
+          display: 'flex',
+          alignItems: 'stretch',
+          borderRadius: '5px',
+          overflow: 'hidden',
+          border: '1.5px solid #ffffff',
+          boxShadow: '0 2px 5px rgba(0,0,0,0.55)',
+          font: '800 11px system-ui, sans-serif',
+          lineHeight: '1',
+          whiteSpace: 'nowrap',
+          // Reveal emanates from the dot (left edge) outward to the right.
+          transformOrigin: 'left center',
+          transition: 'opacity 260ms ease, transform 260ms ease',
+          opacity: '1',
+          transform: 'translateX(0) scale(1)'
+        } as Partial<CSSStyleDeclaration>);
+
+        // # — white bg, black text.
+        boxInner.appendChild(makeSeg(String(i + 1), '#ffffff', '#0b1410'));
+        // Club — green bg, white text.
+        if (label.club) boxInner.appendChild(makeSeg(label.club, '#2e7d32', '#ffffff'));
+        // Distance (yards) — #FB7B34 bg, black text.
+        if (label.distance) {
+          boxInner.appendChild(makeSeg(label.distance, '#FB7B34', '#0b1410'));
+        }
+
+        boxWrap.appendChild(boxInner);
+        dot.appendChild(boxWrap);
+      }
+      shotBoxes.push(boxInner);
+
       const marker = new mapboxgl.Marker({
         element: dot,
         anchor: 'center',
@@ -1648,6 +1875,7 @@ export function HoleLayout({
     // and finishes at the flag. `centerlineCoords` is oriented tee→green, so
     // [0] is the tee end; `effectivePin` is the authoritative flag position.
     shotDotElsRef.current = shotDots;
+    shotBoxElsRef.current = shotBoxes;
     if (shotEndPoints.length > 0) {
       const path: Array<[number, number]> = [centerlineCoords[0], ...shotEndPoints];
       // Append the pin as the final vertex unless the last shot already
@@ -1689,7 +1917,8 @@ export function HoleLayout({
         layout.features,
         bearing,
         greenLL,
-        targetType
+        targetType,
+        layout.hole.centerline
       );
       cb({
         start: aimStartLL,
@@ -1709,6 +1938,7 @@ export function HoleLayout({
       // the map (and its container) is torn down.
       landingMarkerRef.current?.remove();
       landingMarkerRef.current = null;
+      if (recenterRef) recenterRef.current = null;
       mapRef.current = null;
       map.remove();
     };
@@ -1728,6 +1958,7 @@ export function HoleLayout({
     puttingMode,
     bagClubs,
     shotEndPoints,
+    shotLabels,
     hideAim,
     useTargetDot,
     pinOverride,
@@ -1739,7 +1970,9 @@ export function HoleLayout({
     // (callback flips from undefined ↔ defined) so the numbered shot
     // dots get recreated with the correct `draggable` flag. Stable
     // across renders within a mode via the ref above.
-    onShotEndPointMoved != null
+    onShotEndPointMoved != null,
+    interactive,
+    recenterRef
   ]);
 
   // Landing-point marker — add/move/remove imperatively on the live map so a
@@ -1785,6 +2018,7 @@ export function HoleLayout({
     if (!map) return;
     const path = recapPathRef.current;
     const dots = shotDotElsRef.current;
+    const boxes = shotBoxElsRef.current;
     if (path.length < 2) return;
 
     const SEGMENT_MS = 520; // grow time per leg
@@ -1828,55 +2062,97 @@ export function HoleLayout({
       });
     }
 
-    // Dot index d sits at path vertex d+1 (path[0] is the tee).
+    // Pop a shot's numbered dot into view.
     const showDot = (d: number) => {
       const el = dots[d];
       if (!el) return;
       el.style.opacity = '1';
       el.style.transform = 'scale(1)';
     };
+    // Fade a shot's info box in, emanating from the dot (transform-origin is the
+    // box's left edge = the dot side). Called at the start of that shot's pause.
+    const revealBox = (d: number) => {
+      const box = boxes[d];
+      if (!box) return;
+      box.style.opacity = '1';
+      box.style.transform = 'translateX(0) scale(1)';
+    };
 
-    // Start state: nothing drawn, every dot hidden (fades back in as the line
-    // arrives). The CSS transition on each dot animates the pop.
+    // Start state: nothing drawn, every dot + box hidden. The CSS transitions
+    // animate each pop / fade. Boxes start nudged toward the dot so they slide
+    // outward as they appear.
     dots.forEach((el) => {
       el.style.opacity = '0';
       el.style.transform = 'scale(0.4)';
     });
+    boxes.forEach((box) => {
+      if (!box) return;
+      box.style.opacity = '0';
+      box.style.transform = 'translateX(-10px) scale(0.85)';
+    });
     setLine([path[0], path[0]]);
 
+    // The replay is a grow → pause state machine: the line grows one leg, then
+    // PAUSES on the shot it just reached while that shot's box fades in, then
+    // grows the next leg. Path vertex d+1 corresponds to dot index d (path[0] is
+    // the tee); a trailing pin vertex (when the last shot wasn't holed) has no
+    // dot, so it grows without a pause.
+    const PAUSE_MS = 1000; // hold on each shot while its box fades in
     const segments = path.length - 1;
-    let startTs: number | null = null;
+    let segIdx = 0;
+    let phase: 'grow' | 'pause' = 'grow';
+    let phaseStart: number | null = null;
 
     const frame = (ts: number) => {
       if (!mapRef.current) return; // map torn down mid-recap
-      if (startTs == null) startTs = ts;
-      const elapsed = ts - startTs;
-      const segFloat = elapsed / SEGMENT_MS;
-      const segIdx = Math.floor(segFloat);
+      if (phaseStart == null) phaseStart = ts;
+      const elapsed = ts - phaseStart;
 
-      if (segIdx >= segments) {
-        // Done — draw the full path and reveal every dot.
-        setLine(path);
-        for (let d = 0; d < dots.length; d++) showDot(d);
-        recapRafRef.current = null;
+      if (phase === 'grow') {
+        const t = easeInOut(Math.min(1, elapsed / SEGMENT_MS));
+        const a = path[segIdx];
+        const b = path[segIdx + 1];
+        const cur: [number, number] = [
+          a[0] + (b[0] - a[0]) * t,
+          a[1] + (b[1] - a[1]) * t
+        ];
+        setLine([...path.slice(0, segIdx + 1), cur]);
+
+        if (elapsed >= SEGMENT_MS) {
+          // Leg complete — snap the line to the vertex.
+          setLine(path.slice(0, segIdx + 2));
+          const dotIdx = segIdx; // vertex segIdx+1 → dot index segIdx
+          if (dotIdx < dots.length) {
+            // Reached a shot: pop the dot, then PAUSE while its box fades in.
+            showDot(dotIdx);
+            revealBox(dotIdx);
+            phase = 'pause';
+            phaseStart = ts;
+          } else {
+            // Trailing pin vertex — no dot, no pause.
+            segIdx += 1;
+            phaseStart = ts;
+            if (segIdx >= segments) {
+              recapRafRef.current = null;
+              return;
+            }
+          }
+        }
+        recapRafRef.current = requestAnimationFrame(frame);
         return;
       }
 
-      const t = easeInOut(Math.min(1, segFloat - segIdx));
-      const a = path[segIdx];
-      const b = path[segIdx + 1];
-      const cur: [number, number] = [
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t
-      ];
-      setLine([...path.slice(0, segIdx + 1), cur]);
-
-      // Vertices the line has fully passed are visible; the dot at the end of
-      // the current leg pops in as the line arrives (t > 0.82).
-      let visible = segIdx; // vertices 1..segIdx reached → dots 0..segIdx-1
-      if (segFloat - segIdx > 0.82) visible = segIdx + 1;
-      for (let d = 0; d < Math.min(visible, dots.length); d++) showDot(d);
-
+      // phase === 'pause' — hold on the current shot, then advance.
+      if (elapsed >= PAUSE_MS) {
+        segIdx += 1;
+        if (segIdx >= segments) {
+          setLine(path);
+          recapRafRef.current = null;
+          return;
+        }
+        phase = 'grow';
+        phaseStart = ts;
+      }
       recapRafRef.current = requestAnimationFrame(frame);
     };
 

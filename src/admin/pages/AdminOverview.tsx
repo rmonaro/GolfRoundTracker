@@ -2,6 +2,12 @@ import { Box, Card, CardActionArea, CardContent, Chip, CircularProgress, Stack, 
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { adminCoursesRepo } from '@/services/adminCoursesRepo';
+import { supabase } from '@/lib/supabase';
+
+async function countTable(table: 'profiles' | 'rounds'): Promise<number> {
+  const { count } = await supabase.from(table).select('*', { count: 'exact', head: true });
+  return count ?? 0;
+}
 
 const STATUS_COLOR: Record<string, 'default' | 'success' | 'warning' | 'error' | 'info'> = {
   synced: 'success',
@@ -16,6 +22,16 @@ export function AdminOverview() {
   const { data, isLoading } = useQuery({
     queryKey: ['admin-stats'],
     queryFn: () => adminCoursesRepo.stats(),
+    staleTime: 30 * 1000
+  });
+  const { data: userCount } = useQuery({
+    queryKey: ['admin-user-count'],
+    queryFn: () => countTable('profiles'),
+    staleTime: 30 * 1000
+  });
+  const { data: roundCount } = useQuery({
+    queryKey: ['admin-round-count'],
+    queryFn: () => countTable('rounds'),
     staleTime: 30 * 1000
   });
 
@@ -35,6 +51,36 @@ export function AdminOverview() {
         useFlexGap
         flexWrap="wrap"
       >
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', flex: 1, minWidth: 240 }}>
+          <CardActionArea onClick={() => navigate('/admin/users')}>
+            <CardContent>
+              <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                Users
+              </Typography>
+              <Typography variant="h3" sx={{ fontWeight: 800 }}>
+                {userCount ?? '—'}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                registered
+              </Typography>
+            </CardContent>
+          </CardActionArea>
+        </Card>
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', flex: 1, minWidth: 240 }}>
+          <CardActionArea onClick={() => navigate('/admin/rounds')}>
+            <CardContent>
+              <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+                Rounds Played
+              </Typography>
+              <Typography variant="h3" sx={{ fontWeight: 800 }}>
+                {roundCount ?? '—'}
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                across all users
+              </Typography>
+            </CardContent>
+          </CardActionArea>
+        </Card>
         <Card elevation={0} sx={{ bgcolor: 'background.paper', flex: 1, minWidth: 240 }}>
           <CardActionArea onClick={() => navigate('/admin/courses')}>
             <CardContent>

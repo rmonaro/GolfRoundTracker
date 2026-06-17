@@ -12,6 +12,7 @@ import { StartRoundPage } from '@/pages/round/StartRoundPage';
 import { HoleTrackingPage } from '@/pages/round/HoleTrackingPage';
 import { RoundSummaryPage } from '@/pages/round/RoundSummaryPage';
 import { PastRoundsPage } from '@/pages/round/PastRoundsPage';
+import { MyTournamentsPage } from '@/pages/tournaments/MyTournamentsPage';
 import { StatsPage } from '@/pages/stats/StatsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
@@ -29,6 +30,10 @@ import { AdminCoursesList } from '@/admin/pages/AdminCoursesList';
 import { AdminImport } from '@/admin/pages/AdminImport';
 import { AdminCourseDetail } from '@/admin/pages/AdminCourseDetail';
 import { AdminReview } from '@/admin/pages/AdminReview';
+import { AdminUsersList } from '@/admin/pages/AdminUsersList';
+import { AdminUserDetail } from '@/admin/pages/AdminUserDetail';
+import { AdminRounds } from '@/admin/pages/AdminRounds';
+import { AdminRoundDetail } from '@/admin/pages/AdminRoundDetail';
 
 export function AppRouter() {
   return (
@@ -76,6 +81,14 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <PastRoundsPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/tournaments"
+        element={
+          <AuthGuard>
+            <MyTournamentsPage />
           </AuthGuard>
         }
       />
@@ -167,6 +180,10 @@ export function AppRouter() {
         }
       >
         <Route index element={<AdminOverview />} />
+        <Route path="users" element={<AdminUsersList />} />
+        <Route path="users/:id" element={<AdminUserDetail />} />
+        <Route path="rounds" element={<AdminRounds />} />
+        <Route path="rounds/:roundId" element={<AdminRoundDetail />} />
         <Route path="courses" element={<AdminCoursesList />} />
         <Route path="courses/import" element={<AdminImport />} />
         <Route path="courses/:id" element={<AdminCourseDetail />} />

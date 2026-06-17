@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   Box,
   Button,
@@ -29,6 +29,7 @@ import FormatListBulletedRoundedIcon from '@mui/icons-material/FormatListBullete
 import MyLocationRoundedIcon from '@mui/icons-material/MyLocationRounded';
 import StopCircleRoundedIcon from '@mui/icons-material/StopCircleRounded';
 import StraightenRoundedIcon from '@mui/icons-material/StraightenRounded';
+import CenterFocusStrongRoundedIcon from '@mui/icons-material/CenterFocusStrongRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
@@ -48,6 +49,8 @@ import { useSettingsStore } from '@/stores/settingsStore';
 import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
+import { useTmRoundSync } from '@/features/tournaments/useTmRoundSync';
+import { useTournamentResumeReconcile } from '@/features/tournaments/useTournamentResumeReconcile';
 import {
   AddShotSheet,
   ClubPicker,
@@ -60,7 +63,11 @@ import { PENALTY_LABELS } from '@/features/round/ShotSelectors';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { useHoleLayout } from '@/features/course/useHoleLayout';
 import { metersToYards } from '@/features/course/distance';
-import { recommendClub } from '@/features/course/HoleLayout';
+import {
+  recommendClub,
+  classifyTap,
+  teeToGreenBearing
+} from '@/features/course/HoleLayout';
 import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeCompletedTotals, computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
@@ -88,6 +95,11 @@ export function HoleTrackingPage() {
   const setBagClubs = useBagStore((s) => s.setClubs);
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  // Tournament rounds push live scores + shots to TM as the round is played.
+  // No-op for normal rounds (the hook checks the active round's TM linkage).
+  const { syncHole, finalizeRound } = useTmRoundSync();
+  // Heal a stale/empty local store against the DB on resume (tournament rounds).
+  useTournamentResumeReconcile();
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -175,6 +187,9 @@ export function HoleTrackingPage() {
   // tap is unambiguous.
   const [pinEditMode, setPinEditMode] = useState(false);
   const [showYardageMarkers, setShowYardageMarkers] = useState(false);
+  // HoleLayout publishes its "recenter on the hole overview" action here so the
+  // floating recenter button (above the yardage toggle) can call it.
+  const recenterMapRef = useRef<(() => void) | null>(null);
   // Bumped by the post-hole "Recap" button to replay the shots as a growing
   // tee → landings → pin line with the numbered dots popping in one by one.
   const [recapToken, setRecapToken] = useState(0);
@@ -326,6 +341,29 @@ export function HoleTrackingPage() {
     [hole.shots]
   );
 
+  // Per-dot info-box labels (# / club / distance), aligned 1:1 with
+  // shotEndPoints (same filter + order). Club is abbreviated; distance is
+  // preformatted — yards for full shots, feet for putts.
+  const shotLabels = useMemo(
+    () =>
+      hole.shots
+        .filter((s) => s.endLat != null && s.endLng != null)
+        .map((s) => {
+          const club = s.clubId ? bagClubs.find((c) => c.clubId === s.clubId) ?? null : null;
+          const clubName = club
+            ? abbreviateClubName(club.customName?.trim() || club.name, club.category)
+            : null;
+          const distance =
+            s.distance == null
+              ? null
+              : s.distanceUnit === 'feet'
+                ? `${Math.round(s.distance)}ft`
+                : `${Math.round(s.distance)}y`;
+          return { club: clubName, distance };
+        }),
+    [hole.shots, bagClubs]
+  );
+
   // Smart aim-handle hint: on 3rd+ shots, when the ball isn't on the green,
   // seed the handle at "ball position + previous shot distance" along the
   // centerline. Better starting point than the pin for short approach work.
@@ -361,6 +399,10 @@ export function HoleTrackingPage() {
   // green view rather than the wide tee→green framing.
   const greenLat = layoutQuery.data?.hole.green_lat ?? null;
   const greenLng = layoutQuery.data?.hole.green_lng ?? null;
+  // Tee coords — the start anchor for shot 1's GPS auto-measure (the player is
+  // at the tee before the drive, so the drive's start is the tee).
+  const teeLat = layoutQuery.data?.hole.tee_lat ?? null;
+  const teeLng = layoutQuery.data?.hole.tee_lng ?? null;
   const AROUND_GREEN_THRESHOLD_M = 27;
   let lastShotEndDistFromGreenM: number | null = null;
   if (
@@ -578,6 +620,53 @@ export function HoleTrackingPage() {
         ? 'fairway'
         : 'green';
 
+  // Classify a GPS landing point against the mapped course features — the same
+  // point-in-polygon walk + green-relative direction logic the map-tap flow
+  // uses (classifyTap). GPS-detected shots (auto-track), the manual "Record
+  // Shot" button, and watch auto-commit all run through this so the sheet
+  // pre-fills the correct lie (fairway/green/bunker/etc.) AND target result
+  // (hit/left/right/short/long) from where the player actually is, instead of
+  // defaulting to rough or guessing from the target type. Reads layoutQuery
+  // .data live so a long-lived callback still sees loaded features. Returns
+  // nulls when features aren't loaded yet, leaving both for the user to pick.
+  const inferShotAt = useCallback(
+    (
+      lat: number | null,
+      lng: number | null
+    ): {
+      lie: import('@/models').Lie | null;
+      targetResult: import('@/models').TargetResult | null;
+    } => {
+      const data = layoutQuery.data;
+      const feats = data?.features;
+      if (!feats || feats.length === 0 || lat == null || lng == null) {
+        return { lie: null, targetResult: null };
+      }
+      // Direction is measured relative to the pin: prefer the shared/local pin
+      // override, falling back to the green centroid (same as the map render).
+      const green: [number, number] | null = pinOverride
+        ? pinOverride
+        : data!.hole.green_lng != null && data!.hole.green_lat != null
+          ? [data!.hole.green_lng, data!.hole.green_lat]
+          : null;
+      // Without a green we can still classify the lie (polygon hit-test needs
+      // no bearing); the directional result just isn't meaningful, so skip it.
+      if (!green) {
+        return { lie: classifyTap([lng, lat], feats, 0, [lng, lat], upcomingTargetType).lie, targetResult: null };
+      }
+      const bearing = teeToGreenBearing(data!.hole) ?? 0;
+      return classifyTap(
+        [lng, lat],
+        feats,
+        bearing,
+        green,
+        upcomingTargetType,
+        data!.hole.centerline
+      );
+    },
+    [layoutQuery.data, pinOverride, upcomingTargetType]
+  );
+
   // Last shot end (used to seed auto-track's "ball is here" anchor). When
   // there's no last shot, useAutoTrack bootstraps from the first GPS fix
   // — fine for shot 1 since the user is at the tee.
@@ -620,12 +709,18 @@ export function HoleTrackingPage() {
       // appears so the user can tap the map elsewhere or hit Record
       // again to reopen the sheet. (Cancel calls autoTrack.dismissShot
       // via the sheet's onClose handler, re-anchoring the tracker.)
+      // Classify from where the ball came to rest (= the player's current
+      // position) against the mapped features, so the sheet pre-fills the
+      // correct lie + target result instead of leaving them blank.
+      const inferred = inferShotAt(shot.endLat, shot.endLng);
       setPendingGps({
         startLat: shot.startLat,
         startLng: shot.startLng,
         endLat: shot.endLat,
         endLng: shot.endLng,
-        calculatedDistanceM: shot.distanceM
+        calculatedDistanceM: shot.distanceM,
+        inferredLie: inferred.lie,
+        inferredTargetResult: inferred.targetResult
       });
       setEditingShot(null);
       setShotSheet(true);
@@ -644,17 +739,25 @@ export function HoleTrackingPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoTrackEnabled, autoTrackInitialBallPos?.lat, autoTrackInitialBallPos?.lng]);
 
-  // Always-on live-location watch. Runs while GPS is enabled and auto-track is
-  // OFF (auto-track runs its own watch and feeds the dot directly). This keeps
-  // a persistent "you are here" dot on the map regardless of tracking/marking
-  // state — marking a spot or recording a shot no longer makes the dot vanish.
+  // Always-on live-location watch. Runs whenever GPS is enabled — including
+  // during auto-track — so the "you are here" dot is ALWAYS on the map for the
+  // player to tap and mark a shot. It feeds `liveFix`, the guaranteed fallback
+  // in the currentLocation priority chain below auto-track's own (accurate) fix.
+  //
+  // Accuracy is intentionally NOT filtered here: the default watch drops fixes
+  // worse than 25m, which on a course (tree cover, cold-start lock, valleys)
+  // routinely hid the dot entirely. The dot is just a "tap roughly here" marker
+  // — the player taps to set the precise spot — so a coarse fix is far better
+  // than no dot. Strict accuracy still applies to auto-track's shot DETECTION
+  // watch; this relaxation only affects where the dot is drawn. The generous
+  // 100m cap still rejects clearly-bogus fixes (e.g. web IP geolocation).
   useEffect(() => {
-    if (!gpsEnabled || autoTrackEnabled) {
+    if (!gpsEnabled) {
       return;
     }
-    const stop = watchPosition((fix) => setLiveFix(fix));
+    const stop = watchPosition((fix) => setLiveFix(fix), { maxAccuracyM: 100 });
     return stop;
-  }, [gpsEnabled, autoTrackEnabled]);
+  }, [gpsEnabled]);
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
@@ -832,6 +935,7 @@ export function HoleTrackingPage() {
       });
       setShotSheet(false);
       setEditingShot(null);
+      syncHole(hole.holeNumber);
 
       if (editingShot.remoteId) {
         try {
@@ -900,6 +1004,8 @@ export function HoleTrackingPage() {
       calculatedDistance
     });
     setShotSheet(false);
+    // Live-push this hole to TM (tournament rounds only; debounced + no-op otherwise).
+    syncHole(hole.holeNumber);
 
     try {
       // Ensure the hole row exists so we have a holeId to point the shot at.
@@ -996,9 +1102,15 @@ export function HoleTrackingPage() {
   const autoCommitShot = (shot: ShotDetected) => {
     const club = bagClubs.find((c) => c.clubId === selectedClubId) ?? null;
     const tType = upcomingTargetType;
-    const tResult: import('@/models').TargetResult = 'hit';
+    // Classify lie + target result from the actual landing point against the
+    // mapped features first; only fall back to the target-type lie guess /
+    // optimistic 'hit' result when features aren't loaded or the point matched
+    // no polygon. The golfer still reviews this before verifying.
+    const inferred = inferShotAt(shot.endLat, shot.endLng);
+    const tResult: import('@/models').TargetResult = inferred.targetResult ?? 'hit';
     const lie: import('@/models').Lie | null =
-      tType === 'green' ? 'green' : tType === 'fairway' ? 'fairway' : null;
+      inferred.lie ??
+      (tType === 'green' ? 'green' : tType === 'fairway' ? 'fairway' : null);
     const derived: import('@/models').ShotResult =
       tType === 'fairway' ? 'fairway' : 'green';
     void onSubmitShot({
@@ -1041,6 +1153,7 @@ export function HoleTrackingPage() {
 
   const onDeleteShot = async (shot: LocalShot) => {
     removeShotLocal(hole.holeNumber, shot.tempId);
+    syncHole(hole.holeNumber);
     if (shot.remoteId) {
       try {
         await roundRepo.deleteShot(shot.remoteId);
@@ -1261,6 +1374,13 @@ export function HoleTrackingPage() {
     } catch (err) {
       console.error('[round] finish failed', err);
     }
+    // Tournament rounds: final push of every played hole with SUBMITTED so TM
+    // locks the scorecard. Best-effort; never blocks navigation to the summary.
+    try {
+      await finalizeRound();
+    } catch (err) {
+      console.error('[round] TM finalize failed', err);
+    }
     navigate(`/round/summary/${active.roundId}`, { replace: true });
   };
 
@@ -1443,6 +1563,8 @@ export function HoleTrackingPage() {
           par={hole.par}
           yardage={displayYards}
           compact
+          interactive
+          recenterRef={recenterMapRef}
           aimMode
           ballDistanceFromTeeM={ballDistanceFromTeeM}
           suggestedHandleDistanceM={suggestedHandleDistanceM}
@@ -1452,6 +1574,7 @@ export function HoleTrackingPage() {
             pendingGps ? [pendingGps.endLng, pendingGps.endLat] : null
           }
           shotEndPoints={shotEndPoints}
+          shotLabels={shotLabels}
           // Shot replay — bumped by the post-hole Recap button below.
           recapToken={recapToken}
           // Hide the aim UI while reviewing a tap (pendingGps), after the
@@ -1992,6 +2115,32 @@ export function HoleTrackingPage() {
           </Fab>
         )}
 
+        {/* Recenter map — small FAB stacked directly on top of the yardage
+            toggle. Re-frames the hole overview after the user has panned /
+            pinch-zoomed the map. Sits one slot (68px) above the ruler button. */}
+        {!holeComplete && (
+          <Fab
+            size="small"
+            aria-label="recenter map on hole"
+            onClick={() => recenterMapRef.current?.()}
+            sx={{
+              position: 'absolute',
+              bottom: lastShotOnGreen
+                ? 'calc(220px + env(safe-area-inset-bottom))'
+                : 'calc(152px + env(safe-area-inset-bottom))',
+              right: 16,
+              zIndex: 4,
+              bgcolor: 'rgba(11,20,16,0.85)',
+              color: '#fbbf24',
+              border: '1.5px solid #fbbf24',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.4)',
+              '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
+            }}
+          >
+            <CenterFocusStrongRoundedIcon fontSize="small" />
+          </Fab>
+        )}
+
         {/* Add Shot — circular FAB, bottom-right. Hidden once the hole is
             complete (a made putt) so the user can't accidentally add a phantom
             shot. Use the header arrows to move on to the next hole. */}
@@ -2001,7 +2150,46 @@ export function HoleTrackingPage() {
             aria-label="add shot"
             onClick={() => {
               setEditingShot(null);
-              setPendingGps(null);
+              // Auto-measure the shot the player just played. They've hit and
+              // walked up to the ball, so their CURRENT position (liveFix) is
+              // where this shot ended; the start is where the ball was — the
+              // previous shot's landing, or the tee for shot 1. Haversine
+              // between them gives the distance (e.g. a 210-yd drive) which
+              // pre-fills the sheet. This makes the manual "+" flow GPS-aware
+              // without auto-track. Putts are skipped (GPS noise dwarfs a putt)
+              // and we fall back to blank manual entry when GPS, an anchor, or
+              // a live fix is unavailable.
+              const ballStart =
+                autoTrackInitialBallPos ??
+                (teeLat != null && teeLng != null
+                  ? { lat: teeLat, lng: teeLng }
+                  : null);
+              if (
+                gpsEnabled &&
+                upcomingTargetType !== 'putt' &&
+                ballStart &&
+                liveFix
+              ) {
+                const calculatedDistanceM = haversineMeters(
+                  { lat: ballStart.lat, lng: ballStart.lng, accuracyM: 0, timestamp: 0 },
+                  { lat: liveFix.lat, lng: liveFix.lng, accuracyM: 0, timestamp: 0 }
+                );
+                // The player has walked to the ball, so liveFix is where the
+                // shot ended. Classify that point against the mapped features
+                // so the sheet pre-fills the correct lie + target result.
+                const inferred = inferShotAt(liveFix.lat, liveFix.lng);
+                setPendingGps({
+                  startLat: ballStart.lat,
+                  startLng: ballStart.lng,
+                  endLat: liveFix.lat,
+                  endLng: liveFix.lng,
+                  calculatedDistanceM,
+                  inferredLie: inferred.lie,
+                  inferredTargetResult: inferred.targetResult
+                });
+              } else {
+                setPendingGps(null);
+              }
               setShotSheet(true);
             }}
             sx={{

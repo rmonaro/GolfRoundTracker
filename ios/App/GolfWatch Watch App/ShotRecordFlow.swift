@@ -100,16 +100,52 @@ struct ShotRecordFlow: View {
         isPresented = false
     }
 
-    /// Mirror the phone-side `pickTargetType` logic in a watch-friendly form.
-    /// Putter → putt. Everything else → green (the watch doesn't try to
-    /// distinguish tee/fairway shots; the user can override on the phone if
-    /// the auto-mapped target was wrong).
+    /// Decide which result picker to show for this shot.
+    ///
+    ///   • Putter                              → "putt"  (made/missed cross)
+    ///   • Green is too far to realistically
+    ///     reach this shot                     → "fairway" (left / hit / right)
+    ///   • Otherwise (within reach, or distance
+    ///     unknown) fall back to the phone's
+    ///     shot/par heuristic                  → "fairway" on a par-4/5 tee shot,
+    ///                                            else "green" (the cross).
+    ///
+    /// The distance gate is the important part: standing on a tee 493y out, you
+    /// can't hit the green, so the green "hit + arrows" cross is meaningless —
+    /// show the fairway left/right picker instead. The green cross only appears
+    /// once you're inside a club-length of the green.
     private func targetTypeFor(selectedClubId: String?) -> String {
-        guard let id = selectedClubId,
-              let club = session.state.bag.first(where: { $0.id == id }) else {
-            return "green"
+        let club = selectedClubId.flatMap { id in
+            session.state.bag.first(where: { $0.id == id })
         }
-        return club.isPutter ? "putt" : "green"
+        if club?.isPutter == true { return "putt" }
+
+        // Prefer the watch's live GPS distance-to-pin; fall back to the static
+        // distance from the phone snapshot. nil → unknown, skip the gate.
+        let distanceYards = session.liveDistanceToPinYards().map { Int($0.rounded()) }
+            ?? session.state.distanceYards
+        if let dist = distanceYards, dist > greenReachableThresholdYards() {
+            return "fairway"
+        }
+
+        // Within reach (or unknown): mirror the phone's pickTargetType so a
+        // par-3 tee shot and approach shots map to the green cross while a
+        // par-4/5 tee shot still reads as a fairway shot.
+        let shotNumber = (session.state.shotsThisHole ?? 0) + 1
+        let holePar = session.state.par ?? 4
+        if shotNumber == 1 && holePar != 3 { return "fairway" }
+        return "green"
+    }
+
+    /// Yardage at/under which the green is considered reachable on this shot —
+    /// the longest non-putter club's typical carry, plus a little buffer for
+    /// roll/adrenaline. Falls back to 250y when the bag has no distances set.
+    private func greenReachableThresholdYards() -> Int {
+        let longest = session.state.bag
+            .compactMap { $0.isPutter ? nil : $0.typicalYards }
+            .max()
+        if let longest = longest { return longest + 15 }
+        return 250
     }
 }
 

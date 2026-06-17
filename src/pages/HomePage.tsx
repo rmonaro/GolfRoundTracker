@@ -8,9 +8,12 @@ import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
+import { HomeTournamentCard } from '@/components/home/HomeTournamentCard';
 import { useAuthStore } from '@/stores/authStore';
 import { useRounds } from '@/features/stats/useRounds';
 import { useBag } from '@/features/bag/useBag';
+import { useMyTournaments, useCachedTournaments } from '@/features/tournaments/useMyTournaments';
+import { selectHomeTournament } from '@/features/tournaments/selectHomeTournament';
 import { useRoundStore } from '@/stores/roundStore';
 import { fullName, scoreVsPar } from '@/utils/format';
 import { estimateHandicap } from '@/utils/handicap';
@@ -21,6 +24,16 @@ export function HomePage() {
   const active = useRoundStore((s) => s.active);
   const { data: rounds } = useRounds();
   useBag(); // hydrate bag store
+
+  // Surface a live/upcoming tournament in place of "Start a Round". Prefer live
+  // entitlements; fall back to the cached snapshot so the banner paints offline
+  // / on the first frame instead of flashing the start button.
+  const { data: tournaments } = useMyTournaments();
+  const { data: cachedTournaments } = useCachedTournaments();
+  const homeTournament = selectHomeTournament(
+    tournaments?.tournaments ?? cachedTournaments,
+    rounds
+  );
 
   const completed = (rounds ?? []).filter((r) => r.completed_at);
   const lastRound = completed[0];
@@ -53,6 +66,12 @@ export function HomePage() {
               </CardContent>
             </CardActionArea>
           </Card>
+        ) : homeTournament ? (
+          <HomeTournamentCard
+            selection={homeTournament}
+            localRounds={rounds}
+            onClick={() => navigate('/tournaments')}
+          />
         ) : (
           <Button
             variant="contained"

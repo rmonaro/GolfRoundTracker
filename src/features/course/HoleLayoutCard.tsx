@@ -1,3 +1,4 @@
+import type { MutableRefObject } from 'react';
 import { Box, Card, CardContent, CircularProgress, Typography } from '@mui/material';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import { useHoleLayout } from './useHoleLayout';
@@ -12,6 +13,10 @@ interface HoleLayoutCardProps {
   yardage?: number | null;
   /** When true: smaller markers, tighter padding, fills width — used inside HoleTracking. */
   compact?: boolean;
+  /** Allow pan + pinch-zoom. See HoleLayout. */
+  interactive?: boolean;
+  /** Receives a "recenter on overview" fn so the parent can drive its own button. */
+  recenterRef?: MutableRefObject<(() => void) | null>;
   /**
    * Tee-shot planning mode — hides the walkback markers and shows a draggable
    * distance-from-tee handle on the centerline. See HoleLayout for details.
@@ -37,6 +42,8 @@ interface HoleLayoutCardProps {
   landingPoint?: [number, number] | null;
   /** Recorded-shot end positions. See HoleLayoutProps.shotEndPoints. */
   shotEndPoints?: Array<[number, number]>;
+  /** Per-shot label data (# / club / distance), aligned with shotEndPoints. */
+  shotLabels?: Array<{ club: string | null; distance: string | null }>;
   /** Suppress aim handle / line while a landing-point pin is active. */
   hideAim?: boolean;
   /** Render the aim handle as a compact dot instead of the crosshair. */
@@ -70,6 +77,8 @@ export function HoleLayoutCard({
   courseId,
   holeNumber,
   compact = false,
+  interactive = false,
+  recenterRef,
   aimMode = false,
   ballDistanceFromTeeM = 0,
   suggestedHandleDistanceM,
@@ -78,6 +87,7 @@ export function HoleLayoutCard({
   onShotLanded,
   landingPoint = null,
   shotEndPoints = [],
+  shotLabels = [],
   hideAim = false,
   useTargetDot = false,
   pinOverride = null,
@@ -114,6 +124,8 @@ export function HoleLayoutCard({
           <HoleLayout
             layout={data}
             compact={compact}
+            interactive={interactive}
+            recenterRef={recenterRef}
             aimMode={aimMode}
             ballDistanceFromTeeM={ballDistanceFromTeeM}
             suggestedHandleDistanceM={suggestedHandleDistanceM}
@@ -122,6 +134,7 @@ export function HoleLayoutCard({
             onShotLanded={onShotLanded}
             landingPoint={landingPoint}
             shotEndPoints={shotEndPoints}
+            shotLabels={shotLabels}
             hideAim={hideAim}
             useTargetDot={useTargetDot}
             pinOverride={pinOverride}

@@ -156,6 +156,10 @@ export interface RoundRow {
   slope_rating: number | null;
   estimated_handicap: number | null;
   handicap_differential: number | null;
+  // TournamentManagement (TM) linkage (migration 021). Null for normal rounds.
+  tm_registration_id: string | null;
+  tm_round_number: number | null;
+  tm_tournament_slug: string | null;
 }
 
 export interface RoundHoleRow {
