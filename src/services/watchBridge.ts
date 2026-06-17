@@ -166,6 +166,7 @@ interface WatchBridgeRawPlugin {
   isReachable(): Promise<{ reachable: boolean }>;
   sendState(args: { state: WatchRoundState }): Promise<void>;
   launchWatch(args: { startPractice: boolean }): Promise<{ launched: boolean; reason?: string }>;
+  endWatchPractice(): Promise<{ sent: boolean }>;
   addListener(
     eventName: 'messageFromWatch',
     listener: (event: { message: Record<string, unknown>; delivery: 'live' | 'queued' }) => void
@@ -237,6 +238,20 @@ export const watchBridge = {
       return await Raw.launchWatch({ startPractice });
     } catch (err) {
       return { launched: false, reason: err instanceof Error ? err.message : 'failed' };
+    }
+  },
+
+  /**
+   * Tell the watch to end its active practice session (phone-initiated end of
+   * a range / practice session). The watch finalizes and echoes `practiceEnded`
+   * back, which the phone handles idempotently. Best-effort — no-op off iOS.
+   */
+  async endWatchPractice(): Promise<void> {
+    if (!isIOSNative) return;
+    try {
+      await Raw.endWatchPractice();
+    } catch (err) {
+      console.warn('[watch] endWatchPractice failed', err);
     }
   },
 

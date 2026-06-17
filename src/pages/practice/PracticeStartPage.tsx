@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Alert, Box, Button, Stack, Typography } from '@mui/material';
+import GpsFixedRoundedIcon from '@mui/icons-material/GpsFixedRounded';
 import { Capacitor } from '@capacitor/core';
 import { useNavigate } from 'react-router-dom';
 import { useSwingSessionStore } from '@/stores/swingSessionStore';
@@ -83,7 +84,17 @@ export function PracticeStartPage() {
         </Stack>
       )}
 
-      <Button sx={{ mt: 3 }} variant="outlined" fullWidth onClick={() => navigate('/practice/history')}>
+      <Button
+        sx={{ mt: 3 }}
+        variant="outlined"
+        fullWidth
+        startIcon={<GpsFixedRoundedIcon />}
+        onClick={() => navigate('/range')}
+      >
+        GPS Range Session
+      </Button>
+
+      <Button sx={{ mt: 1 }} variant="outlined" fullWidth onClick={() => navigate('/practice/history')}>
         View past practices
       </Button>
 

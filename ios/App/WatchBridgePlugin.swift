@@ -43,7 +43,8 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         CAPPluginMethod(name: "activate", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isReachable", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise),
-        CAPPluginMethod(name: "launchWatch", returnType: CAPPluginReturnPromise)
+        CAPPluginMethod(name: "launchWatch", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "endWatchPractice", returnType: CAPPluginReturnPromise)
     ]
 
     private let healthStore = HKHealthStore()
@@ -133,6 +134,19 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
                 }
             }
         }
+    }
+
+    /// Tell the watch to end its active practice session (phone-initiated end
+    /// of a range / practice session). Mirrors the `startPractice` command
+    /// path: a `watchCommand` user-info is queued (guaranteed FIFO) so the
+    /// watch finalizes its session and sends back `practiceEnded`. Best-effort
+    /// — resolves regardless of watch reachability.
+    @objc func endWatchPractice(_ call: CAPPluginCall) {
+        if WCSession.isSupported(),
+           WCSession.default.activationState == .activated {
+            WCSession.default.transferUserInfo(["watchCommand": "endPractice"])
+        }
+        call.resolve(["sent": true])
     }
 
     /// Send the latest round-state snapshot to the watch. Uses

@@ -571,6 +571,13 @@ extension WatchSession: WCSessionDelegate {
                 if !self.state.active && !PracticeController.shared.isActive {
                     PracticeController.shared.startSession(club: self.state.selectedClubId)
                 }
+            case "endPractice":
+                // Phone ended the range/practice session — stop the watch
+                // session too. endSession() ships `practiceEnded` back, which
+                // the phone treats as idempotent.
+                if PracticeController.shared.isActive {
+                    PracticeController.shared.endSession()
+                }
             default:
                 break
             }

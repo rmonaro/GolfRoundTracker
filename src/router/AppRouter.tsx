@@ -22,6 +22,8 @@ import { SessionSummaryPage } from '@/pages/practice/SessionSummaryPage';
 import { PastPracticesPage } from '@/pages/practice/PastPracticesPage';
 import { PracticeSessionDetailPage } from '@/pages/practice/PracticeSessionDetailPage';
 import { SwingMetricsGuidePage } from '@/pages/practice/SwingMetricsGuidePage';
+import { RangeSessionPage } from '@/pages/range/RangeSessionPage';
+import { RangeSummaryPage } from '@/pages/range/RangeSummaryPage';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { AdminGuard } from '@/admin/AdminGuard';
 import { AdminLayout } from '@/admin/pages/AdminLayout';
@@ -145,6 +147,22 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <PracticeSessionDetailPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/range"
+        element={
+          <AuthGuard>
+            <RangeSessionPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/range/summary/:sessionId"
+        element={
+          <AuthGuard>
+            <RangeSummaryPage />
           </AuthGuard>
         }
       />
