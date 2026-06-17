@@ -41,7 +41,7 @@ export function SessionSummaryPage() {
 
   const onDone = () => {
     reset();
-    navigate('/');
+    navigate('/practice');
   };
 
   if (swings.length === 0) {

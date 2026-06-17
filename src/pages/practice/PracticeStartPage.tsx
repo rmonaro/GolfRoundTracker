@@ -453,9 +453,10 @@ export function PracticeStartPage() {
 
           <ListItemButton
             disabled={starting}
-            onClick={() => {
+            onClick={async () => {
               setDrawerOpen(false);
-              void onStart();
+              await onStart();
+              navigate('/practice/live');
             }}
             sx={practiceItemSx}
           >

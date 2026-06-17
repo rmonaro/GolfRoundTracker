@@ -110,6 +110,20 @@ export const rangeRepo = {
     return (data ?? []).map((r) => mapShot(r as RangeShotRow));
   },
 
+  /** All of a user's range sessions (newest first) with their shot counts. */
+  async listSessions(userId: string): Promise<Array<RangeSession & { shotCount: number }>> {
+    const { data, error } = await supabase
+      .from('range_sessions')
+      .select('*, range_shots(count)')
+      .eq('user_id', userId)
+      .order('started_at', { ascending: false });
+    if (error) throw toAppError(error, 'Could not load range sessions');
+    return (data ?? []).map((r) => {
+      const row = r as RangeSessionRow & { range_shots?: Array<{ count: number }> };
+      return { ...mapSession(row), shotCount: row.range_shots?.[0]?.count ?? 0 };
+    });
+  },
+
   async getSession(sessionId: string): Promise<RangeSession | null> {
     const { data, error } = await supabase
       .from('range_sessions')

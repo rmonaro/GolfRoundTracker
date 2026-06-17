@@ -34,7 +34,7 @@ const sharedOptions: ThemeOptions = {
       styleOverrides: {
         root: {
           minHeight: 48,
-          borderRadius: 14,
+          borderRadius: 999, // PDI full pill
           fontSize: '1rem',
           paddingInline: 18
         },
@@ -46,7 +46,7 @@ const sharedOptions: ThemeOptions = {
     },
     MuiCard: {
       styleOverrides: {
-        root: { borderRadius: 20, backgroundImage: 'none' }
+        root: { borderRadius: 16, backgroundImage: 'none' } // PDI cards 16-18px
       }
     },
     MuiPaper: {
@@ -57,11 +57,11 @@ const sharedOptions: ThemeOptions = {
     },
     MuiFilledInput: {
       styleOverrides: {
-        root: { borderRadius: 12, overflow: 'hidden' }
+        root: { borderRadius: 6, overflow: 'hidden' } // PDI inputs 6px
       }
     },
     MuiChip: {
-      styleOverrides: { root: { fontWeight: 600 } }
+      styleOverrides: { root: { fontWeight: 600, borderRadius: 6 } } // PDI chips 6px
     },
     MuiAppBar: { defaultProps: { elevation: 0 } }
   }
@@ -71,15 +71,41 @@ export const darkTheme = createTheme({
   ...sharedOptions,
   palette: {
     mode: 'dark',
-    primary: { main: greenBrand[500], dark: greenBrand[700], light: greenBrand[300], contrastText: '#0B1410' },
-    secondary: { main: '#9CCC65', contrastText: '#0B1410' },
-    success: { main: greenBrand[400] },
-    error: { main: '#EF5350' },
-    warning: { main: '#FFB74D' },
+    // PDI orange — primary CTA / active states. Gradient applied on contained
+    // buttons below (#fb9a47 → #f07d22).
+    primary: { main: '#f88930', dark: '#f07d22', light: '#fb9a47', contrastText: '#0b0f1a' },
+    secondary: { main: '#ffd580', contrastText: '#0b0f1a' }, // warm gold accent
+    success: { main: '#2fd27b', contrastText: '#0b0f1a' }, // connected / on-tempo / positive
+    error: { main: '#ff5a52' }, // LIVE recording / destructive
+    warning: { main: '#f0a83a' }, // off-tempo amber
     info: { main: '#64B5F6' },
-    background: { default: '#0B1410', paper: '#13201A' },
-    text: { primary: '#F5F7F4', secondary: '#A5B5AC' },
-    divider: 'rgba(255,255,255,0.08)'
+    background: { default: '#0b0f1a', paper: '#141a2c' }, // app bg / card surface
+    text: {
+      primary: '#eef1f8', // high body & headings
+      secondary: '#9aa3bd', // secondary text
+      disabled: '#5b6688' // inactive / muted
+    },
+    divider: 'rgba(255,255,255,0.07)', // card hairlines
+    action: {
+      hover: 'rgba(255,255,255,0.06)',
+      selected: 'rgba(255,255,255,0.12)' // stronger dividers / pill outlines
+    }
+  },
+  components: {
+    ...sharedOptions.components,
+    // Re-declare MuiButton fully (object spread on `components` replaces the
+    // key) and add the dark-mode orange gradient on contained-primary CTAs.
+    MuiButton: {
+      defaultProps: { disableElevation: true },
+      styleOverrides: {
+        root: { minHeight: 48, borderRadius: 999, fontSize: '1rem', paddingInline: 18 },
+        sizeLarge: { minHeight: 60, fontSize: '1.1rem' },
+        containedPrimary: {
+          backgroundImage: 'linear-gradient(180deg, #fb9a47, #f07d22)',
+          color: '#0b0f1a'
+        }
+      }
+    }
   }
 });
 
@@ -87,15 +113,32 @@ export const lightTheme = createTheme({
   ...sharedOptions,
   palette: {
     mode: 'light',
-    primary: { main: greenBrand[700], dark: greenBrand[900], light: greenBrand[500], contrastText: '#FFFFFF' },
-    secondary: { main: greenBrand[500], contrastText: '#FFFFFF' },
-    success: { main: greenBrand[600] },
+    // PDI orange CTA (dark ink text for legibility on orange).
+    primary: { main: '#f88930', dark: '#f07d22', light: '#fb9a47', contrastText: '#131a36' },
+    secondary: { main: '#324279', contrastText: '#ffffff' }, // PDI navy
+    success: { main: '#2f9e6e', contrastText: '#ffffff' }, // deeper green for white contrast
     error: { main: '#D32F2F' },
-    warning: { main: '#F57C00' },
-    info: { main: '#1976D2' },
-    background: { default: '#F5F7F4', paper: '#FFFFFF' },
-    text: { primary: '#0B1410', secondary: '#46584F' },
-    divider: 'rgba(0,0,0,0.08)'
+    warning: { main: '#f0a83a' },
+    info: { main: '#324279' },
+    background: { default: '#e4f0f9', paper: '#ffffff' }, // PDI sky / white
+    text: {
+      primary: '#131a36', // PDI ink — headings & body
+      secondary: '#5a6480', // secondary body text
+      disabled: '#8a93ab' // muted labels / placeholders
+    },
+    divider: '#d8e0ec' // PDI line
+  },
+  components: {
+    ...sharedOptions.components,
+    // Re-declare MuiButton fully and add the PDI orange CTA glow.
+    MuiButton: {
+      defaultProps: { disableElevation: true },
+      styleOverrides: {
+        root: { minHeight: 48, borderRadius: 999, fontSize: '1rem', paddingInline: 18 },
+        sizeLarge: { minHeight: 60, fontSize: '1.1rem' },
+        containedPrimary: { boxShadow: '0 12px 24px rgba(248,137,48,.32)' }
+      }
+    }
   }
 });
 
