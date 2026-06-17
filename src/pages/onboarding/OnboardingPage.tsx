@@ -123,7 +123,7 @@ export function OnboardingPage() {
     >
       <Box sx={{ width: '100%', maxWidth: 560 }}>
         <Stack spacing={1} mb={3}>
-          <Typography variant="h5" sx={{ fontWeight: 700 }}>
+          <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
             Welcome{profile?.first_name ? `, ${profile.first_name}` : ''} 👋
           </Typography>
           <Typography variant="body2" color="text.secondary">

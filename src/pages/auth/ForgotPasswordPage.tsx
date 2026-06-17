@@ -28,7 +28,7 @@ export function ForgotPasswordPage() {
   return (
     <form onSubmit={onSubmit}>
       <Stack spacing={2.5}>
-        <Typography variant="h5" align="center">
+        <Typography variant="h5" align="center" sx={{ fontWeight: 900, fontSize: '32px' }}>
           Forgot your password?
         </Typography>
         <Typography variant="body2" color="text.secondary" align="center">

@@ -104,10 +104,16 @@ export const swingRepo = {
   async createSession(input: {
     userId: string;
     primaryClubId: string | null;
+    /** 'practice' (Swing/Net) or 'range' (GPS range mode). Defaults to practice. */
+    source?: string;
   }): Promise<SwingSession> {
     const { data, error } = await supabase
       .from('swing_sessions')
-      .insert({ user_id: input.userId, primary_club_id: input.primaryClubId })
+      .insert({
+        user_id: input.userId,
+        primary_club_id: input.primaryClubId,
+        source: input.source ?? 'practice'
+      })
       .select('*')
       .single();
     if (error) throw toAppError(error, 'Could not start practice session');
@@ -225,6 +231,8 @@ export const swingRepo = {
       .from('swing_sessions')
       .select('*')
       .eq('user_id', userId)
+      // Hide range-originated watch sessions — they belong to the Range history.
+      .neq('source', 'range')
       .order('started_at', { ascending: false });
     if (error) throw toAppError(error, 'Could not load practice sessions');
     return (data ?? []).map((r) => mapSession(r as SwingSessionRow));

@@ -253,6 +253,9 @@ export interface SwingSessionRow {
   hrv_sdnn: number | null;
   active_calories: number | null;
   duration_seconds: number | null;
+  /** Origin of the session: 'practice' (Swing/Net) or 'range' (GPS range mode).
+   *  Range-originated sessions are hidden from the Swing/Net history. */
+  source: string;
 }
 
 export interface SwingMetricRow {
@@ -301,6 +304,60 @@ export interface SwingFeedbackRow {
   created_at: string;
 }
 
+// --- GPS driving-range practice mode (migration 023) -----------------------
+// Distances stored in METERS; the display layer converts to yards. `rangeRepo`
+// maps these snake_case rows to the camelCase domain types in `range.ts`.
+
+export interface RangeSessionRow {
+  id: string;
+  user_id: string;
+  origin_lat: number;
+  origin_lng: number;
+  target_lat: number;
+  target_lng: number;
+  /** Degrees 0-360, origin -> target. */
+  target_bearing: number;
+  started_at: string;
+  ended_at: string | null;
+  created_at: string;
+}
+
+export interface RangeShotRow {
+  id: string;
+  session_id: string;
+  user_id: string;
+  /** Deferred integration seam — set from a matched watch swing event later. */
+  swing_event_id: string | null;
+  /** Manual club label for v1; null until selected/supplied. */
+  club: string | null;
+  /** The aim target this shot was hit at, if one was selected. */
+  target_id: string | null;
+  land_lat: number;
+  land_lng: number;
+  /** Along the target line, meters. */
+  carry_m: number;
+  /** Signed perpendicular offset, meters. + = right, - = left. */
+  offline_m: number;
+  /** Straight-line origin -> land, meters. */
+  total_m: number;
+  created_at: string;
+}
+
+export interface RangeTargetRow {
+  id: string;
+  user_id: string;
+  label: string | null;
+  kind: string; // 'circle' | 'polygon'
+  anchor_lat: number;
+  anchor_lng: number;
+  center_lat: number | null;
+  center_lng: number | null;
+  radius_m: number | null;
+  /** Polygon ring as [lng, lat] pairs. */
+  points: Array<[number, number]> | null;
+  created_at: string;
+}
+
 export interface Database {
   public: {
     Tables: {
@@ -314,6 +371,9 @@ export interface Database {
       swing_sessions: { Row: SwingSessionRow; Insert: Omit<SwingSessionRow, 'id'> & { id?: string }; Update: Partial<SwingSessionRow> };
       swing_metrics: { Row: SwingMetricRow; Insert: Omit<SwingMetricRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<SwingMetricRow> };
       swing_feedback: { Row: SwingFeedbackRow; Insert: Omit<SwingFeedbackRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<SwingFeedbackRow> };
+      range_sessions: { Row: RangeSessionRow; Insert: Omit<RangeSessionRow, 'id' | 'created_at' | 'started_at' | 'ended_at'> & { id?: string; created_at?: string; started_at?: string; ended_at?: string | null }; Update: Partial<RangeSessionRow> };
+      range_shots: { Row: RangeShotRow; Insert: Omit<RangeShotRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<RangeShotRow> };
+      range_targets: { Row: RangeTargetRow; Insert: Omit<RangeTargetRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<RangeTargetRow> };
     };
   };
 }

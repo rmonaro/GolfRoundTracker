@@ -184,7 +184,12 @@ export function BagPage() {
               {clubs.map((club) => {
                 const subtitle = clubSubtitleLine(club);
                 return (
-                  <Card key={club.bagId} elevation={0} sx={{ bgcolor: 'background.paper' }}>
+                  <Card
+                    key={club.bagId}
+                    variant="outlined"
+                    elevation={0}
+                    sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}
+                  >
                     <CardContent
                       sx={{
                         display: 'flex',

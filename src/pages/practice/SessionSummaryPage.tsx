@@ -41,7 +41,7 @@ export function SessionSummaryPage() {
 
   const onDone = () => {
     reset();
-    navigate('/');
+    navigate('/practice');
   };
 
   if (swings.length === 0) {
@@ -70,7 +70,7 @@ export function SessionSummaryPage() {
 
   return (
     <Box sx={practicePageSx()}>
-      <Typography variant="h5" fontWeight={800}>
+      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
         Session Summary
       </Typography>
       <MotionDisclaimer />
