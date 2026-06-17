@@ -18,6 +18,7 @@ import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSetting
 import { useIsAdmin } from '@/admin/hooks/useIsAdmin';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
+import { watchName } from '@/utils/platform';
 import { useAuthStore } from '@/stores/authStore';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { authService } from '@/services/authService';
@@ -256,7 +257,7 @@ export function SettingsPage() {
         <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              Apple Watch
+              {watchName({ title: true })}
             </Typography>
             <Stack mt={1} spacing={0.5}>
               <FormControlLabel
@@ -269,7 +270,7 @@ export function SettingsPage() {
                 label="Shot detection"
               />
               <Typography variant="caption" color="text.secondary">
-                Uses your Apple Watch to detect real club strikes so auto-track
+                Uses your {watchName()} to detect real club strikes so auto-track
                 only logs a shot when you actually hit — not when you walk to
                 the cart. Needs the watch worn and GPS tracking on. Runs a
                 workout session during the round, which uses extra watch

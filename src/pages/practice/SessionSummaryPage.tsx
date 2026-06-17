@@ -70,7 +70,7 @@ export function SessionSummaryPage() {
 
   return (
     <Box sx={practicePageSx()}>
-      <Typography variant="h5" fontWeight={800}>
+      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
         Session Summary
       </Typography>
       <MotionDisclaimer />

@@ -30,7 +30,7 @@ export function AuthLayout() {
             display: 'block'
           }}
         />
-        <Typography variant="h5">Golf Round Tracker</Typography>
+        <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>Golf Round Tracker</Typography>
         <Typography variant="body2" color="text.secondary">
           Score, shot, and handicap in one place.
         </Typography>

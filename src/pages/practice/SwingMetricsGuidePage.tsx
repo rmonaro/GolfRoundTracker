@@ -1,7 +1,19 @@
-import { Box, Button, Chip, Divider, Paper, Stack, Typography } from '@mui/material';
+import {
+  Accordion,
+  AccordionDetails,
+  AccordionSummary,
+  Box,
+  Button,
+  Chip,
+  Divider,
+  Stack,
+  Typography
+} from '@mui/material';
+import ExpandMoreRoundedIcon from '@mui/icons-material/ExpandMoreRounded';
 import { alpha } from '@mui/material/styles';
 import { useNavigate } from 'react-router-dom';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { watchName } from '@/utils/platform';
 import { practicePageSx } from './practicePageSx';
 
 interface Metric {
@@ -142,8 +154,8 @@ const SECTIONS: Section[] = [
     ]
   },
   {
-    title: 'Heart rate (Apple Watch)',
-    blurb: 'A real sensor reading (not an estimate) when HealthKit is enabled. Captured by a workout session during practice.',
+    title: `Heart rate (${watchName({ title: true })})`,
+    blurb: 'A real sensor reading (not an estimate) when health access is enabled. Captured by a workout session during practice.',
     metrics: [
       {
         name: 'Heart rate per swing',
@@ -206,11 +218,11 @@ export function SwingMetricsGuidePage() {
 
   return (
     <Box sx={practicePageSx(560)}>
-      <Typography variant="h5" fontWeight={800}>
+      <Typography component="h1" sx={{ fontWeight: 900, fontSize: '32px', lineHeight: 1.1 }}>
         What your swing data means
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-        Your Apple Watch samples wrist motion about 100 times a second, detects
+        Your {watchName()} samples wrist motion about 100 times a second, detects
         each phase of your swing, and turns it into the numbers below. Use them
         to track your rhythm, smoothness, and repeatability over time.
       </Typography>
@@ -219,47 +231,55 @@ export function SwingMetricsGuidePage() {
 
       <Stack spacing={2} sx={{ mt: 2 }}>
         {SECTIONS.map((section) => (
-          <Paper key={section.title} variant="outlined" sx={{ p: 2, borderRadius: 0 }}>
-            <Typography variant="h6" fontWeight={800}>
-              {section.title}
-            </Typography>
-            <Typography variant="caption" color="text.secondary">
-              {section.blurb}
-            </Typography>
-            <Stack spacing={1.5} sx={{ mt: 1.5 }} divider={<Divider flexItem />}>
-              {section.metrics.map((m) => (
-                <MetricRow key={m.name} metric={m} />
-              ))}
-            </Stack>
-          </Paper>
+          <Accordion key={section.title} disableGutters square variant="outlined">
+            <AccordionSummary expandIcon={<ExpandMoreRoundedIcon />}>
+              <Typography variant="h6" fontWeight={800}>
+                {section.title}
+              </Typography>
+            </AccordionSummary>
+            <AccordionDetails>
+              <Typography variant="caption" color="text.secondary">
+                {section.blurb}
+              </Typography>
+              <Stack spacing={1.5} sx={{ mt: 1.5 }} divider={<Divider flexItem />}>
+                {section.metrics.map((m) => (
+                  <MetricRow key={m.name} metric={m} />
+                ))}
+              </Stack>
+            </AccordionDetails>
+          </Accordion>
         ))}
 
         {/* The honest boundary of what a wrist sensor can know. */}
-        <Paper
+        <Accordion
+          disableGutters
+          square
           variant="outlined"
           sx={{
-            p: 2,
-            borderRadius: 0,
             borderColor: 'warning.main',
             bgcolor: (theme) => alpha(theme.palette.warning.main, 0.08)
           }}
         >
-          <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1 }}>
-            <Typography variant="h6" fontWeight={800}>
-              What it can’t measure
+          <AccordionSummary expandIcon={<ExpandMoreRoundedIcon />}>
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Typography variant="h6" fontWeight={800}>
+                What it can’t measure
+              </Typography>
+              <Chip size="small" color="warning" label="Important" />
+            </Stack>
+          </AccordionSummary>
+          <AccordionDetails>
+            <Typography variant="body2" color="text.secondary">
+              A wrist sensor sees <strong>how you moved</strong> — rhythm,
+              smoothness, repeatability, and balance. It does <strong>not</strong>{' '}
+              measure clubface angle, club path, swing-plane degrees, launch
+              angle, ball speed, spin, or carry distance. These are estimates and
+              relative scores, not launch-monitor data — best for questions like
+              “is my tempo consistent today?” or “am I getting tired?”, not for
+              ball-flight numbers.
             </Typography>
-            <Chip size="small" color="warning" label="Important" />
-          </Stack>
-          <Typography variant="body2" color="text.secondary">
-            A wrist sensor sees <strong>how you moved</strong> — rhythm,
-            smoothness, repeatability, and balance. It does <strong>not</strong>{' '}
-            measure clubface angle, club path, swing-plane degrees, launch
-            angle, ball speed, spin, or carry distance. These are estimates and
-            relative scores, not launch-monitor data — best for questions like
-            “is my tempo consistent today?” or “am I getting tired?”, not for
-            ball-flight numbers.
-          </Typography>
-        </Paper>
+          </AccordionDetails>
+        </Accordion>
       </Stack>
 
       <Button variant="contained" fullWidth sx={{ mt: 3 }} onClick={() => navigate(-1)}>

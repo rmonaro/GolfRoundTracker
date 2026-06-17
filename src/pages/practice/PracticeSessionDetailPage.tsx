@@ -111,7 +111,7 @@ export function PracticeSessionDetailPage() {
   return (
     <Box sx={practicePageSx()}>
       <Stack direction="row" justifyContent="space-between" alignItems="center">
-        <Typography variant="h5" fontWeight={800}>
+        <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
           Practice Session
         </Typography>
         <IconButton

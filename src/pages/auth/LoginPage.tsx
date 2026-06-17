@@ -30,7 +30,7 @@ export function LoginPage() {
   return (
     <form onSubmit={onSubmit}>
       <Stack spacing={2.5}>
-        <Typography variant="h5" align="center">
+        <Typography variant="h5" align="center" sx={{ fontWeight: 900, fontSize: '32px' }}>
           Welcome back
         </Typography>
         {error && <Alert severity="error">{error}</Alert>}

@@ -40,7 +40,7 @@ export function PageHeader({ title, subtitle, back, action }: PageHeaderProps) {
         </IconButton>
       )}
       <Box sx={{ flex: 1, minWidth: 0 }}>
-        <Typography variant="h5" sx={{ lineHeight: 1.1 }} noWrap>
+        <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px', lineHeight: 1.1 }} noWrap>
           {title}
         </Typography>
         {subtitle && (

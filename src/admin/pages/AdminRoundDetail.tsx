@@ -155,7 +155,7 @@ export function AdminRoundDetail() {
         Back
       </Button>
 
-      <Typography variant="h5" sx={{ fontWeight: 700 }}>
+      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
         {round.course_name || 'Round'}
       </Typography>
       <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mt: 0.5, alignItems: 'center' }}>

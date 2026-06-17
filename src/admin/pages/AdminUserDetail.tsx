@@ -64,7 +64,7 @@ export function AdminUserDetail() {
       </Button>
 
       <Stack direction="row" alignItems="center" spacing={1.5} flexWrap="wrap" useFlexGap>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
+        <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
           {displayName(user.first_name, user.last_name, user.email)}
         </Typography>
         {user.is_admin && <Chip size="small" color="primary" label="Admin" />}

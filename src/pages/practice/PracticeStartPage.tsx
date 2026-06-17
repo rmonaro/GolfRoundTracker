@@ -8,6 +8,7 @@ import { practiceController } from '@/features/practice/practiceController';
 import { watchBridge } from '@/services/watchBridge';
 import { ClubSelector } from '@/features/practice/ClubSelector';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
+import { watchName } from '@/utils/platform';
 import { practicePageSx } from './practicePageSx';
 
 export function PracticeStartPage() {
@@ -28,7 +29,7 @@ export function PracticeStartPage() {
       if (!Capacitor.isNativePlatform()) {
         setLaunchInfo('Watch launch only works on a real iPhone build.');
       } else if (result.launched) {
-        setLaunchInfo('Opening practice on your Apple Watch…');
+        setLaunchInfo(`Opening practice on your ${watchName()}…`);
       } else {
         setLaunchInfo(
           `Couldn't open the watch app automatically (${result.reason ?? 'unknown'}). ` +
@@ -47,11 +48,11 @@ export function PracticeStartPage() {
 
   return (
     <Box sx={practicePageSx()}>
-      <Typography variant="h5" fontWeight={800}>
+      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
         Watch Practice
       </Typography>
       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-        Uses Apple Watch motion sensors to estimate your swing tempo and
+        Uses {watchName()} motion sensors to estimate your swing tempo and
         consistency. It is not a launch monitor and does not measure ball
         flight, club path, or swing-plane angle.
       </Typography>
@@ -78,7 +79,7 @@ export function PracticeStartPage() {
             Start Watch Practice
           </Button>
           <Typography variant="caption" color="text.secondary">
-            Then open Practice on your Apple Watch and take a swing. Detected
+            Then open Practice on your {watchName()} and take a swing. Detected
             swings appear here live.
           </Typography>
         </Stack>

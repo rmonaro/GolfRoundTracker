@@ -72,7 +72,7 @@ export function PastPracticesPage() {
 
   return (
     <Box sx={practicePageSx()}>
-      <Typography variant="h5" fontWeight={800}>
+      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>
         Past Practices
       </Typography>
       <Typography variant="caption" color="text.secondary">
