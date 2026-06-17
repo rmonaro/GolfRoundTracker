@@ -35,6 +35,10 @@ export interface RangeSession {
   target: LatLng;
   /** Degrees 0-360, origin -> target. */
   targetBearing: number;
+  /** Which drill this run was (null = free play), e.g. 'gapping'. */
+  drillId: string | null;
+  /** Setup choices for the drill run. */
+  drillConfig: Record<string, unknown> | null;
   startedAt: string; // ISO
   endedAt: string | null;
 }
@@ -50,6 +54,12 @@ export interface RangeShot {
   club: string | null;
   /** The aim target this shot was hit at, if one was selected. */
   targetId: string | null;
+  /** Drill prescription: the club the drill asked for this shot. */
+  prescribedClub: string | null;
+  /** Drill prescription: the intended carry for this shot, yards. */
+  targetYards: number | null;
+  /** Distance from the landing point to the intended point, yards (proximity drills). */
+  proximityYards: number | null;
   land: LatLng;
   /** Carry along the target line, yards. */
   carryYards: number;

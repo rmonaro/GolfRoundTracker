@@ -23,6 +23,7 @@ import dayjs from 'dayjs';
 import { useAuthStore } from '@/stores/authStore';
 import { swingRepo } from '@/services/swingRepo';
 import { rangeRepo } from '@/services/rangeRepo';
+import { getDrill } from '@/features/range/drills/registry';
 import { practicePageSx } from './practicePageSx';
 import type { SwingSession } from '@/types/swing';
 import type { RangeSession } from '@/types/range';
@@ -160,16 +161,23 @@ export function PastPracticesPage() {
         {items.map((item) => {
           const isSwing = item.kind === 'swing';
           const startedAt = item.startedAt;
-          const title = isSwing ? 'Swing/Net' : 'Range';
+          const drill = !isSwing ? getDrill(item.range.drillId) : null;
+          const title = isSwing ? 'Swing/Net' : drill ? drill.name : 'Range';
           const icon = isSwing ? SWING_ICON : RANGE_ICON;
           const inProgress = isSwing ? item.swing.endedAt == null : item.range.endedAt == null;
           const subtitle = isSwing
             ? `${item.swing.swingCount} swing${item.swing.swingCount === 1 ? '' : 's'}${
                 item.swing.avgTempoRatio != null ? ` · ${item.swing.avgTempoRatio.toFixed(1)} : 1 tempo` : ''
               }`
-            : `${item.range.shotCount} shot${item.range.shotCount === 1 ? '' : 's'}`;
+            : `${drill ? 'Drill · ' : ''}${item.range.shotCount} shot${item.range.shotCount === 1 ? '' : 's'}`;
           const onOpen = () =>
-            navigate(isSwing ? `/practice/history/${item.swing.id}` : `/range/summary/${item.range.id}`);
+            navigate(
+              isSwing
+                ? `/practice/history/${item.swing.id}`
+                : drill
+                  ? `/drills/report/${item.range.id}`
+                  : `/range/summary/${item.range.id}`
+            );
 
           return (
             <Card

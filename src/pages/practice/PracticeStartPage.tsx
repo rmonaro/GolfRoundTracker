@@ -31,6 +31,9 @@ import { watchName } from "@/utils/platform";
 import type { SwingSession } from "@/types/swing";
 import { practicePageSx } from "./practicePageSx";
 
+// Preview gate: only these accounts see the Drills option for now.
+const DRILLS_ALLOWLIST = ["rmonaro03@gmail.com"];
+
 function WeekStat({ label, value }: { label: string; value: string }) {
   return (
     <Box sx={{ textAlign: "center", px: 1 }}>
@@ -83,6 +86,9 @@ export function PracticeStartPage() {
   const isIos = Capacitor.getPlatform() === "ios";
 
   const userId = useAuthStore((s) => s.session?.user.id ?? null);
+  const userEmail = useAuthStore((s) => s.session?.user.email ?? null);
+  // Drills are gated to specific accounts while in preview.
+  const showDrills = !!userEmail && DRILLS_ALLOWLIST.includes(userEmail.toLowerCase());
   const [sessions, setSessions] = useState<SwingSession[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   useEffect(() => {
@@ -578,16 +584,6 @@ export function PracticeStartPage() {
               sx={{ color: "text.disabled", flexShrink: 0 }}
             />
           </ListItemButton>
-          <Button
-            size="small"
-            onClick={() => {
-              setDrawerOpen(false);
-              navigate("/range/guide");
-            }}
-            sx={{ alignSelf: "flex-start", textTransform: "none", mt: -0.5, mb: 0.5, ml: 0.5 }}
-          >
-            How the range works
-          </Button>
 
           <ListItemButton
             disabled={starting}
@@ -618,6 +614,37 @@ export function PracticeStartPage() {
               sx={{ color: "text.disabled", flexShrink: 0 }}
             />
           </ListItemButton>
+
+          {showDrills && (
+          <ListItemButton
+            onClick={() => {
+              setDrawerOpen(false);
+              navigate("/drills");
+            }}
+            sx={practiceItemSx}
+          >
+            <Box sx={practiceIconBoxSx}>
+              <svg width="22" height="22" viewBox="0 0 22 22" fill="none">
+                <circle cx="11" cy="11" r="8.2" stroke="#f0a23a" strokeWidth="1.6" />
+                <path
+                  d="M11 4.5v6.5l4 2.4"
+                  stroke="#f0a23a"
+                  strokeWidth="1.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </Box>
+            <ListItemText
+              primary="Drills"
+              secondary="Guided practice: gapping, proximity, rotation."
+              primaryTypographyProps={{ fontSize: "1.25rem", fontWeight: 700 }}
+            />
+            <ChevronRightRoundedIcon
+              sx={{ color: "text.disabled", flexShrink: 0 }}
+            />
+          </ListItemButton>
+          )}
 
           <ListItemButton disabled sx={practiceItemSx}>
             <Box sx={practiceIconBoxSx}>

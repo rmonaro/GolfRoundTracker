@@ -10,6 +10,7 @@ import {
   CircularProgress,
   Drawer,
   IconButton,
+  Slide,
   Slider,
   Stack,
   Tab,
@@ -85,6 +86,10 @@ export function RangeSessionPage() {
   const [lastChip, setLastChip] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Select a club" hint when tapping with no club chosen.
+  const [clubHint, setClubHint] = useState(false);
+  // Top instruction banner slides in from the left, then auto-hides.
+  const [showInstruction, setShowInstruction] = useState(true);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
   const [shotsTab, setShotsTab] = useState<string | null>(null);
 
@@ -269,6 +274,14 @@ export function RangeSessionPage() {
     if (phase === 'logging') practiceController.setClub(selectedClubId);
   }, [selectedClubId, phase]);
 
+  // Slide the instruction banner in (from the left), then hide it. Re-shows when
+  // the instruction context changes (phase, drawing mode, a detected swing).
+  useEffect(() => {
+    setShowInstruction(true);
+    const t = setTimeout(() => setShowInstruction(false), 3200);
+    return () => clearTimeout(t);
+  }, [phase, drawMode, draftCenter, pendingSwing]);
+
   // --- taps ---------------------------------------------------------------
   const handleTap = useCallback(
     async (p: LatLng) => {
@@ -282,8 +295,14 @@ export function RangeSessionPage() {
         return;
       }
       if (busy || phase !== 'logging' || !origin || !userId) return;
+      // Require a club before logging a shot.
+      if (!selectedClubId) {
+        setClubHint(true);
+        return;
+      }
       setBusy(true);
       setError(null);
+      setClubHint(false);
       try {
         // Current aim: the selected target wins (so re-aiming mid-session works),
         // else the session's saved line, else straight up the range (north).
@@ -497,32 +516,18 @@ export function RangeSessionPage() {
         onMapTap={handleTap}
       />
 
-      {/* Top instruction bar */}
+      {/* Top-right controls */}
       <Box
         sx={{
           position: 'absolute',
           top: 'calc(env(safe-area-inset-top) + 8px)',
-          left: 8,
           right: 8,
+          zIndex: 5,
           display: 'flex',
           gap: 1,
           alignItems: 'flex-start'
         }}
       >
-        <Box
-          sx={{
-            flex: 1,
-            bgcolor: 'rgba(0,0,0,0.6)',
-            color: '#fff',
-            borderRadius: 2,
-            px: 1.5,
-            py: 1
-          }}
-        >
-          <Typography variant="body2" fontWeight={600}>
-            {instruction}
-          </Typography>
-        </Box>
         {drawMode === 'none' && (
           <IconButton
             aria-label="How the range works"
@@ -535,19 +540,45 @@ export function RangeSessionPage() {
         <Button
           size="small"
           variant="contained"
-          color="inherit"
+          color="primary"
           disabled={busy}
           onClick={drawMode === 'none' ? onEnd : cancelDraw}
-          sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff' }}
+          sx={{ borderRadius: '5px' }}
         >
           {drawMode === 'none' ? 'End' : 'Cancel'}
         </Button>
       </Box>
 
+      {/* Instruction banner — theme blue, slides in from the left then hides. */}
+      <Slide direction="right" in={showInstruction} mountOnEnter unmountOnExit>
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 'calc(env(safe-area-inset-top) + 8px)',
+            left: 8,
+            maxWidth: '62%',
+            zIndex: 4,
+            bgcolor: 'info.main',
+            color: 'info.contrastText',
+            borderRadius: 2,
+            px: 1.5,
+            py: 1,
+            boxShadow: 4
+          }}
+        >
+          <Typography variant="body2" fontWeight={700}>
+            {instruction}
+          </Typography>
+        </Box>
+      </Slide>
+
       {/* Club selection — always present from load, just the circle. */}
       {drawMode === 'none' && (
       <Button
-        onClick={() => setClubPickerOpen(true)}
+        onClick={() => {
+          setClubHint(false);
+          setClubPickerOpen(true);
+        }}
         sx={{
           position: 'absolute',
           bottom: `calc(env(safe-area-inset-bottom) + ${controlsBottomPx}px)`,
@@ -558,16 +589,16 @@ export function RangeSessionPage() {
           minWidth: 56,
           borderRadius: '50%',
           p: 0,
-          bgcolor: 'rgba(0,0,0,0.6)',
-          color: '#fff',
-          border: 1.5,
-          borderColor: selectedClubObj ? 'primary.main' : 'rgba(255,255,255,0.35)',
+          bgcolor: (theme) => alpha(theme.palette.info.main, 0.85),
+          color: 'info.contrastText',
+          border: 2,
+          borderColor: selectedClubObj ? 'primary.main' : 'rgba(255,255,255,0.55)',
           backdropFilter: 'blur(6px)',
           WebkitBackdropFilter: 'blur(6px)',
           fontWeight: 800,
           fontSize: '0.95rem',
           lineHeight: 1,
-          '&:hover': { bgcolor: 'rgba(0,0,0,0.75)' }
+          '&:hover': { bgcolor: (theme) => alpha(theme.palette.info.main, 0.95) }
         }}
       >
         {selectedClubObj
@@ -800,6 +831,22 @@ export function RangeSessionPage() {
         </Alert>
       )}
 
+      {clubHint && phase === 'logging' && drawMode === 'none' && (
+        <Alert
+          severity="info"
+          onClose={() => setClubHint(false)}
+          sx={{
+            position: 'absolute',
+            left: 8,
+            right: 8,
+            bottom: 'calc(env(safe-area-inset-bottom) + 84px)',
+            zIndex: 6
+          }}
+        >
+          Select a club, then tap the screen.
+        </Alert>
+      )}
+
       {/* Club picker — same tier-1 / tier-2 affordance as the round GPS. */}
       <Drawer
         anchor="bottom"
@@ -835,7 +882,10 @@ export function RangeSessionPage() {
               onChange={(nextClubId, nextTier1) => {
                 setSelectedClubId(nextClubId);
                 setSelectedClubTier1(nextTier1);
-                if (nextClubId) setClubPickerOpen(false);
+                if (nextClubId) {
+                  setClubHint(false);
+                  setClubPickerOpen(false);
+                }
               }}
             />
           )}

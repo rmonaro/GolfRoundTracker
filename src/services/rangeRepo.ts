@@ -19,6 +19,8 @@ function mapSession(r: RangeSessionRow): RangeSession {
     origin: { lat: r.origin_lat, lng: r.origin_lng },
     target: { lat: r.target_lat, lng: r.target_lng },
     targetBearing: r.target_bearing,
+    drillId: r.drill_id,
+    drillConfig: r.drill_config,
     startedAt: r.started_at,
     endedAt: r.ended_at
   };
@@ -33,6 +35,9 @@ function mapShot(r: RangeShotRow): RangeShot {
     swingEventId: r.swing_event_id,
     club: r.club,
     targetId: r.target_id,
+    prescribedClub: r.prescribed_club,
+    targetYards: r.target_yards,
+    proximityYards: r.proximity_m != null ? mToYards(r.proximity_m) : null,
     land: { lat: r.land_lat, lng: r.land_lng },
     carryYards: mToYards(r.carry_m),
     offlineYards: mToYards(r.offline_m),
@@ -65,7 +70,12 @@ export const rangeRepo = {
    * Create a session at a mat. Captures the fixed origin + the tapped target
    * line and computes the origin->target bearing. (`createRangeSession`.)
    */
-  async createSession(userId: string, origin: LatLng, target: LatLng): Promise<RangeSession> {
+  async createSession(
+    userId: string,
+    origin: LatLng,
+    target: LatLng,
+    drill?: { drillId: string; drillConfig: Record<string, unknown> } | null
+  ): Promise<RangeSession> {
     const targetBearing = computeBearing(origin, target);
     const { data, error } = await supabase
       .from('range_sessions')
@@ -75,7 +85,9 @@ export const rangeRepo = {
         origin_lng: origin.lng,
         target_lat: target.lat,
         target_lng: target.lng,
-        target_bearing: targetBearing
+        target_bearing: targetBearing,
+        drill_id: drill?.drillId ?? null,
+        drill_config: drill?.drillConfig ?? null
       })
       .select('*')
       .single();
@@ -107,6 +119,12 @@ export const rangeRepo = {
     aim?: LatLng | null;
     /** The aim target this shot was hit at (for per-shot result), if any. */
     targetId?: string | null;
+    /** Drill prescription: the club the drill asked for. */
+    prescribedClub?: string | null;
+    /** Drill prescription: intended carry in yards. */
+    targetYards?: number | null;
+    /** Distance from landing point to the intended point, meters (proximity drills). */
+    proximityM?: number | null;
   }): Promise<RangeShot> {
     const { session, land } = input;
     const aim = input.aim ?? session.target;
@@ -119,6 +137,9 @@ export const rangeRepo = {
         swing_event_id: input.swingEventId ?? null,
         club: input.club ?? null,
         target_id: input.targetId ?? null,
+        prescribed_club: input.prescribedClub ?? null,
+        target_yards: input.targetYards ?? null,
+        proximity_m: input.proximityM ?? null,
         land_lat: land.lat,
         land_lng: land.lng,
         carry_m: carryM,

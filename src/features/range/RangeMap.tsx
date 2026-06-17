@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Box, Typography } from '@mui/material';
 import { mapboxgl, hasMapbox } from '@/features/course/mapbox';
 import type { LatLng } from '@/types/range';
@@ -39,6 +39,10 @@ interface RangeMapProps {
   drawing?: boolean;
   /** Tapped an existing target (selection) — only fires when not drawing. */
   onTargetTap?: (id: string) => void;
+  /** Drill mode: let the user drag the aim marker to rotate the target line. */
+  aimDraggable?: boolean;
+  /** Fires (on drag end) with the dragged aim point so the caller can re-aim. */
+  onAimChange?: (p: LatLng) => void;
   /** Called on every map tap with the tapped {lat, lng}. */
   onMapTap: (p: LatLng) => void;
 }
@@ -70,17 +74,26 @@ export function RangeMap({
   draftRing,
   drawing,
   onTargetTap,
+  aimDraggable,
+  onAimChange,
   onMapTap
 }: RangeMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const readyRef = useRef(false);
+  // State mirror of readyRef so the sync effects re-run once the map's `load`
+  // fires — otherwise data set before load (e.g. a drill's target rings) is lost.
+  const [ready, setReady] = useState(false);
   const tapRef = useRef(onMapTap);
   tapRef.current = onMapTap;
   const targetTapRef = useRef(onTargetTap);
   targetTapRef.current = onTargetTap;
   const drawingRef = useRef(drawing);
   drawingRef.current = drawing;
+  const aimDraggableRef = useRef(aimDraggable);
+  aimDraggableRef.current = aimDraggable;
+  const onAimChangeRef = useRef(onAimChange);
+  onAimChangeRef.current = onAimChange;
 
   const originMarkerRef = useRef<mapboxgl.Marker | null>(null);
   const targetMarkerRef = useRef<mapboxgl.Marker | null>(null);
@@ -157,6 +170,7 @@ export function RangeMap({
 
     map.on('load', () => {
       readyRef.current = true;
+      setReady(true);
 
       // Origin (mat) marker.
       originMarkerRef.current = new mapboxgl.Marker({
@@ -319,19 +333,39 @@ export function RangeMap({
       if (targetMarkerRef.current) {
         targetMarkerRef.current.setLngLat([target.lng, target.lat]);
       } else {
+        const draggable = !!aimDraggableRef.current;
         targetMarkerRef.current = new mapboxgl.Marker({
           element: el('', {
-            width: '16px',
-            height: '16px',
+            width: draggable ? '22px' : '16px',
+            height: draggable ? '22px' : '16px',
             borderRadius: '50%',
             background: TARGET_COLOR,
             border: '3px solid #fff',
-            boxShadow: '0 0 0 1px rgba(0,0,0,0.25)'
+            boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
+            cursor: draggable ? 'grab' : ''
           }),
-          anchor: 'center'
+          anchor: 'center',
+          draggable
         })
           .setLngLat([target.lng, target.lat])
           .addTo(map);
+        if (draggable) {
+          const lineSrc = () => map.getSource('range-target-line') as mapboxgl.GeoJSONSource | undefined;
+          // Redraw the aim line live as the handle moves…
+          targetMarkerRef.current.on('drag', () => {
+            const ll = targetMarkerRef.current!.getLngLat();
+            lineSrc()?.setData({
+              type: 'Feature',
+              properties: {},
+              geometry: { type: 'LineString', coordinates: [[origin.lng, origin.lat], [ll.lng, ll.lat]] }
+            });
+          });
+          // …and commit the new aim direction on release.
+          targetMarkerRef.current.on('dragend', () => {
+            const ll = targetMarkerRef.current!.getLngLat();
+            onAimChangeRef.current?.({ lat: ll.lat, lng: ll.lng });
+          });
+        }
       }
     } else {
       src?.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } });
@@ -339,7 +373,7 @@ export function RangeMap({
       targetMarkerRef.current = null;
     }
   }
-  useEffect(syncTargetLine, [target?.lat, target?.lng, origin.lat, origin.lng]);
+  useEffect(syncTargetLine, [target?.lat, target?.lng, origin.lat, origin.lng, ready]);
 
   // --- yardage arcs + labels ---------------------------------------------
   function syncArcs() {
@@ -385,7 +419,7 @@ export function RangeMap({
       arcLabelMarkersRef.current.push(marker);
     }
   }
-  useEffect(syncArcs, [showArcs, bearing, origin.lat, origin.lng]);
+  useEffect(syncArcs, [showArcs, bearing, origin.lat, origin.lng, ready]);
 
   // --- shots --------------------------------------------------------------
   function syncShots() {
@@ -401,7 +435,7 @@ export function RangeMap({
       }))
     });
   }
-  useEffect(syncShots, [shots]);
+  useEffect(syncShots, [shots, ready]);
 
   // --- targets ------------------------------------------------------------
   function syncTargets() {
@@ -417,7 +451,7 @@ export function RangeMap({
       }))
     });
   }
-  useEffect(syncTargets, [targets]);
+  useEffect(syncTargets, [targets, ready]);
 
   // --- draft (in-progress drawing) ----------------------------------------
   function syncDraft() {
@@ -435,7 +469,7 @@ export function RangeMap({
         : { type: 'LineString', coordinates: draftRing };
     src?.setData({ type: 'Feature', properties: {}, geometry });
   }
-  useEffect(syncDraft, [draftRing]);
+  useEffect(syncDraft, [draftRing, ready]);
 
   if (!hasMapbox()) {
     return (

@@ -317,6 +317,10 @@ export interface RangeSessionRow {
   target_lng: number;
   /** Degrees 0-360, origin -> target. */
   target_bearing: number;
+  /** Which drill this run was (null = free play). */
+  drill_id: string | null;
+  /** Setup choices for the drill run (clubs, shot counts, toggles). */
+  drill_config: Record<string, unknown> | null;
   started_at: string;
   ended_at: string | null;
   created_at: string;
@@ -332,6 +336,12 @@ export interface RangeShotRow {
   club: string | null;
   /** The aim target this shot was hit at, if one was selected. */
   target_id: string | null;
+  /** Drill prescription: the club the drill asked for this shot. */
+  prescribed_club: string | null;
+  /** Drill prescription: the intended carry for this shot, yards. */
+  target_yards: number | null;
+  /** Distance from the landing point to the intended point, meters (proximity drills). */
+  proximity_m: number | null;
   land_lat: number;
   land_lng: number;
   /** Along the target line, meters. */
