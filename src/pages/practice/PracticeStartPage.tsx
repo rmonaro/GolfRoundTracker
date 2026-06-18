@@ -78,7 +78,11 @@ const practiceIconBoxSx: SxProps<Theme> = {
 
 export function PracticeStartPage() {
   const navigate = useNavigate();
-  const activeSession = useSwingSessionStore((s) => s.session);
+  // Only a real Swing/Net session is resumable here — Range/Drills also use the
+  // watch (tagged source='range') but must not surface as a live Swing/Net session.
+  const activeSession = useSwingSessionStore((s) =>
+    s.session && s.session.source !== "range" ? s.session : null,
+  );
   const [starting, setStarting] = useState(false);
   const [launchInfo, setLaunchInfo] = useState<string | null>(null);
   const [drawerOpen, setDrawerOpen] = useState(false);

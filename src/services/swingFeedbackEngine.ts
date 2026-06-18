@@ -15,6 +15,46 @@ const fb = (
   swingId: string | null = null
 ): SwingFeedback => ({ swingId, level, code, message, disclaimer: SWING_DISCLAIMER });
 
+// Plain-language explanation for each feedback code, shown when the user taps a
+// feedback chip. Relative/estimated framing only — never absolute geometry.
+const FEEDBACK_EXPLANATIONS: Record<string, string> = {
+  TEMPO_GOOD:
+    'Your backswing-to-downswing ratio was close to the classic ~3:1. A repeatable tempo is the foundation of consistent ball-striking.',
+  BACKSWING_RUSHED:
+    'Your backswing was quick relative to your downswing (ratio under ~2.2:1). Rushing the takeaway often costs control and sequencing — try a slower, smoother start back.',
+  BACKSWING_SLOW:
+    'Your backswing was long/slow relative to a fast downswing (ratio over ~4:1). Not necessarily bad, but a big gap can hurt timing — aim for a smoother, more proportional change of direction.',
+  TRANSITION_AGGRESSIVE:
+    'The change of direction at the top was abrupt. A smoother transition lets the club load and sequence properly instead of throwing speed away early.',
+  TRANSITION_SMOOTH:
+    'You changed direction smoothly at the top — a sign of good sequencing and a key to repeatable contact.',
+  FINISH_UNSTABLE:
+    'Your wrist was still settling after impact, which suggests you came off balance. Holding a balanced finish usually means you controlled your body through the shot.',
+  FINISH_BALANCED:
+    'You held a steady, balanced finish — a good sign you stayed in control through impact.',
+  TEMPO_CONSISTENCY_UP:
+    'Your swing-to-swing tempo was tighter than your usual baseline this session — you are repeating your rhythm better.',
+  PATTERN_LESS_CONSISTENT:
+    'Your overall motion shape repeated less closely than your baseline this session. A repeatable pattern (your "plane tendency") is what makes contact predictable.',
+  FATIGUE_POSSIBLE:
+    'Your later swings drifted from your earlier ones in a way that often signals tiredness. Consider a rest, or treat the back end of the session as quality over quantity.',
+  SETUP_VARIED:
+    'Your address/setup orientation changed noticeably between swings. A more repeatable setup makes everything after it easier to repeat.',
+  SETUP_REPEATABLE:
+    'You set up very consistently swing to swing — a strong, often-overlooked fundamental.',
+  RUSHING:
+    'You moved through balls quickly with little rest between swings. Short rests can reduce focus and make your reps less representative of on-course swings.',
+  OVER_THE_TOP:
+    'On average your direction shifted in a way associated with an over-the-top move. This is a tendency inferred from wrist motion, not a measured club path — worth checking your transition.',
+  DECELERATING:
+    'On average you tended to slow down through impact rather than accelerate. "Quitting" on the shot leaks power and can flip the hands — feel like you are speeding up past the ball.'
+};
+
+/** Plain-language explanation for a feedback code (empty string if unknown). */
+export function feedbackExplanation(code: string): string {
+  return FEEDBACK_EXPLANATIONS[code] ?? '';
+}
+
 // --- per-swing -------------------------------------------------------------
 
 export function evaluateSwing(s: SwingMetric): SwingFeedback[] {

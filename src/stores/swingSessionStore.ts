@@ -22,6 +22,8 @@ export interface ActivePracticeSession {
   userId: string;
   startedAt: string;
   clubId: string | null;
+  /** Origin of this session: 'practice' = Swing/Net, 'range' = Range/Drills. */
+  source: string;
 }
 
 interface SwingSessionState {

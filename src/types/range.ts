@@ -10,6 +10,15 @@ export interface LatLng {
   lng: number;
 }
 
+/** A saved down-range aim direction, anchored to a mat so it reloads on return. */
+export interface RangeOrientation {
+  id: string;
+  userId: string;
+  anchor: LatLng;
+  /** Degrees 0-360, origin -> down-range. */
+  bearing: number;
+}
+
 /** A user-drawn aim target on the range (a green or spot). */
 export interface RangeTarget {
   id: string;

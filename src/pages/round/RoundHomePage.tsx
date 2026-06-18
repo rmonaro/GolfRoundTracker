@@ -84,7 +84,7 @@ export function RoundHomePage() {
 
   return (
     <Box>
-      <PageHeader title="Round" subtitle="Start a new round or resume" />
+      <PageHeader title="Round" subtitle="Start a new round or resume" back="/" />
       <Stack spacing={2} px={2} pb={3}>
         {/* A tournament round is surfaced by the tournament card below instead,
             so we hide the generic active-round card for it — but only when that

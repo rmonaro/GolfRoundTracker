@@ -88,6 +88,7 @@ export function BagPage() {
     <Box>
       <PageHeader
         title="My Bag"
+        back="/"
         subtitle={data ? `${data.length} ${data.length === 1 ? 'club' : 'clubs'}` : ' '}
         action={
           (data?.length ?? 0) > 0 ? (

@@ -334,38 +334,38 @@ export function RangeMap({
         targetMarkerRef.current.setLngLat([target.lng, target.lat]);
       } else {
         const draggable = !!aimDraggableRef.current;
-        targetMarkerRef.current = new mapboxgl.Marker({
+        const marker = new mapboxgl.Marker({
           element: el('', {
-            width: draggable ? '22px' : '16px',
-            height: draggable ? '22px' : '16px',
+            width: '20px',
+            height: '20px',
             borderRadius: '50%',
             background: TARGET_COLOR,
             border: '3px solid #fff',
             boxShadow: '0 0 0 1px rgba(0,0,0,0.25)',
-            cursor: draggable ? 'grab' : ''
+            cursor: 'grab'
           }),
           anchor: 'center',
           draggable
         })
           .setLngLat([target.lng, target.lat])
           .addTo(map);
-        if (draggable) {
-          const lineSrc = () => map.getSource('range-target-line') as mapboxgl.GeoJSONSource | undefined;
-          // Redraw the aim line live as the handle moves…
-          targetMarkerRef.current.on('drag', () => {
-            const ll = targetMarkerRef.current!.getLngLat();
-            lineSrc()?.setData({
-              type: 'Feature',
-              properties: {},
-              geometry: { type: 'LineString', coordinates: [[origin.lng, origin.lat], [ll.lng, ll.lat]] }
-            });
+        targetMarkerRef.current = marker;
+        // Handlers attached unconditionally (gated by the ref) so draggability can
+        // toggle later via setDraggable without losing the listeners.
+        marker.on('drag', () => {
+          if (!aimDraggableRef.current) return;
+          const ll = marker.getLngLat();
+          (map.getSource('range-target-line') as mapboxgl.GeoJSONSource | undefined)?.setData({
+            type: 'Feature',
+            properties: {},
+            geometry: { type: 'LineString', coordinates: [[origin.lng, origin.lat], [ll.lng, ll.lat]] }
           });
-          // …and commit the new aim direction on release.
-          targetMarkerRef.current.on('dragend', () => {
-            const ll = targetMarkerRef.current!.getLngLat();
-            onAimChangeRef.current?.({ lat: ll.lat, lng: ll.lng });
-          });
-        }
+        });
+        marker.on('dragend', () => {
+          if (!aimDraggableRef.current) return;
+          const ll = marker.getLngLat();
+          onAimChangeRef.current?.({ lat: ll.lat, lng: ll.lng });
+        });
       }
     } else {
       src?.setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: [] } });
@@ -374,6 +374,11 @@ export function RangeMap({
     }
   }
   useEffect(syncTargetLine, [target?.lat, target?.lng, origin.lat, origin.lng, ready]);
+
+  // Toggle the aim handle's draggability without recreating the marker.
+  useEffect(() => {
+    targetMarkerRef.current?.setDraggable(!!aimDraggable);
+  }, [aimDraggable, ready, target?.lat, target?.lng]);
 
   // --- yardage arcs + labels ---------------------------------------------
   function syncArcs() {

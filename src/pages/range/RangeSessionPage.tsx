@@ -25,6 +25,8 @@ import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
+import ExploreRoundedIcon from '@mui/icons-material/ExploreRounded';
+import LockRoundedIcon from '@mui/icons-material/LockRounded';
 import { useNavigate } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { useAuthStore } from '@/stores/authStore';
@@ -101,6 +103,12 @@ export function RangeSessionPage() {
   const [draftCenter, setDraftCenter] = useState<LatLng | null>(null);
   const [draftRadiusYd, setDraftRadiusYd] = useState(12);
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
+
+  // Down-range aim direction: dragged by the user, remembered per range.
+  // null → fall back to the session's bearing, else straight up (north).
+  const [manualBearing, setManualBearing] = useState<number | null>(null);
+  const [aimLocked, setAimLocked] = useState(false);
+  const [aimDirty, setAimDirty] = useState(false);
 
   const aimTarget = selectedTargetId ? targets.find((t) => t.id === selectedTargetId) ?? null : null;
 
@@ -204,6 +212,25 @@ export function RangeSessionPage() {
     };
   }, [origin?.lat, origin?.lng, userId]);
 
+  // Restore the remembered down-range aim direction for this mat, if any.
+  useEffect(() => {
+    if (!origin || !userId) return;
+    let cancelled = false;
+    rangeRepo
+      .getOrientationNear(userId, origin)
+      .then((o) => {
+        if (!cancelled && o) {
+          setManualBearing(o.bearing);
+          setAimLocked(true);
+          setAimDirty(false);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [origin?.lat, origin?.lng, userId]);
+
   const cancelDraw = useCallback(() => {
     setDrawMode('none');
     setDraftCenter(null);
@@ -246,6 +273,20 @@ export function RangeSessionPage() {
     },
     []
   );
+
+  // Persist the current down-range aim direction for this mat (reload on return).
+  const lockAim = useCallback(async () => {
+    if (!origin || !userId) return;
+    const bearing = manualBearing != null ? manualBearing : session ? session.targetBearing : 0;
+    try {
+      await rangeRepo.saveOrientation(userId, origin, bearing);
+      setManualBearing(bearing);
+      setAimLocked(true);
+      setAimDirty(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save aim direction');
+    }
+  }, [origin, userId, manualBearing, session]);
 
   // --- Watch practice: track tempo/consistency during the range session ----
   // Started tagged source='range' so it stays out of the Swing/Net history.
@@ -305,13 +346,13 @@ export function RangeSessionPage() {
       setClubHint(false);
       try {
         // Current aim: the selected target wins (so re-aiming mid-session works),
-        // else the session's saved line, else straight up the range (north).
+        // else the user's chosen/locked direction (or the session's saved bearing).
         let activeSession = session;
+        const baseBearing =
+          manualBearing != null ? manualBearing : activeSession ? activeSession.targetBearing : 0;
         const aim = aimTarget
           ? targetCenter(aimTarget)
-          : activeSession
-            ? activeSession.target
-            : destinationPoint(origin, 0, yardsToM(250));
+          : destinationPoint(origin, baseBearing, yardsToM(250));
         // Lazily open the session on the first shot.
         if (!activeSession) {
           activeSession = await rangeRepo.createSession(userId, origin, aim);
@@ -347,7 +388,7 @@ export function RangeSessionPage() {
         setBusy(false);
       }
     },
-    [drawMode, busy, phase, origin, userId, session, aimTarget, selectedClubId, clubLabel]
+    [drawMode, busy, phase, origin, userId, session, aimTarget, manualBearing, selectedClubId, clubLabel]
   );
 
   // End the range session (idempotent) and go to the summary.
@@ -474,14 +515,13 @@ export function RangeSessionPage() {
           ? 'Swing detected — tap where the ball landed.'
           : 'Tap where the ball landed.';
 
-  // Aim point/bearing: the selected target always wins (so switching targets
-  // re-aims the line mid-session), then the active session's saved line, else
-  // straight up the range. Shots are decomposed relative to this current aim.
+  // Aim point/bearing: a selected target always wins (so switching targets
+  // re-aims mid-session). Otherwise the aim points down the user's chosen/locked
+  // direction (else the session's saved bearing, else straight up the range).
+  const freeBearing = manualBearing != null ? manualBearing : session ? session.targetBearing : 0;
   const aimPoint: LatLng = aimTarget
     ? targetCenter(aimTarget)
-    : session
-      ? session.target
-      : destinationPoint(origin, 0, yardsToM(250));
+    : destinationPoint(origin, freeBearing, yardsToM(250));
   const aimBearing = computeBearing(origin, aimPoint);
 
   const targetShapes: TargetShape[] = targets.map((t) => ({
@@ -513,6 +553,12 @@ export function RangeSessionPage() {
         targets={targetShapes}
         draftRing={draftRing}
         drawing={drawMode !== 'none'}
+        aimDraggable={drawMode === 'none' && !aimTarget}
+        onAimChange={(p) => {
+          setManualBearing(computeBearing(origin, p));
+          setAimDirty(true);
+          setAimLocked(false);
+        }}
         onMapTap={handleTap}
       />
 
@@ -548,6 +594,45 @@ export function RangeSessionPage() {
           {drawMode === 'none' ? 'End' : 'Cancel'}
         </Button>
       </Box>
+
+      {/* Aim-direction control — drag the marker to point down the range, then lock. */}
+      {phase === 'logging' && drawMode === 'none' && !aimTarget && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 'calc(env(safe-area-inset-top) + 58px)',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 5
+          }}
+        >
+          {aimLocked && !aimDirty ? (
+            <Chip
+              size="small"
+              icon={<LockRoundedIcon />}
+              label="Aim locked"
+              onClick={() => setAimDirty(true)}
+              sx={{
+                bgcolor: 'rgba(0,0,0,0.6)',
+                color: '#fff',
+                fontWeight: 700,
+                '& .MuiChip-icon': { color: '#fff' }
+              }}
+            />
+          ) : (
+            <Button
+              size="small"
+              variant="contained"
+              color="primary"
+              startIcon={aimDirty ? <LockRoundedIcon /> : <ExploreRoundedIcon />}
+              onClick={lockAim}
+              sx={{ borderRadius: '5px' }}
+            >
+              {aimDirty ? 'Lock this direction' : 'Lock aim direction'}
+            </Button>
+          )}
+        </Box>
+      )}
 
       {/* Instruction banner — theme blue, slides in from the left then hides. */}
       <Slide direction="right" in={showInstruction} mountOnEnter unmountOnExit>

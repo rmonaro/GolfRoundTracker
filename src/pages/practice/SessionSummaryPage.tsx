@@ -6,6 +6,7 @@ import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
 import { practicePageSx } from './practicePageSx';
 import { ClubGroups } from '@/features/practice/ClubGroups';
+import { FeedbackChips } from '@/features/practice/FeedbackChips';
 import { fmtPlane } from '@/utils/swingLabels';
 
 const fatigueLabel: Record<string, string> = {
@@ -56,9 +57,6 @@ export function SessionSummaryPage() {
       </Box>
     );
   }
-
-  const levelColor = (level: string) =>
-    level === 'positive' ? 'success' : level === 'attention' ? 'warning' : 'default';
 
   // Prefer the persisted rollup, but fall back to live computation from the
   // swings so the cards never show 0/— while swings are clearly present.
@@ -117,11 +115,7 @@ export function SessionSummaryPage() {
           <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>
             Session feedback
           </Typography>
-          <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
-            {sessionFeedback.map((f) => (
-              <Chip key={f.code} size="small" color={levelColor(f.level)} label={f.message} />
-            ))}
-          </Stack>
+          <FeedbackChips items={sessionFeedback} />
         </>
       )}
 

@@ -1,6 +1,6 @@
 import { supabase } from '@/lib/supabase';
-import type { RangeSessionRow, RangeShotRow, RangeTargetRow } from '@/types/database';
-import type { LatLng, RangeSession, RangeShot, RangeTarget } from '@/types/range';
+import type { RangeOrientationRow, RangeSessionRow, RangeShotRow, RangeTargetRow } from '@/types/database';
+import type { LatLng, RangeOrientation, RangeSession, RangeShot, RangeTarget } from '@/types/range';
 import {
   computeBearing,
   computeShot,
@@ -230,6 +230,59 @@ export const rangeRepo = {
   async deleteTarget(targetId: string): Promise<void> {
     const { error } = await supabase.from('range_targets').delete().eq('id', targetId);
     if (error) throw toAppError(error, 'Could not delete target');
+  },
+
+  /** The saved aim direction nearest this mat (same range), if any. */
+  async getOrientationNear(userId: string, origin: LatLng, maxMeters = 150): Promise<RangeOrientation | null> {
+    const { data, error } = await supabase
+      .from('range_orientations')
+      .select('*')
+      .eq('user_id', userId);
+    if (error) throw toAppError(error, 'Could not load range orientation');
+    let best: RangeOrientation | null = null;
+    let bestDist = maxMeters;
+    for (const r of data ?? []) {
+      const row = r as RangeOrientationRow;
+      const anchor = { lat: row.anchor_lat, lng: row.anchor_lng };
+      const dist = haversineMeters(anchor, origin);
+      if (dist <= bestDist) {
+        bestDist = dist;
+        best = { id: row.id, userId: row.user_id, anchor, bearing: row.bearing };
+      }
+    }
+    return best;
+  },
+
+  /**
+   * Save (or update) the down-range aim direction for this mat. Updates the
+   * nearest existing orientation within `mergeMeters`, else inserts a new one.
+   */
+  async saveOrientation(
+    userId: string,
+    origin: LatLng,
+    bearing: number,
+    mergeMeters = 80
+  ): Promise<RangeOrientation> {
+    const existing = await this.getOrientationNear(userId, origin, mergeMeters);
+    if (existing) {
+      const { data, error } = await supabase
+        .from('range_orientations')
+        .update({ bearing, updated_at: new Date().toISOString() })
+        .eq('id', existing.id)
+        .select('*')
+        .single();
+      if (error) throw toAppError(error, 'Could not save range orientation');
+      const row = data as RangeOrientationRow;
+      return { id: row.id, userId: row.user_id, anchor: { lat: row.anchor_lat, lng: row.anchor_lng }, bearing: row.bearing };
+    }
+    const { data, error } = await supabase
+      .from('range_orientations')
+      .insert({ user_id: userId, anchor_lat: origin.lat, anchor_lng: origin.lng, bearing })
+      .select('*')
+      .single();
+    if (error) throw toAppError(error, 'Could not save range orientation');
+    const row = data as RangeOrientationRow;
+    return { id: row.id, userId: row.user_id, anchor: { lat: row.anchor_lat, lng: row.anchor_lng }, bearing: row.bearing };
   },
 
   async getSession(sessionId: string): Promise<RangeSession | null> {

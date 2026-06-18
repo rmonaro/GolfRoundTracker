@@ -353,6 +353,17 @@ export interface RangeShotRow {
   created_at: string;
 }
 
+export interface RangeOrientationRow {
+  id: string;
+  user_id: string;
+  anchor_lat: number;
+  anchor_lng: number;
+  /** Degrees 0-360, origin -> down-range. */
+  bearing: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface RangeTargetRow {
   id: string;
   user_id: string;
@@ -384,6 +395,7 @@ export interface Database {
       range_sessions: { Row: RangeSessionRow; Insert: Omit<RangeSessionRow, 'id' | 'created_at' | 'started_at' | 'ended_at'> & { id?: string; created_at?: string; started_at?: string; ended_at?: string | null }; Update: Partial<RangeSessionRow> };
       range_shots: { Row: RangeShotRow; Insert: Omit<RangeShotRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<RangeShotRow> };
       range_targets: { Row: RangeTargetRow; Insert: Omit<RangeTargetRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<RangeTargetRow> };
+      range_orientations: { Row: RangeOrientationRow; Insert: Omit<RangeOrientationRow, 'id' | 'created_at' | 'updated_at'> & { id?: string; created_at?: string; updated_at?: string }; Update: Partial<RangeOrientationRow> };
     };
   };
 }
