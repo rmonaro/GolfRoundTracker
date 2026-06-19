@@ -22,8 +22,7 @@ import type { SxProps, Theme } from '@mui/material';
 import LocationOnRoundedIcon from '@mui/icons-material/LocationOnRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
-import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
-import AddRoundedIcon from '@mui/icons-material/AddRounded';
+import { TargetIcon } from '@/components/icons/TargetIcon';
 import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
 import ExploreRoundedIcon from '@mui/icons-material/ExploreRounded';
 import LockRoundedIcon from '@mui/icons-material/LockRounded';
@@ -114,6 +113,10 @@ export function RangeSessionPage() {
   // only — it no longer rotates the map once the range orientation is locked.
   // null → fall back to the session's bearing, else straight up (north).
   const [manualBearing, setManualBearing] = useState<number | null>(null);
+  // The exact point the user dragged the aim to (lat/lng). Holds both direction
+  // AND distance so the aim stays where dropped instead of snapping to a fixed
+  // down-range distance. null → fall back to the default 250-yd aim line.
+  const [manualAim, setManualAim] = useState<LatLng | null>(null);
   // The locked orientation of the range (which way is "up" on the map). Set when
   // the user locks the direction (or it's restored for this mat). Decoupled from
   // the aim so moving the aim never re-rotates the map.
@@ -561,7 +564,7 @@ export function RangeSessionPage() {
   const freeBearing = manualBearing != null ? manualBearing : session ? session.targetBearing : 0;
   const aimPoint: LatLng = aimTarget
     ? targetCenter(aimTarget)
-    : destinationPoint(origin, freeBearing, yardsToM(250));
+    : manualAim ?? destinationPoint(origin, freeBearing, yardsToM(250));
   const aimBearing = computeBearing(origin, aimPoint);
 
   // Map orientation is independent of the aim. Once the range direction is
@@ -609,6 +612,9 @@ export function RangeSessionPage() {
         // chip). Before locking, dragging both aims and squares up the map.
         aimDraggable={drawMode === 'none'}
         onAimChange={(p) => {
+          // Keep the aim exactly where dropped (direction + distance); also track
+          // the bearing for orientation (pre-lock) and the wind readout.
+          setManualAim(p);
           setManualBearing(computeBearing(origin, p));
           setSelectedTargetId(null);
           // Keep the locked orientation — only mark "dirty" (re-orienting) when
@@ -894,21 +900,22 @@ export function RangeSessionPage() {
           {drawMode === 'none' && (
             <Button
               onClick={() => setTargetsDrawerOpen(true)}
-              startIcon={targets.length > 0 ? <VisibilityRoundedIcon /> : undefined}
-              endIcon={targets.length === 0 ? <AddRoundedIcon /> : undefined}
+              aria-label="Targets"
               sx={{
-                borderRadius: '5px',
+                alignSelf: 'center',
+                width: 56,
+                height: 56,
+                minWidth: 56,
+                p: 0,
+                borderRadius: '50%',
                 bgcolor: (theme) => alpha(theme.palette.primary.main, 0.78),
                 color: '#fff',
                 backdropFilter: 'blur(6px)',
                 WebkitBackdropFilter: 'blur(6px)',
-                fontWeight: 700,
-                textTransform: 'none',
-                py: 0.75,
                 '&:hover': { bgcolor: (theme) => alpha(theme.palette.primary.main, 0.9) }
               }}
             >
-              Targets
+              <TargetIcon sx={{ fontSize: '2rem' }} />
             </Button>
           )}
         </Box>
