@@ -55,6 +55,7 @@ import {
   computeBearing,
   destinationPoint,
   haversineMeters,
+  pointInPolygon,
   yardsToM
 } from '@/features/range/rangeGeo';
 import type { LatLng, RangeSession, RangeShot, RangeTarget } from '@/types/range';
@@ -125,6 +126,23 @@ export function RangeSessionPage() {
   const [aimDirty, setAimDirty] = useState(false);
 
   const aimTarget = selectedTargetId ? targets.find((t) => t.id === selectedTargetId) ?? null : null;
+
+  // Hit-test a point against saved targets so dragging the aim back onto a
+  // target re-selects it (snapping the aim to its center) without opening the
+  // targets drawer. Circles use a radius check; polygons a point-in-polygon.
+  const targetAtPoint = useCallback(
+    (p: LatLng): RangeTarget | null => {
+      for (const t of targets) {
+        if (t.kind === 'circle' && t.center) {
+          if (haversineMeters(p, t.center) <= (t.radiusM ?? yardsToM(12))) return t;
+        } else if (t.kind === 'polygon' && t.points && t.points.length >= 3) {
+          if (pointInPolygon(p, t.points)) return t;
+        }
+      }
+      return null;
+    },
+    [targets]
+  );
 
   // Live wind at the mat, resolved against the down-range aim line so the HUD
   // reads head/tail/cross the same way the round does.
@@ -616,7 +634,10 @@ export function RangeSessionPage() {
           // the bearing for orientation (pre-lock) and the wind readout.
           setManualAim(p);
           setManualBearing(computeBearing(origin, p));
-          setSelectedTargetId(null);
+          // If dropped onto an existing target, re-select it (aim snaps to its
+          // center) — no need to open the targets drawer. Otherwise free-aim.
+          const hit = targetAtPoint(p);
+          setSelectedTargetId(hit ? hit.id : null);
           // Keep the locked orientation — only mark "dirty" (re-orienting) when
           // nothing is locked yet, which just toggles the lock button's label.
           if (!aimLocked) setAimDirty(true);
@@ -915,7 +936,7 @@ export function RangeSessionPage() {
                 '&:hover': { bgcolor: (theme) => alpha(theme.palette.primary.main, 0.9) }
               }}
             >
-              <TargetIcon sx={{ fontSize: '2rem' }} />
+              <TargetIcon sx={{ width: '100%', height: '100%' }} />
             </Button>
           )}
         </Box>
