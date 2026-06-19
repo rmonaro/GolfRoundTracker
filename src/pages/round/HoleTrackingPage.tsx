@@ -68,6 +68,9 @@ import {
   classifyTap,
   teeToGreenBearing
 } from '@/features/course/HoleLayout';
+import { WindIndicator } from '@/components/ui/WindIndicator';
+import { useWind } from '@/hooks/useWind';
+import { bearingDeg } from '@/services/weatherService';
 import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeCompletedTotals, computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
@@ -832,6 +835,28 @@ export function HoleTrackingPage() {
         })
       : null;
 
+  // Live wind, resolved against the direction the player is hitting. Target
+  // bearing: from the current position to the pin/green when we have a fix,
+  // else the static tee→green line so it still reads on un-located holes.
+  const windPinLat = sharedPinLat ?? greenLat;
+  const windPinLng = sharedPinLng ?? greenLng;
+  const windTargetBearing =
+    liveFix && windPinLat != null && windPinLng != null
+      ? bearingDeg(liveFix.lat, liveFix.lng, windPinLat, windPinLng)
+      : layoutQuery.data?.hole
+        ? teeToGreenBearing(layoutQuery.data.hole)
+        : null;
+  const windPos =
+    liveFix ??
+    userLoc ??
+    (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
+  const { wind, relative: windRelative } = useWind(
+    windPos?.lat,
+    windPos?.lng,
+    windTargetBearing,
+    gpsEnabled
+  );
+
   // Push derived values back into the local hole so autosave persists them.
   // Without this, the round_holes columns would stay stale because the user
   // never edits them directly anymore — everything flows from the shot list.
@@ -1588,21 +1613,25 @@ export function HoleTrackingPage() {
           pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
           // Live "you are here" dot, shown at all times while GPS is on.
-          // Priority: phone auto-track fix (active tracking on this device) →
-          // the WATCH-reported position (so the phone mirrors the watch) →
-          // the always-on `liveFix`. Marking a spot / recording a shot never
-          // clears it, because `liveFix` keeps updating independently.
-          currentLocation={
-            autoTrackEnabled && autoTrack.latestFix
-              ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
-              : watchTracking.active &&
-                  watchTracking.currentLat != null &&
-                  watchTracking.currentLng != null
-                ? [watchTracking.currentLng, watchTracking.currentLat]
-                : liveFix
-                  ? [liveFix.lng, liveFix.lat]
-                  : null
-          }
+          // Live "you are here" dot — always the FRESHEST phone fix so it never
+          // freezes. Auto-track's fix is accuracy-filtered (25m) and can stall
+          // under tree cover; `liveFix` (relaxed 100m) keeps flowing. Pick
+          // whichever has the newer timestamp instead of always preferring
+          // auto-track, then fall back to the WATCH-reported position.
+          currentLocation={(() => {
+            const a = autoTrackEnabled ? autoTrack.latestFix : null;
+            const b = liveFix;
+            const phone = a && b ? (a.timestamp >= b.timestamp ? a : b) : (a ?? b);
+            if (phone) return [phone.lng, phone.lat] as [number, number];
+            if (
+              watchTracking.active &&
+              watchTracking.currentLat != null &&
+              watchTracking.currentLng != null
+            ) {
+              return [watchTracking.currentLng, watchTracking.currentLat] as [number, number];
+            }
+            return null;
+          })()}
           // Reset the cached aim drag whenever the player edits par or
           // yardage. The handle re-anchors at the new defaults so the
           // aim distance reflects the corrected hole length instead of
@@ -1665,64 +1694,73 @@ export function HoleTrackingPage() {
             suggested club for that distance (skipped on the green and when no
             club in the bag has a recorded typical distance). Hidden entirely
             when no yardage is known (e.g. unsynced course). */}
-        {(remainingYards != null || remainingFeet != null) && (
-          <Box
-            sx={{
-              position: 'absolute',
-              top: 12,
-              left: 12,
-              zIndex: 3,
-              pointerEvents: 'none',
-              bgcolor: 'rgba(11,20,16,0.88)',
-              color: 'common.white',
-              border: 1.5,
-              borderColor: '#fbbf24',
-              borderRadius: 1.5,
-              px: 1.25,
-              py: 0.5,
-              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
-              lineHeight: 1.1,
-              textAlign: 'center',
-              minWidth: 90
-            }}
-          >
-            <Typography
-              variant="caption"
+        {/* Left column — To Pin yardage with the live wind readout beneath it. */}
+        <Stack
+          spacing={1}
+          alignItems="center"
+          sx={{
+            position: 'absolute',
+            top: 12,
+            left: 12,
+            zIndex: 3,
+            pointerEvents: 'none'
+          }}
+        >
+          {(remainingYards != null || remainingFeet != null) && (
+            <Box
               sx={{
-                display: 'block',
-                fontSize: '0.6rem',
-                fontWeight: 700,
-                letterSpacing: 0.6,
-                color: '#fbbf24',
-                textTransform: 'uppercase'
+                bgcolor: 'rgba(11,20,16,0.88)',
+                color: 'common.white',
+                border: 1.5,
+                borderColor: '#fbbf24',
+                borderRadius: '5px',
+                px: 1.25,
+                py: 0.5,
+                boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+                lineHeight: 1.1,
+                textAlign: 'center',
+                minWidth: 90
               }}
             >
-              To Pin
-            </Typography>
-            <Typography
-              sx={{
-                fontSize: '1.1rem',
-                fontWeight: 800
-              }}
-            >
-              {lastShotOnGreen && remainingFeet != null
-                ? `${remainingFeet} ft`
-                : `${remainingYards} yds`}
-            </Typography>
-            {suggestedClub && (
               <Typography
+                variant="caption"
                 sx={{
-                  fontSize: '0.75rem',
+                  display: 'block',
+                  fontSize: '0.6rem',
                   fontWeight: 700,
+                  letterSpacing: 0.6,
                   color: '#fbbf24',
-                  mt: 0.25
+                  textTransform: 'uppercase'
                 }}
               >
-                {suggestedClub.customName || suggestedClub.name}
+                To Pin
               </Typography>
-            )}
-          </Box>
-        )}
+              <Typography
+                sx={{
+                  fontSize: '1.1rem',
+                  fontWeight: 800
+                }}
+              >
+                {lastShotOnGreen && remainingFeet != null
+                  ? `${remainingFeet} ft`
+                  : `${remainingYards} yds`}
+              </Typography>
+              {suggestedClub && (
+                <Typography
+                  sx={{
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    color: '#fbbf24',
+                    mt: 0.25
+                  }}
+                >
+                  {suggestedClub.customName || suggestedClub.name}
+                </Typography>
+              )}
+            </Box>
+          )}
+          {windPos && <WindIndicator wind={wind} relative={windRelative} tone="dark" circle />}
+        </Stack>
 
         {/* Stat pills — top-right column. Score is the headline value (accent). */}
         <Stack
@@ -1865,15 +1903,34 @@ export function HoleTrackingPage() {
             fontWeight: 800,
             fontSize: '0.95rem',
             lineHeight: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
             '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
           }}
         >
-          {selectedClub
-            ? abbreviateClubName(
-                selectedClub.customName || selectedClub.name,
-                selectedClub.category
-              )
-            : '+'}
+          <Box
+            component="span"
+            sx={{
+              fontSize: '0.5rem',
+              fontWeight: 700,
+              letterSpacing: 0.6,
+              opacity: 0.7,
+              lineHeight: 1,
+              mb: 0.25
+            }}
+          >
+            CLUB
+          </Box>
+          <Box component="span" sx={{ lineHeight: 1 }}>
+            {selectedClub
+              ? abbreviateClubName(
+                  selectedClub.customName || selectedClub.name,
+                  selectedClub.category
+                )
+              : '+'}
+          </Box>
         </Button>
 
         {/* View Shots — bottom-left, stacked above the club picker. Only
@@ -2862,7 +2919,7 @@ function StatPill({
       sx={{
         bgcolor: accent ? 'rgba(46,125,50,0.85)' : 'rgba(11,20,16,0.78)',
         color: 'common.white',
-        borderRadius: 1.5,
+        borderRadius: '5px',
         border: 1,
         borderColor: accent ? 'rgba(165,214,167,0.55)' : 'rgba(255,255,255,0.18)',
         backdropFilter: 'blur(6px)',

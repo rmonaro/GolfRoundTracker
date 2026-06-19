@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import MyLocationRoundedIcon from '@mui/icons-material/MyLocationRounded';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import TouchAppRoundedIcon from '@mui/icons-material/TouchAppRounded';
+import ExploreRoundedIcon from '@mui/icons-material/ExploreRounded';
 import AdjustRoundedIcon from '@mui/icons-material/AdjustRounded';
 import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
 import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
@@ -61,8 +62,22 @@ const STEPS: Step[] = [
     )
   },
   {
+    icon: <ExploreRoundedIcon />,
+    title: '4. Point the aim line down your range',
+    body: (
+      <>
+        Ranges face every direction, so the aim line won't always point the right way at first.{' '}
+        <strong>Drag the orange marker</strong> at the end of the line to swing it down your range —
+        the map turns to match and your carry/left-right are measured along that line. Tap{' '}
+        <strong>Lock aim direction</strong> (top center) to save it. Next time you practice at this
+        range, the app <strong>remembers your direction</strong> and points the line the right way
+        automatically.
+      </>
+    )
+  },
+  {
     icon: <AdjustRoundedIcon />,
-    title: '4. Aim at a target',
+    title: '5. Aim at a target',
     body: (
       <>
         Open <strong>Targets</strong> (right side) and draw a <strong>circle</strong> or freeform{' '}
@@ -76,7 +91,7 @@ const STEPS: Step[] = [
   },
   {
     icon: <InsightsRoundedIcon />,
-    title: '5. Read your stats',
+    title: '6. Read your stats',
     body: (
       <>
         The cards on the right show your <strong>shot count</strong>, the <strong>yardage</strong> of
@@ -88,7 +103,7 @@ const STEPS: Step[] = [
   },
   {
     icon: <FlagRoundedIcon />,
-    title: '6. End the session',
+    title: '7. End the session',
     body: (
       <>
         Tap <strong>End</strong> (top-right) when you're done. You'll get a summary with your per-club

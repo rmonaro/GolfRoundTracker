@@ -1699,20 +1699,23 @@ export function HoleLayout({
       // on the right.
       const padding = puttingMode
         ? { top: 16, bottom: 16, left: 16, right: 16 }
-        : { top: 24, bottom: 70, left: 16, right: 90 };
+        : // Thin edge margin only — frame tee→green as large as possible while
+          // keeping both fully on screen (the hole runs vertically after the
+          // bearing rotation, so top/bottom is what controls the fill).
+          { top: 10, bottom: 10, left: 10, right: 10 };
       // Putting maxZoom up to 23 (Mapbox cap is 24) so even a small green fills
-      // the screen; normal mode caps at 19.
-      const maxZoom = puttingMode ? 23 : 19;
+      // the screen; normal mode caps at 21 so even short holes fill the view.
+      const maxZoom = puttingMode ? 23 : 21;
       try {
         // Both modes use the tee→green bearing so the tee anchors at the bottom
         // and the green sits above it.
         const cam = map.cameraForBounds(targetBounds, { padding, maxZoom, bearing });
         if (!cam) return;
-        // Pull back ~10% in normal mode for breathing room. Mapbox zoom is
-        // logarithmic (each level doubles scale) so a 10% scale reduction is
-        // log2(1.1) ≈ 0.137 zoom units. Putting mode keeps its tight framing.
-        const zoom =
-          (cam.zoom ?? map.getZoom()) - (puttingMode ? 0 : Math.log2(1.1));
+        // Push the load zoom past the tee→green fit for a closer view. Mapbox
+        // zoom is logarithmic (each +1 doubles scale), so +0.8 ≈ 1.75× closer.
+        // Bump this single number to taste. Putting mode keeps its own framing.
+        const LOAD_ZOOM_BOOST = 0.4;
+        const zoom = (cam.zoom ?? map.getZoom()) + (puttingMode ? 0 : LOAD_ZOOM_BOOST);
         const camera = { center: cam.center, zoom, bearing };
         if (animate) {
           map.easeTo({ ...camera, duration: 500 });

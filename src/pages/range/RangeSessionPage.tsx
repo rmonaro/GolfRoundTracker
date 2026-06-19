@@ -46,7 +46,10 @@ import {
   type SwingEvent
 } from '@/services/rangeSwingBridge';
 import { targetCenter } from '@/services/rangeRepo';
+import { WindIndicator } from '@/components/ui/WindIndicator';
+import { useWind } from '@/hooks/useWind';
 import { RangeMap, type ShotMarker, type TargetShape } from '@/features/range/RangeMap';
+import { RangeTour } from './RangeTour';
 import { classifyShotVsTarget, clubColor, shotChipLabel } from '@/features/range/rangeStats';
 import {
   circleRing,
@@ -92,6 +95,9 @@ export function RangeSessionPage() {
   const [clubHint, setClubHint] = useState(false);
   // Top instruction banner slides in from the left, then auto-hides.
   const [showInstruction, setShowInstruction] = useState(true);
+  // Guided overlay tour — auto-shows once, replayable from the "?" button.
+  const TOUR_KEY = 'grt.range.tour.v1';
+  const [tourOpen, setTourOpen] = useState(false);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
   const [shotsTab, setShotsTab] = useState<string | null>(null);
 
@@ -111,6 +117,12 @@ export function RangeSessionPage() {
   const [aimDirty, setAimDirty] = useState(false);
 
   const aimTarget = selectedTargetId ? targets.find((t) => t.id === selectedTargetId) ?? null : null;
+
+  // Live wind at the mat, resolved against the down-range aim line so the HUD
+  // reads head/tail/cross the same way the round does.
+  const windAimBearing =
+    manualBearing != null ? manualBearing : session ? session.targetBearing : null;
+  const { wind, relative: windRelative } = useWind(origin?.lat, origin?.lng, windAimBearing);
 
   // When a swing event arrives (deferred bridge), it drives the next tap:
   // pre-fill club + swing_event_id. In v1 the stub never fires, so the manual
@@ -322,6 +334,25 @@ export function RangeSessionPage() {
     const t = setTimeout(() => setShowInstruction(false), 3200);
     return () => clearTimeout(t);
   }, [phase, drawMode, draftCenter, pendingSwing]);
+
+  // Auto-show the guided tour the first time the map is reached.
+  useEffect(() => {
+    if (phase !== 'logging') return;
+    try {
+      if (localStorage.getItem(TOUR_KEY) !== 'done') setTourOpen(true);
+    } catch {
+      /* localStorage unavailable — skip the auto-tour */
+    }
+  }, [phase]);
+
+  const closeTour = useCallback(() => {
+    setTourOpen(false);
+    try {
+      localStorage.setItem(TOUR_KEY, 'done');
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   // --- taps ---------------------------------------------------------------
   const handleTap = useCallback(
@@ -553,9 +584,14 @@ export function RangeSessionPage() {
         targets={targetShapes}
         draftRing={draftRing}
         drawing={drawMode !== 'none'}
-        aimDraggable={drawMode === 'none' && !aimTarget}
+        // The aim line is ALWAYS freely draggable while logging — including
+        // after locking a direction and when a target is selected. Dragging
+        // breaks away from a target into free aim (re-select it to aim at it
+        // again); the locked range direction stays saved until re-locked.
+        aimDraggable={drawMode === 'none'}
         onAimChange={(p) => {
           setManualBearing(computeBearing(origin, p));
+          setSelectedTargetId(null);
           setAimDirty(true);
           setAimLocked(false);
         }}
@@ -577,7 +613,7 @@ export function RangeSessionPage() {
         {drawMode === 'none' && (
           <IconButton
             aria-label="How the range works"
-            onClick={() => navigate('/range/guide')}
+            onClick={() => setTourOpen(true)}
             sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff', '&:hover': { bgcolor: 'rgba(0,0,0,0.75)' } }}
           >
             <HelpOutlineRoundedIcon fontSize="small" />
@@ -594,6 +630,20 @@ export function RangeSessionPage() {
           {drawMode === 'none' ? 'End' : 'Cancel'}
         </Button>
       </Box>
+
+      {/* Top-left — live wind, relative to the down-range aim line. */}
+      {phase === 'logging' && origin && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 'calc(env(safe-area-inset-top) + 8px)',
+            left: 8,
+            zIndex: 5
+          }}
+        >
+          <WindIndicator wind={wind} relative={windRelative} tone="surface" circle />
+        </Box>
+      )}
 
       {/* Aim-direction control — drag the marker to point down the range, then lock. */}
       {phase === 'logging' && drawMode === 'none' && !aimTarget && (
@@ -634,21 +684,25 @@ export function RangeSessionPage() {
         </Box>
       )}
 
-      {/* Instruction banner — theme blue, slides in from the left then hides. */}
-      <Slide direction="right" in={showInstruction} mountOnEnter unmountOnExit>
+      {/* Instruction banner — theme blue, centered up top, slides down then hides. */}
+      <Slide direction="down" in={showInstruction} mountOnEnter unmountOnExit>
         <Box
           sx={{
             position: 'absolute',
             top: 'calc(env(safe-area-inset-top) + 8px)',
-            left: 8,
-            maxWidth: '62%',
+            left: 0,
+            right: 0,
+            mx: 'auto',
+            width: 'fit-content',
+            maxWidth: '70%',
             zIndex: 4,
             bgcolor: 'info.main',
             color: 'info.contrastText',
             borderRadius: 2,
             px: 1.5,
             py: 1,
-            boxShadow: 4
+            boxShadow: 4,
+            textAlign: 'center'
           }}
         >
           <Typography variant="body2" fontWeight={700}>
@@ -683,12 +737,31 @@ export function RangeSessionPage() {
           fontWeight: 800,
           fontSize: '0.95rem',
           lineHeight: 1,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
           '&:hover': { bgcolor: (theme) => alpha(theme.palette.info.main, 0.95) }
         }}
       >
-        {selectedClubObj
-          ? abbreviateClubName(selectedClubObj.customName || selectedClubObj.name, selectedClubObj.category)
-          : '+'}
+        <Box
+          component="span"
+          sx={{
+            fontSize: '0.5rem',
+            fontWeight: 700,
+            letterSpacing: 0.6,
+            opacity: 0.75,
+            lineHeight: 1,
+            mb: 0.25
+          }}
+        >
+          CLUB
+        </Box>
+        <Box component="span" sx={{ lineHeight: 1 }}>
+          {selectedClubObj
+            ? abbreviateClubName(selectedClubObj.customName || selectedClubObj.name, selectedClubObj.category)
+            : '+'}
+        </Box>
       </Button>
       )}
 
@@ -1170,6 +1243,8 @@ export function RangeSessionPage() {
           )}
         </Box>
       </Drawer>
+
+      <RangeTour open={tourOpen} onClose={closeTour} />
     </Box>
   );
 }
