@@ -110,9 +110,14 @@ export function RangeSessionPage() {
   const [draftRadiusYd, setDraftRadiusYd] = useState(12);
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
 
-  // Down-range aim direction: dragged by the user, remembered per range.
+  // Down-range aim direction: dragged by the user. This drives the aim LINE
+  // only — it no longer rotates the map once the range orientation is locked.
   // null → fall back to the session's bearing, else straight up (north).
   const [manualBearing, setManualBearing] = useState<number | null>(null);
+  // The locked orientation of the range (which way is "up" on the map). Set when
+  // the user locks the direction (or it's restored for this mat). Decoupled from
+  // the aim so moving the aim never re-rotates the map.
+  const [orientationBearing, setOrientationBearing] = useState<number | null>(null);
   const [aimLocked, setAimLocked] = useState(false);
   const [aimDirty, setAimDirty] = useState(false);
 
@@ -232,6 +237,7 @@ export function RangeSessionPage() {
       .getOrientationNear(userId, origin)
       .then((o) => {
         if (!cancelled && o) {
+          setOrientationBearing(o.bearing);
           setManualBearing(o.bearing);
           setAimLocked(true);
           setAimDirty(false);
@@ -292,6 +298,9 @@ export function RangeSessionPage() {
     const bearing = manualBearing != null ? manualBearing : session ? session.targetBearing : 0;
     try {
       await rangeRepo.saveOrientation(userId, origin, bearing);
+      // Lock this as the map orientation; the aim starts pointing straight up
+      // the range and can then be dragged freely without rotating the map.
+      setOrientationBearing(bearing);
       setManualBearing(bearing);
       setAimLocked(true);
       setAimDirty(false);
@@ -555,6 +564,14 @@ export function RangeSessionPage() {
     : destinationPoint(origin, freeBearing, yardsToM(250));
   const aimBearing = computeBearing(origin, aimPoint);
 
+  // Map orientation is independent of the aim. Once the range direction is
+  // locked, the map stays fixed at that orientation no matter where the aim
+  // points — so the user can re-aim freely without the world spinning. Before
+  // locking (or while re-orienting via the "Aim locked" chip → aimDirty) the
+  // map follows the dragged aim so they can square it up to the real range.
+  const orientationActive = aimLocked && !aimDirty && orientationBearing != null;
+  const mapBearing = orientationActive ? (orientationBearing as number) : aimBearing;
+
   const targetShapes: TargetShape[] = targets.map((t) => ({
     id: t.id,
     ring:
@@ -577,7 +594,7 @@ export function RangeSessionPage() {
       <RangeMap
         origin={origin}
         target={aimPoint}
-        bearing={aimBearing}
+        bearing={mapBearing}
         shots={shotMarkers}
         showArcs
         bottomBar={phase === 'logging' && drawMode === 'none'}
@@ -586,14 +603,17 @@ export function RangeSessionPage() {
         drawing={drawMode !== 'none'}
         // The aim line is ALWAYS freely draggable while logging — including
         // after locking a direction and when a target is selected. Dragging
-        // breaks away from a target into free aim (re-select it to aim at it
-        // again); the locked range direction stays saved until re-locked.
+        // breaks away from a target into free aim (re-select it to aim again).
+        // Once the orientation is locked, dragging the aim moves only the line —
+        // the map keeps its locked orientation (re-orient via the "Aim locked"
+        // chip). Before locking, dragging both aims and squares up the map.
         aimDraggable={drawMode === 'none'}
         onAimChange={(p) => {
           setManualBearing(computeBearing(origin, p));
           setSelectedTargetId(null);
-          setAimDirty(true);
-          setAimLocked(false);
+          // Keep the locked orientation — only mark "dirty" (re-orienting) when
+          // nothing is locked yet, which just toggles the lock button's label.
+          if (!aimLocked) setAimDirty(true);
         }}
         onMapTap={handleTap}
       />
