@@ -1685,6 +1685,12 @@ export function HoleLayout({
 
       // Frame the hole overview once the canvas is ready (see applyOverview).
       applyOverview(false);
+      // Belt-and-suspenders: re-frame once after the map settles, in case the
+      // canvas was still resizing when onLoad ran (otherwise the first fit can
+      // be computed against a too-small viewport and crop the tee/green). The
+      // jumpTo inside applyOverview triggers its own 'idle'; we don't re-register
+      // the listener, so this runs exactly once — no loop.
+      map.once('idle', () => applyOverview(false));
     };
 
     // Frame the hole overview (tee→green + any recorded shots). Extracted so
@@ -1707,14 +1713,19 @@ export function HoleLayout({
       // the screen; normal mode caps at 21 so even short holes fill the view.
       const maxZoom = puttingMode ? 23 : 21;
       try {
+        // cameraForBounds is computed against the CURRENT canvas size. On first
+        // load the canvas may not have settled to its final dimensions yet, so a
+        // stale (smaller) size makes it over-zoom and crop the tee/green. Force a
+        // resize first so the fit is measured against the real viewport.
+        map.resize();
         // Both modes use the tee→green bearing so the tee anchors at the bottom
         // and the green sits above it.
         const cam = map.cameraForBounds(targetBounds, { padding, maxZoom, bearing });
         if (!cam) return;
-        // Push the load zoom past the tee→green fit for a closer view. Mapbox
-        // zoom is logarithmic (each +1 doubles scale), so +0.8 ≈ 1.75× closer.
-        // Bump this single number to taste. Putting mode keeps its own framing.
-        const LOAD_ZOOM_BOOST = 0.4;
+        // Negative pulls back from the tee→green fit for breathing room; 0 = the
+        // tightest framing that still keeps both ends on screen. Mapbox zoom is
+        // logarithmic (each +1 doubles scale), so -0.4 ≈ 25% wider than the fit.
+        const LOAD_ZOOM_BOOST = -0.4;
         const zoom = (cam.zoom ?? map.getZoom()) + (puttingMode ? 0 : LOAD_ZOOM_BOOST);
         const camera = { center: cam.center, zoom, bearing };
         if (animate) {
