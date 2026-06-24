@@ -46,6 +46,11 @@ export interface WatchRoundState {
    */
   shotDetection?: boolean;
   /**
+   * True when the ball is on/around the green (current hole) — so the watch
+   * shows its live distance-to-pin in FEET instead of yards, matching the phone.
+   */
+  onGreen?: boolean;
+  /**
    * Whether the user is within range of the course (mirrors the phone's 2 km
    * at-course gate). Absent → treat as at-course (don't block). False → the
    * watch hides its Track / Add Shot controls and shows a "not in range" note,
@@ -72,6 +77,25 @@ export interface WatchRoundState {
     /** Preformatted distance, e.g. "212 yds" / "14 ft". */
     distanceText: string;
   } | null;
+  /**
+   * Every hole's headline data, so the watch can navigate holes LOCALLY and
+   * show the tee yardage + suggested club immediately — without waiting on a
+   * phone roundtrip that's blocked when the phone is backgrounded (JS suspended).
+   * Sent on every snapshot; it only changes as shots are recorded.
+   */
+  holes?: Array<{
+    holeNumber: number;
+    par?: number | null;
+    /** Yards remaining to the pin — the full hole on an un-played hole. */
+    yardage?: number | null;
+    /** Recommender's club id for that yardage (computed phone-side). */
+    suggestedClubId?: string | null;
+    /** Shots / putts logged on this hole (so a previewed hole's counts match). */
+    shots?: number;
+    putts?: number;
+    pinLat?: number | null;
+    pinLng?: number | null;
+  }>;
   /**
    * Slim club list the watch can render. Putters land in their own bucket on
    * the watch UI so we mark them; everything else is just name + (optional)

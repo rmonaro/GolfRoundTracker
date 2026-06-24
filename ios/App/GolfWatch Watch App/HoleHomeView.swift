@@ -21,6 +21,11 @@ struct HoleHomeView: View {
     /// Id of the last shot summary we've shown the overview for, so each
     /// GPS auto-recorded shot flashes its overview exactly once.
     @State private var shownSummaryId = 0
+    /// Locally-navigated hole (prev/next on the watch). Lets the watch show the
+    /// next hole's yardage + club IMMEDIATELY from the per-hole snapshot data,
+    /// without waiting on the phone (whose JS is suspended while backgrounded).
+    /// Cleared once the phone's snapshot catches up to this hole.
+    @State private var localHoleNumber: Int?
 
     var body: some View {
         let s = session.state
@@ -91,10 +96,10 @@ struct HoleHomeView: View {
             // Header — hole # left, par badge right. Compact so the columns
             // get most of the screen real estate.
             HStack(spacing: 6) {
-                Text("Hole \(s.holeNumber.map(String.init) ?? "—")")
+                Text("Hole \(displayedHoleNumber(s).map(String.init) ?? "—")")
                     .font(.headline)
                 Spacer()
-                if let par = s.par {
+                if let par = displayedHole(s)?.par ?? s.par {
                     Text("Par \(par)")
                         .font(.caption2)
                         .fontWeight(.bold)
@@ -121,6 +126,48 @@ struct HoleHomeView: View {
             }
         }
         .padding(.horizontal, 6)
+        // When the phone finally processes our hole-nav (it foregrounds and
+        // drains the queued navigateHole messages), its snapshot hole catches
+        // up — drop the local override so we're back in lock-step.
+        .onChange(of: session.state.holeNumber) { _, newHole in
+            if let local = localHoleNumber, newHole == local {
+                localHoleNumber = nil
+            }
+        }
+    }
+
+    // MARK: - Local hole navigation
+
+    /// The hole the watch is currently SHOWING — the local override if the user
+    /// navigated ahead/back on the watch, else the phone's current hole.
+    private func displayedHoleNumber(_ s: WatchRoundState) -> Int? {
+        localHoleNumber ?? s.holeNumber
+    }
+
+    /// The per-hole snapshot entry for the displayed hole.
+    private func displayedHole(_ s: WatchRoundState) -> WatchHole? {
+        guard let n = displayedHoleNumber(s) else { return nil }
+        return s.holes.first(where: { $0.holeNumber == n })
+    }
+
+    /// True when the watch is showing a hole the phone hasn't moved to yet.
+    private func isPreviewing(_ s: WatchRoundState) -> Bool {
+        guard let local = localHoleNumber else { return false }
+        return local != s.holeNumber
+    }
+
+    /// Advance the displayed hole locally AND tell the phone (so it catches up
+    /// when it next runs). Clamped to the round's hole range.
+    private func navigateHoleLocally(_ delta: Int, _ s: WatchRoundState) {
+        let current = displayedHoleNumber(s) ?? 1
+        let numbers = s.holes.map { $0.holeNumber }
+        let lo = numbers.min() ?? 1
+        let hi = numbers.max() ?? (s.holesPlayed ?? 18)
+        let next = min(hi, max(lo, current + delta))
+        guard next != current else { return }
+        // No override needed once we're back on the phone's own hole.
+        localHoleNumber = next == s.holeNumber ? nil : next
+        session.send(.navigateHole(direction: delta > 0 ? "next" : "prev"))
     }
 
     // MARK: - Recording layout
@@ -195,11 +242,17 @@ struct HoleHomeView: View {
     // MARK: - Pieces
 
     /// The club id currently shown to the user. An optimistic local pick (made
-    /// on the watch, not yet confirmed by the phone) wins, then the phone's
-    /// selected club, then the suggested club. The add-shot buttons act on this
-    /// so they always use exactly the club that's displayed.
+    /// on the watch, not yet confirmed by the phone) wins, then — for the hole
+    /// being shown — the phone's selected club, then the displayed hole's
+    /// suggested club. When previewing a hole the phone hasn't moved to yet, the
+    /// phone's selectedClubId is for a different hole, so we skip it and use the
+    /// previewed hole's suggestion.
     private func effectiveClubId(_ s: WatchRoundState) -> String? {
-        session.localSelectedClubId ?? s.selectedClubId ?? s.suggestedClubId
+        let suggested = displayedHole(s)?.suggestedClubId ?? s.suggestedClubId
+        if isPreviewing(s) {
+            return session.localSelectedClubId ?? suggested
+        }
+        return session.localSelectedClubId ?? s.selectedClubId ?? suggested
     }
 
     /// Bottom controls — a 2×2 grid:
@@ -230,7 +283,7 @@ struct HoleHomeView: View {
                         .lineLimit(2)
                         .minimumScaleFactor(0.7)
                 }
-                navRow()
+                navRow(s)
             }
         } else {
             let tracking = s.autoTracking
@@ -256,20 +309,21 @@ struct HoleHomeView: View {
                         session.recordAutoShot(clubId: effectiveClubId(s))
                     }
                 }
-                navRow()
+                navRow(s)
             }
         }
     }
 
-    /// Prev / next hole arrows — the second row, under Track & Add Shot.
+    /// Prev / next hole arrows — the second row, under Track & Add Shot. These
+    /// advance the watch's displayed hole LOCALLY (instant) and notify the phone.
     @ViewBuilder
-    private func navRow() -> some View {
+    private func navRow(_ s: WatchRoundState) -> some View {
         HStack(spacing: 6) {
             bigButton(title: nil, system: "chevron.left", tint: .gray) {
-                session.send(.navigateHole(direction: "prev"))
+                navigateHoleLocally(-1, s)
             }
             bigButton(title: nil, system: "chevron.right", tint: .gray) {
-                session.send(.navigateHole(direction: "next"))
+                navigateHoleLocally(1, s)
             }
         }
     }
@@ -332,8 +386,10 @@ struct HoleHomeView: View {
                     .clipShape(Capsule())
                     .lineLimit(1)
             }
-            rightRow(label: "Shots", value: s.shotsThisHole ?? 0)
-            rightRow(label: "Putts", value: s.puttsThisHole ?? 0)
+            // Per-hole counts come from the displayed hole's snapshot entry so a
+            // previewed hole shows ITS shots/putts, not the phone's current hole.
+            rightRow(label: "Shots", value: displayedHole(s)?.shots ?? s.shotsThisHole ?? 0)
+            rightRow(label: "Putts", value: displayedHole(s)?.putts ?? s.puttsThisHole ?? 0)
         }
     }
 
@@ -394,24 +450,44 @@ struct HoleHomeView: View {
         return .green
     }
 
-    /// Live GPS-derived yards-to-pin when available (watch has its own
-    /// fix + the snapshot includes pin coords), otherwise the static
-    /// distanceYards/distanceFeet pushed by the phone. Live wins so the
-    /// number updates as the user walks.
     private func distanceText(_ s: WatchRoundState) -> String {
-        if let live = session.liveDistanceToPinYards() {
-            return "\(Int(live.rounded()))"
-        }
-        if let ft = s.distanceFeet { return "\(ft)" }
-        if let yd = s.distanceYards { return "\(yd)" }
-        return "—"
+        displayDistance(s).map { "\($0.value)" } ?? "—"
     }
 
     private func distanceUnit(_ s: WatchRoundState) -> String {
-        // Live distance is always reported in yards. Only use 'ft' when
-        // the phone explicitly pushed a feet reading (on the green).
-        if session.liveDistanceToPinYards() != nil { return "yds" }
-        if s.distanceFeet != nil { return "ft" }
-        return "yds"
+        displayDistance(s)?.unit ?? "yds"
+    }
+
+    /// Resolved distance-to-pin number + unit. On the displayed hole we use the
+    /// live GPS distance; near the pin (on the green, or within ~12 yds) it's
+    /// shown in FEET, otherwise yards. When previewing a hole the user isn't
+    /// physically at, GPS-to-that-pin is meaningless → static hole yardage.
+    private func displayDistance(_ s: WatchRoundState) -> (value: Int, unit: String)? {
+        if !isPreviewing(s) {
+            // On the green, the phone sends the precise putt distance (ball → pin)
+            // in feet — show that, matching the phone, instead of noisier live GPS.
+            if s.onGreen, let ft = s.distanceFeet {
+                return (ft, "ft")
+            }
+            if let liveYards = liveDistanceToDisplayedPin(s) {
+                if s.onGreen || liveYards <= 12 {
+                    return (Int((liveYards * 3).rounded()), "ft")
+                }
+                return (Int(liveYards.rounded()), "yds")
+            }
+        }
+        if let yd = displayedHole(s)?.yardage { return (yd, "yds") }
+        if let ft = s.distanceFeet { return (ft, "ft") }
+        if let yd = s.distanceYards { return (yd, "yds") }
+        return nil
+    }
+
+    /// Live yards to the displayed hole's pin (uses that hole's pin coords; falls
+    /// back to the snapshot's current-hole pin when the per-hole array is empty).
+    private func liveDistanceToDisplayedPin(_ s: WatchRoundState) -> Double? {
+        if let hole = displayedHole(s), let plat = hole.pinLat, let plng = hole.pinLng {
+            return session.liveDistanceToPin(lat: plat, lng: plng)
+        }
+        return session.liveDistanceToPinYards()
     }
 }

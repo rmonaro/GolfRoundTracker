@@ -26,6 +26,33 @@ struct WatchShotSummary: Equatable {
     }
 }
 
+/// One hole's headline data, so the watch can navigate holes locally and show
+/// the tee yardage + suggested club without a phone roundtrip. Mirrors an entry
+/// of the JS `holes` array.
+struct WatchHole: Equatable, Identifiable {
+    let holeNumber: Int
+    let par: Int?
+    let yardage: Int?
+    let suggestedClubId: String?
+    let shots: Int?
+    let putts: Int?
+    let pinLat: Double?
+    let pinLng: Double?
+    var id: Int { holeNumber }
+
+    init?(dict: [String: Any]) {
+        guard let holeNumber = dict["holeNumber"] as? Int else { return nil }
+        self.holeNumber = holeNumber
+        self.par = dict["par"] as? Int
+        self.yardage = dict["yardage"] as? Int
+        self.suggestedClubId = dict["suggestedClubId"] as? String
+        self.shots = dict["shots"] as? Int
+        self.putts = dict["putts"] as? Int
+        self.pinLat = dict["pinLat"] as? Double
+        self.pinLng = dict["pinLng"] as? Double
+    }
+}
+
 struct WatchRoundState: Equatable {
     let active: Bool
     let courseName: String?
@@ -44,6 +71,8 @@ struct WatchRoundState: Equatable {
     /// Gates whether `RoundShotController` runs during a round. Defaults true
     /// when the phone doesn't send it (older build / missing key).
     let shotDetection: Bool
+    /// On/around the green (current hole) → show live distance in feet, not yards.
+    let onGreen: Bool
     /// Whether the user is within range of the course (phone's 2km gate).
     /// nil → unknown; the watch treats nil as at-course so a missing fix
     /// never blocks play. false → watch hides Track / Add Shot.
@@ -54,6 +83,8 @@ struct WatchRoundState: Equatable {
     /// Transient summary of the most-recent GPS auto-recorded shot (id bumps
     /// per shot so the overview shows once).
     let lastShotSummary: WatchShotSummary?
+    /// Every hole's headline data, for local hole navigation on the watch.
+    let holes: [WatchHole]
     let pinLat: Double?
     let pinLng: Double?
     let bag: [WatchClub]
@@ -64,9 +95,9 @@ struct WatchRoundState: Equatable {
         distanceYards: nil, distanceFeet: nil, scoreVsPar: nil,
         shotsThisHole: nil, puttsThisHole: nil,
         suggestedClubId: nil, selectedClubId: nil,
-        recordingShot: false, shotDetection: true,
+        recordingShot: false, shotDetection: true, onGreen: false,
         atCourse: nil, autoTracking: false, lastShotSummary: nil,
-        pinLat: nil, pinLng: nil, bag: []
+        holes: [], pinLat: nil, pinLng: nil, bag: []
     )
 
     init(
@@ -84,9 +115,11 @@ struct WatchRoundState: Equatable {
         selectedClubId: String? = nil,
         recordingShot: Bool = false,
         shotDetection: Bool = true,
+        onGreen: Bool = false,
         atCourse: Bool? = nil,
         autoTracking: Bool = false,
         lastShotSummary: WatchShotSummary? = nil,
+        holes: [WatchHole] = [],
         pinLat: Double? = nil,
         pinLng: Double? = nil,
         bag: [WatchClub] = []
@@ -105,9 +138,11 @@ struct WatchRoundState: Equatable {
         self.selectedClubId = selectedClubId
         self.recordingShot = recordingShot
         self.shotDetection = shotDetection
+        self.onGreen = onGreen
         self.atCourse = atCourse
         self.autoTracking = autoTracking
         self.lastShotSummary = lastShotSummary
+        self.holes = holes
         self.pinLat = pinLat
         self.pinLng = pinLng
         self.bag = bag
@@ -130,12 +165,18 @@ struct WatchRoundState: Equatable {
         self.selectedClubId = dict["selectedClubId"] as? String
         self.recordingShot = (dict["recordingShot"] as? Bool) ?? false
         self.shotDetection = (dict["shotDetection"] as? Bool) ?? true
+        self.onGreen = (dict["onGreen"] as? Bool) ?? false
         self.atCourse = dict["atCourse"] as? Bool
         self.autoTracking = (dict["autoTracking"] as? Bool) ?? false
         if let rawSummary = dict["lastShotSummary"] as? [String: Any] {
             self.lastShotSummary = WatchShotSummary(dict: rawSummary)
         } else {
             self.lastShotSummary = nil
+        }
+        if let rawHoles = dict["holes"] as? [[String: Any]] {
+            self.holes = rawHoles.compactMap { WatchHole(dict: $0) }
+        } else {
+            self.holes = []
         }
         self.pinLat = dict["pinLat"] as? Double
         self.pinLng = dict["pinLng"] as? Double
@@ -476,15 +517,22 @@ final class WatchSession: NSObject, ObservableObject {
     /// yards. Returns nil when GPS or pin isn't available — caller
     /// falls back to the static distance from the phone snapshot.
     func liveDistanceToPinYards() -> Double? {
-        guard let loc = lastLocation else { return nil }
         guard let plat = state.pinLat, let plng = state.pinLng else { return nil }
+        return liveDistanceToPin(lat: plat, lng: plng)
+    }
+
+    /// Live yards from the watch's current GPS fix to an arbitrary pin. Returns
+    /// nil when GPS is missing/stale/inaccurate so the caller can fall back to a
+    /// static yardage.
+    func liveDistanceToPin(lat: Double, lng: Double) -> Double? {
+        guard let loc = lastLocation else { return nil }
         // Reject ancient fixes (>30s) — phone went out of sight, sat in
         // a bag, etc. A stale fix would lie about your distance.
         if loc.timestamp.timeIntervalSinceNow < -30 { return nil }
         // Reject very inaccurate fixes (>50m). At golf yardages this is
         // worse than just showing the phone-snapshot number.
         if loc.horizontalAccuracy < 0 || loc.horizontalAccuracy > 50 { return nil }
-        let pin = CLLocation(latitude: plat, longitude: plng)
+        let pin = CLLocation(latitude: lat, longitude: lng)
         let meters = loc.distance(from: pin)
         return meters * 1.0936133
     }

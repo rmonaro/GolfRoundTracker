@@ -735,37 +735,16 @@ export function HoleTrackingPage() {
     // Phase 2 — strikes drive detection; emitted shots carry source:'impact'.
     impactPrimary,
     onShotDetected: (shot) => {
-      if (shot.source === 'impact') {
-        // Phase 2: a watch strike closed the in-flight shot. Auto-commit it in
-        // an UNVERIFIED state — no sheet interruption; the golfer reviews it
-        // at hole-complete / round summary.
-        autoCommitRef.current?.(shot);
-        return;
-      }
-      // Phase 1 (source:'gps'): 8s-stationary detection fired — stage
-      // pendingGps AND open the AddShotSheet pre-filled with the captured GPS
-      // pair + calculated distance. The user picks club + result and submits.
+      // Auto-recording is WATCH-driven only. A watch strike (source:'impact')
+      // closes the in-flight shot → auto-commit it UNVERIFIED (no sheet
+      // interruption; reviewed at hole-complete / round summary).
       //
-      // To reposition the auto-detected landing point: cancel the
-      // sheet → the Ball Landed bar (managed by pendingGps) still
-      // appears so the user can tap the map elsewhere or hit Record
-      // again to reopen the sheet. (Cancel calls autoTrack.dismissShot
-      // via the sheet's onClose handler, re-anchoring the tracker.)
-      // Classify from where the ball came to rest (= the player's current
-      // position) against the mapped features, so the sheet pre-fills the
-      // correct lie + target result instead of leaving them blank.
-      const inferred = inferShotAt(shot.endLat, shot.endLng);
-      setPendingGps({
-        startLat: shot.startLat,
-        startLng: shot.startLng,
-        endLat: shot.endLat,
-        endLng: shot.endLng,
-        calculatedDistanceM: shot.distanceM,
-        inferredLie: inferred.lie,
-        inferredTargetResult: inferred.targetResult
-      });
-      setEditingShot(null);
-      setShotSheet(true);
+      // The phone deliberately does NOT auto-record from its own GPS
+      // "walked then stopped" heuristic (source:'gps') anymore — it just keeps
+      // the live position. Non-watch shots are logged manually via the Add Shot
+      // button, which fills the yardage from the GPS last→current distance.
+      if (shot.source !== 'impact') return;
+      autoCommitRef.current?.(shot);
     }
   });
 
@@ -852,14 +831,37 @@ export function HoleTrackingPage() {
     remainingYards != null &&
     remainingYards > 0 &&
     remainingYards <= APPROACH_RANGE_YDS;
+  // On the green the "to pin" reading should be the distance from WHERE THE
+  // USER IS to the actual pin, in feet — so it tracks them as they walk to the
+  // ball. Prefer the live GPS fix → pin; fall back to the last shot's end → pin,
+  // then a rough yards×3. The pin is the precise (shared/per-round) pin when set,
+  // else the green centroid. (Previously this used last-shot-end → green CENTROID,
+  // which read stale + offset — e.g. 21 ft when the user was ~5 ft from the pin.)
+  const pinLatEff = sharedPinLat ?? localPinLat ?? greenLat;
+  const pinLngEff = sharedPinLng ?? localPinLng ?? greenLng;
+  const feetToPinFrom = (lat: number | null, lng: number | null): number | null =>
+    lat != null && lng != null && pinLatEff != null && pinLngEff != null
+      ? Math.round(
+          haversineMeters(
+            { lat, lng, accuracyM: 0, timestamp: 0 },
+            { lat: pinLatEff, lng: pinLngEff, accuracyM: 0, timestamp: 0 }
+          ) * 3.28084
+        )
+      : null;
+  const liveFeetToPin = feetToPinFrom(liveFix?.lat ?? null, liveFix?.lng ?? null);
+  // The ball rests where the last shot ended, so that → pin is the putt distance
+  // (stable as the player walks around reading it). Prefer it; fall back to the
+  // live fix when the last shot has no GPS, then a rough yards×3.
+  const lastShotEndFeetToPin = feetToPinFrom(
+    lastShot?.endLat ?? null,
+    lastShot?.endLng ?? null
+  );
   const remainingFeet = lastShotOnGreen
     ? lastShotMadePutt
       ? 0
-      : lastShotEndDistFromGreenM != null
-        ? Math.round(lastShotEndDistFromGreenM * 3.28084)
-        : remainingYards != null
-          ? remainingYards * 3
-          : null
+      : lastShotEndFeetToPin ??
+        liveFeetToPin ??
+        (remainingYards != null ? remainingYards * 3 : null)
     : null;
 
   // Putters are filtered out of the recommendation — the panel hides the
