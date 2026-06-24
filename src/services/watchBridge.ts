@@ -46,6 +46,33 @@ export interface WatchRoundState {
    */
   shotDetection?: boolean;
   /**
+   * Whether the user is within range of the course (mirrors the phone's 2 km
+   * at-course gate). Absent → treat as at-course (don't block). False → the
+   * watch hides its Track / Add Shot controls and shows a "not in range" note,
+   * the same way the phone refuses to start tracking off-course.
+   */
+  atCourse?: boolean;
+  /**
+   * Current phone-side auto-track state. Lets the watch Track button render as a
+   * synced toggle and reflect reality even when the phone's at-course gate
+   * refused to start tracking.
+   */
+  autoTracking?: boolean;
+  /**
+   * Transient summary of the most-recently auto-recorded shot (watch Track-off
+   * or Add Shot), for the watch's brief post-save overview. `id` increments per
+   * shot so the watch shows each summary exactly once. Null when there's nothing
+   * fresh to show.
+   */
+  lastShotSummary?: {
+    id: number;
+    clubName: string;
+    /** Human label for the inferred outcome, e.g. "Fairway", "Left", "Green". */
+    result: string;
+    /** Preformatted distance, e.g. "212 yds" / "14 ft". */
+    distanceText: string;
+  } | null;
+  /**
    * Slim club list the watch can render. Putters land in their own bucket on
    * the watch UI so we mark them; everything else is just name + (optional)
    * typical-distance hint for inline display.
@@ -72,6 +99,27 @@ export type WatchInboundMessage =
       endLng?: number | null;
     }
   | { type: 'navigateHole'; direction: 'prev' | 'next' }
+  | {
+      /** Watch toggled round-wide auto-tracking. The phone enables/disables its
+       *  own auto-track (respecting the 2 km at-course gate) and echoes the
+       *  resulting state back via the snapshot's `autoTracking`. */
+      type: 'setAutoTrack';
+      active: boolean;
+    }
+  | {
+      /** Watch wants to log a shot at the user's current GPS position — either
+       *  Track-off "I'm at my ball" or the Add Shot button. The phone fills the
+       *  start from the hole's prior ball position, infers fairway/left/right
+       *  from the end against the course geometry, auto-saves (unverified, like
+       *  the phone's own auto-track), and returns a summary via the snapshot's
+       *  `lastShotSummary`. No club/result picker is involved. */
+      type: 'autoShot';
+      clubId: string | null;
+      startLat?: number | null;
+      startLng?: number | null;
+      endLat?: number | null;
+      endLng?: number | null;
+    }
   | {
       /** Watch user tapped the Track button — start position captured.
        *  active=true on tap; active=false when ended/cancelled.

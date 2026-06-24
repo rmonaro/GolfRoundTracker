@@ -911,6 +911,7 @@ export function HoleLayout({
 
   useEffect(() => {
     if (!useMapbox || !containerRef.current) return;
+    const container = containerRef.current;
     const hole = layout.hole;
 
     // Without tee + green we can't compute a center, bearing, or markers.
@@ -1745,6 +1746,33 @@ export function HoleLayout({
 
     map.on('load', onLoad);
 
+    // Re-fit the overview when the CONTAINER size settles — e.g. a dialog
+    // finishing its open animation. cameraForBounds is measured against the
+    // canvas, so a mid-animation (smaller) container would otherwise leave the
+    // hole over-zoomed (tee/green cropped). We resize on every container change
+    // and re-frame until the user first touches the map, then back off so we
+    // never fight their gesture. Detecting interaction via DOM pointer/wheel on
+    // the container (not Mapbox camera events) avoids tripping on programmatic
+    // jumpTo/easeTo from applyOverview itself.
+    let userMovedCamera = false;
+    const markUserMoved = () => {
+      userMovedCamera = true;
+    };
+    container.addEventListener('pointerdown', markUserMoved);
+    container.addEventListener('wheel', markUserMoved, { passive: true });
+    let reframeRaf: number | null = null;
+    const containerResizeObserver = new ResizeObserver(() => {
+      map.resize();
+      if (userMovedCamera) return;
+      if (reframeRaf != null) cancelAnimationFrame(reframeRaf);
+      // Defer a frame so we measure the settled size, not an intermediate one.
+      reframeRaf = requestAnimationFrame(() => {
+        reframeRaf = null;
+        if (!userMovedCamera) applyOverview(false);
+      });
+    });
+    containerResizeObserver.observe(container);
+
     // Recorded-shot markers — small numbered amber disks at each prior shot's
     // end position. The last marker visually sits under the aim handle (which
     // originates from this point), so dropping it slightly behind the handle
@@ -1953,6 +1981,10 @@ export function HoleLayout({
       landingMarkerRef.current?.remove();
       landingMarkerRef.current = null;
       if (recenterRef) recenterRef.current = null;
+      containerResizeObserver.disconnect();
+      container.removeEventListener('pointerdown', markUserMoved);
+      container.removeEventListener('wheel', markUserMoved);
+      if (reframeRaf != null) cancelAnimationFrame(reframeRaf);
       mapRef.current = null;
       map.remove();
     };

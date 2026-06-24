@@ -2,10 +2,11 @@ import SwiftUI
 
 /// Main read view shown when a round is active. Two modes:
 ///   • Idle (default): two-column layout — yards-to-pin + suggested club on
-///     the left, score / shots / putts on the right, small chevron arrows
-///     bottom for hole navigation. Tap the suggested club to open the
-///     full club picker; tap the "+" between chevrons to open the record-
-///     shot flow locally on the watch.
+///     the left, score / shots / putts on the right, and a 2×2 control grid
+///     (Track + Add Shot over prev/next arrows). Track toggles round-wide
+///     auto-tracking (synced with the phone); Add Shot logs a shot at the
+///     current GPS. Both auto-record — the club picker only opens from the
+///     club pill. Off-course the action buttons are hidden.
 ///   • Recording (phone has its record-shot sheet or pending-landing bar
 ///     up): the watch swaps to a focused view showing just the phone's
 ///     selected club. Tap to change.
@@ -13,74 +14,71 @@ struct HoleHomeView: View {
     @EnvironmentObject var session: WatchSession
     @State private var showingShotFlow = false
     @State private var shotFlowStartingClubId: String?
-    /// True while the user has tapped Track but not yet ended the shot.
-    /// Drives the bottom-controls swap to "tracking" UI + the next-tap
-    /// behavior (end → open shot record flow with start preserved).
-    @State private var isTrackingShot = false
     /// True while the modal is open in "club picker only" mode (user
     /// tapped the suggested-club pill specifically to swap clubs, not
     /// to record a shot). Resets via onDisappear.
     @State private var isClubPickerOnly = false
+    /// Id of the last shot summary we've shown the overview for, so each
+    /// GPS auto-recorded shot flashes its overview exactly once.
+    @State private var shownSummaryId = 0
 
     var body: some View {
         let s = session.state
 
-        if s.recordingShot {
-            recordingView(s)
-                .sheet(isPresented: $showingShotFlow) {
-                    ShotRecordFlow(
-                        isPresented: $showingShotFlow,
-                        initialClubId: shotFlowStartingClubId,
-                        startAlreadyCaptured: isTrackingShot,
-                        clubPickerOnly: isClubPickerOnly
-                    )
-                        .environmentObject(session)
-                        .onDisappear {
-                            // Notify the phone that the watch is no
-                            // longer tracking. After a successful submit
-                            // the phone already got a recordShot — this
-                            // is then redundant-but-harmless. After a
-                            // cancel it's the only end signal.
-                            if isTrackingShot {
-                                session.send(.trackingShot(
-                                    active: false,
-                                    start: nil,
-                                    current: nil
-                                ))
-                                session.endShotTrackingSession()
-                            }
-                            isTrackingShot = false
-                            isClubPickerOnly = false
+        Group {
+            if s.recordingShot {
+                recordingView(s)
+            } else {
+                idleView(s)
+                    .overlay {
+                        // Brief, auto-dismissing overview after a GPS auto-record
+                        // (Track-off / Add Shot). The phone inferred the result.
+                        if let summary = s.lastShotSummary, summary.id != shownSummaryId {
+                            shotOverview(summary)
                         }
-                }
-        } else {
-            idleView(s)
-                .sheet(isPresented: $showingShotFlow) {
-                    ShotRecordFlow(
-                        isPresented: $showingShotFlow,
-                        initialClubId: shotFlowStartingClubId,
-                        startAlreadyCaptured: isTrackingShot,
-                        clubPickerOnly: isClubPickerOnly
-                    )
-                        .environmentObject(session)
-                        .onDisappear {
-                            // Notify the phone that the watch is no
-                            // longer tracking. After a successful submit
-                            // the phone already got a recordShot — this
-                            // is then redundant-but-harmless. After a
-                            // cancel it's the only end signal.
-                            if isTrackingShot {
-                                session.send(.trackingShot(
-                                    active: false,
-                                    start: nil,
-                                    current: nil
-                                ))
-                                session.endShotTrackingSession()
-                            }
-                            isTrackingShot = false
-                            isClubPickerOnly = false
-                        }
-                }
+                    }
+            }
+        }
+        // The shot flow is now ONLY the club picker, reached from the club pill.
+        // Track / Add Shot never open it — they auto-record via GPS.
+        .sheet(isPresented: $showingShotFlow) {
+            ShotRecordFlow(
+                isPresented: $showingShotFlow,
+                initialClubId: shotFlowStartingClubId,
+                startAlreadyCaptured: false,
+                clubPickerOnly: isClubPickerOnly
+            )
+                .environmentObject(session)
+                .onDisappear { isClubPickerOnly = false }
+        }
+    }
+
+    /// Full-screen-ish overview card shown for a couple seconds after a shot is
+    /// auto-recorded from GPS. Read-only — no buttons, auto-dismisses.
+    @ViewBuilder
+    private func shotOverview(_ summary: WatchShotSummary) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 26))
+                .foregroundColor(.green)
+            Text(summary.clubName)
+                .font(.system(size: 20, weight: .heavy, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text(summary.result)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.yellow)
+            Text(summary.distanceText)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.85))
+        .onTapGesture { shownSummaryId = summary.id }
+        .task(id: summary.id) {
+            // Show for ~2.5s, then mark this id shown so the overlay hides.
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            shownSummaryId = summary.id
         }
     }
 
@@ -204,106 +202,103 @@ struct HoleHomeView: View {
         session.localSelectedClubId ?? s.selectedClubId ?? s.suggestedClubId
     }
 
-    /// Bottom controls row. Two modes:
-    ///   • Idle      — prev / Track / Record (+) / next
-    ///   • Tracking  — "Walking…" indicator + End Shot button
+    /// Bottom controls — a 2×2 grid:
+    ///   Row 1:  Track (auto-track toggle)  |  Add Shot (GPS auto-record)
+    ///   Row 2:  ◀ prev hole                |  next hole ▶
     ///
-    /// "Track" captures GPS start immediately and flips the local
-    /// isTrackingShot flag. The user walks to the ball and taps "End
-    /// Shot," which opens the shot record flow with the start
-    /// preserved (so the modal's club picker doesn't overwrite it).
-    /// "Record (+)" remains for the legacy at-ball workflow where the
-    /// user captures start when they pick a club.
+    /// "Track" toggles round-wide auto-tracking, kept in sync with the phone.
+    /// Turning it OFF at the ball records the shot there (then resumes on the
+    /// next tap). "Add Shot" logs a shot at the current GPS without changing the
+    /// auto-track state. Both auto-record via GPS — the phone infers the result
+    /// and a brief overview flashes; neither opens the club picker.
+    ///
+    /// Off-course the action buttons are hidden (mirroring the phone, which
+    /// won't start tracking out of range); only a "not in range" note + the
+    /// hole arrows remain.
     @ViewBuilder
     private func bottomControls(_ s: WatchRoundState) -> some View {
-        if isTrackingShot {
-            HStack(spacing: 6) {
+        if s.atCourse == false {
+            VStack(spacing: 6) {
                 HStack(spacing: 4) {
-                    Image(systemName: "figure.walk")
-                        .font(.system(size: 11))
-                        .foregroundColor(.yellow)
-                    Text("Walking…")
+                    Image(systemName: "location.slash")
+                        .font(.system(size: 12))
+                        .foregroundColor(.orange)
+                    Text("Not in range of \(s.courseName ?? "the course")")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.7)
                 }
-                Spacer()
-                Button {
-                    // Use the SAME club that's displayed (local override wins,
-                    // then the phone's selected, then suggested). Passing a
-                    // non-nil club id makes ShotRecordFlow open straight on the
-                    // result picker — so if the user is happy with the shown
-                    // club, adding a shot skips club selection entirely.
-                    shotFlowStartingClubId = effectiveClubId(s)
-                    showingShotFlow = true
-                } label: {
-                    Text("End Shot")
-                        .font(.system(size: 11, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.mini)
-                .tint(.red)
+                navRow()
             }
         } else {
-            HStack(spacing: 4) {
-                Button {
-                    session.send(.navigateHole(direction: "prev"))
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 12, weight: .semibold))
+            let tracking = s.autoTracking
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    bigButton(
+                        title: tracking ? "Stop" : "Track",
+                        system: tracking ? "stop.fill" : "location.fill",
+                        tint: tracking ? .red : .yellow
+                    ) {
+                        if tracking {
+                            // At the ball: record the shot here, then pause
+                            // auto-tracking until the next tap re-arms it.
+                            session.recordAutoShot(clubId: effectiveClubId(s))
+                            session.setAutoTrack(false)
+                        } else {
+                            session.setAutoTrack(true)
+                        }
+                    }
+                    bigButton(title: "Add Shot", system: "plus", tint: .green) {
+                        // Log a shot at the current GPS now. Auto-track (if on)
+                        // keeps running — this is an extra manual log.
+                        session.recordAutoShot(clubId: effectiveClubId(s))
+                    }
                 }
-                .controlSize(.mini)
-                .buttonStyle(.bordered)
-
-                Button {
-                    // Start GPS shot tracking. The user will walk to the
-                    // ball; "End Shot" then opens the record flow.
-                    session.captureShotStart()
-                    isTrackingShot = true
-                    // Tell the phone the watch is now tracking so it can
-                    // show a banner + stage the start position on the map.
-                    session.send(.trackingShot(
-                        active: true,
-                        start: session.pendingShotStart,
-                        current: nil
-                    ))
-                    // Activate live-position forwarding so the phone
-                    // can render a "you are here" dot at the watch
-                    // user's location as they walk.
-                    session.beginShotTrackingSession()
-                } label: {
-                    Image(systemName: "location.fill")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.mini)
-                .tint(.yellow)
-
-                Button {
-                    // Use the SAME club that's displayed (local override wins,
-                    // then the phone's selected, then suggested). Passing a
-                    // non-nil club id makes ShotRecordFlow open straight on the
-                    // result picker — so if the user is happy with the shown
-                    // club, adding a shot skips club selection entirely.
-                    shotFlowStartingClubId = effectiveClubId(s)
-                    showingShotFlow = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.mini)
-                .tint(.green)
-
-                Button {
-                    session.send(.navigateHole(direction: "next"))
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .controlSize(.mini)
-                .buttonStyle(.bordered)
+                navRow()
             }
         }
+    }
+
+    /// Prev / next hole arrows — the second row, under Track & Add Shot.
+    @ViewBuilder
+    private func navRow() -> some View {
+        HStack(spacing: 6) {
+            bigButton(title: nil, system: "chevron.left", tint: .gray) {
+                session.send(.navigateHole(direction: "prev"))
+            }
+            bigButton(title: nil, system: "chevron.right", tint: .gray) {
+                session.send(.navigateHole(direction: "next"))
+            }
+        }
+    }
+
+    /// A large tappable control used in the 2×2 grid — icon + optional title,
+    /// full-width within its column.
+    @ViewBuilder
+    private func bigButton(
+        title: String?,
+        system: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: system)
+                    .font(.system(size: 16, weight: .bold))
+                if let title = title {
+                    Text(title)
+                        .font(.system(size: 13, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 36)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(tint)
     }
 
     /// LEFT column: big yards-to-pin readout above a small suggested-club button.

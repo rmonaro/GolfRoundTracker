@@ -23,6 +23,7 @@ import HomeRoundedIcon from '@mui/icons-material/HomeRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
+import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
@@ -56,6 +57,7 @@ import {
   type DistanceUnit,
   type Lie,
   type PenaltyType,
+  type ShotResult,
   type TargetResult,
   type TargetType
 } from '@/models';
@@ -1455,6 +1457,14 @@ function HoleMapDialog({
 }) {
   const queryClient = useQueryClient();
   const [editMode, setEditMode] = useState(false);
+  // When on (within edit mode), each map tap CREATES a new shot at the tapped
+  // point — for logging a shot that was never recorded. Off → taps fall back to
+  // assigning GPS onto existing un-mapped shots.
+  const [addingShot, setAddingShot] = useState(false);
+  // Leaving edit mode cancels add-shot mode.
+  useEffect(() => {
+    if (!editMode) setAddingShot(false);
+  }, [editMode]);
   // Bumped each time the player taps "Recap" — triggers the tee → shots → pin
   // replay animation in HoleLayout. Reset when the dialog closes.
   const [recapToken, setRecapToken] = useState(0);
@@ -1472,6 +1482,8 @@ function HoleMapDialog({
     if (!open) {
       setOptimisticPositions(new Map());
       setRecapToken(0);
+      setEditMode(false);
+      setAddingShot(false);
     }
   }, [open]);
   const hole = holes.find((h) => h.hole_number === holeNumber) ?? null;
@@ -1576,18 +1588,67 @@ function HoleMapDialog({
     };
   }, [editMode, orderedShots, queryClient, roundId]);
 
-  /// In edit mode, tapping the map assigns the position to the next
-  /// shot that's missing GPS coords (shot-number order). Lets the
-  /// player retro-populate shots they logged without tapping a
-  /// landing point. Each tap consumes one shot from `unmappedShots`;
-  /// once empty the callback is undefined (no-op tap).
+  /// In edit mode, a map tap does one of two things:
+  ///   • Add-shot mode ON  → CREATE a new shot at the tapped point (appended as
+  ///     the next shot number), for logging a shot that was never recorded.
+  ///   • Add-shot mode OFF → assign the position to the next shot missing GPS
+  ///     coords (shot-number order), retro-populating shots logged without a
+  ///     landing point.
+  /// The callback is undefined (no-op tap) when neither applies.
   const onShotLanded = useMemo(() => {
-    if (!editMode || unmappedShots.length === 0) return undefined;
+    if (!editMode) return undefined;
+    if (!addingShot && unmappedShots.length === 0) return undefined;
     return async (data: {
       start: [number, number];
       end: [number, number];
       calculatedDistanceM: number;
+      inferredLie: Lie | null;
+      inferredTargetResult: TargetResult | null;
     }) => {
+      if (addingShot) {
+        if (!hole) return;
+        // Map the inferred lie onto a shot_result bucket; default to fairway.
+        const lieResult: Record<string, ShotResult> = {
+          fairway: 'fairway',
+          rough: 'rough',
+          sand: 'sand',
+          green: 'green',
+          recovery: 'recovery',
+          penalty: 'penalty'
+        };
+        const shotResult: ShotResult =
+          (data.inferredLie && lieResult[data.inferredLie]) || 'fairway';
+        // Yardage of the new shot = GPS distance from the previous shot's
+        // landing (the tap's `start`) to the tapped point.
+        const yards = Math.round(data.calculatedDistanceM * 1.0936133);
+        try {
+          await roundRepo.addShot({
+            round_id: roundId,
+            hole_id: hole.id,
+            // Append after the highest existing shot number on this hole.
+            shot_number: allShotsForHole.length + 1,
+            club_id: null,
+            shot_result: shotResult,
+            target_type: null,
+            target_result: data.inferredTargetResult,
+            lie: data.inferredLie,
+            penalty_type: null,
+            distance: yards,
+            distance_unit: 'yards',
+            notes: null,
+            start_lat: data.start[1],
+            start_lng: data.start[0],
+            end_lat: data.end[1],
+            end_lng: data.end[0],
+            calculated_distance: data.calculatedDistanceM,
+            verified: true
+          });
+          queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+        } catch (err) {
+          console.error('[summary] add new shot failed', err);
+        }
+        return;
+      }
       const target = unmappedShots[0];
       if (!target) return;
       try {
@@ -1601,7 +1662,7 @@ function HoleMapDialog({
         console.error('[summary] add shot position failed', err);
       }
     };
-  }, [editMode, unmappedShots, queryClient, roundId]);
+  }, [editMode, addingShot, unmappedShots, allShotsForHole.length, hole, queryClient, roundId]);
 
   return (
     <Dialog
@@ -1661,7 +1722,25 @@ function HoleMapDialog({
               have GPS yet. Shows whenever the hole has ANY shots
               (mapped or unmapped) so a hole with all-untracked shots
               still gets the tap-to-add affordance. */}
-          {(orderedShots.length > 0 || unmappedShots.length > 0) && (
+          {/* Add shot — only in edit mode. Toggles "tap the map to drop a new
+              shot" for a stroke that was never logged. */}
+          {editMode && (
+            <Button
+              variant={addingShot ? 'contained' : 'outlined'}
+              size="small"
+              color={addingShot ? 'success' : 'primary'}
+              startIcon={<AddRoundedIcon />}
+              onClick={() => setAddingShot((v) => !v)}
+              sx={{
+                borderRadius: '5px',
+                textTransform: 'none',
+                minWidth: 64
+              }}
+            >
+              {addingShot ? 'Tap map' : 'Add shot'}
+            </Button>
+          )}
+          {hole != null && (
             <Button
               variant={editMode ? 'contained' : 'outlined'}
               size="small"
@@ -1683,11 +1762,18 @@ function HoleMapDialog({
       {editMode && (
         <Box sx={{ px: 2, pb: 0.5 }}>
           <Typography variant="caption" color="text.secondary">
-            Drag any numbered dot to move it.
-            {unmappedShots.length > 0 && (
-              <> Tap anywhere on the map to set the position for shot #
-                {unmappedShots[0].shot_number}
-                {unmappedShots.length > 1 ? ` (+${unmappedShots.length - 1} more)` : ''}.
+            {addingShot ? (
+              <>Tap the map to drop a new shot for this hole.</>
+            ) : (
+              <>
+                Drag any numbered dot to move it.
+                {unmappedShots.length > 0 && (
+                  <> Tap the map to set the position for shot #
+                    {unmappedShots[0].shot_number}
+                    {unmappedShots.length > 1 ? ` (+${unmappedShots.length - 1} more)` : ''}.
+                  </>
+                )}{' '}
+                Use <b>Add shot</b> to log a missed shot.
               </>
             )}
           </Typography>
@@ -1702,6 +1788,10 @@ function HoleMapDialog({
             shotEndPoints={shotEndPoints}
             shotLabels={shotLabels}
             bagClubs={bag}
+            // Let the user pan + pinch-zoom to inspect / precisely place shots.
+            // Dot-drag and tap-to-add are independent of this (gated on the
+            // edit callbacks below), so both still work in Edit mode.
+            interactive
             // Read-only view by default; opt into drag with the Edit
             // toggle above. hideAim keeps the aim handle / yardage
             // markers off so the map reads as visualization.

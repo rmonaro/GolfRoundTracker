@@ -83,8 +83,32 @@ import {
   STROKE_PENALTY_TYPES,
   type BagClub,
   type FairwayResult,
-  type PenaltyType
+  type PenaltyType,
+  type TargetType,
+  type TargetResult
 } from '@/models';
+
+/** Human label for the watch's post-save overview, e.g. "Fairway" / "Left". */
+function watchResultLabel(targetType: TargetType, r: TargetResult): string {
+  switch (r) {
+    case 'hit':
+      return targetType === 'fairway' ? 'Fairway' : targetType === 'green' ? 'Green' : 'Hit';
+    case 'left':
+      return 'Left';
+    case 'right':
+      return 'Right';
+    case 'long':
+      return 'Long';
+    case 'short':
+      return 'Short';
+    case 'made':
+      return 'Made';
+    case 'missed':
+      return 'Missed';
+    default:
+      return 'Shot';
+  }
+}
 
 export function HoleTrackingPage() {
   const active = useRoundStore((s) => s.active);
@@ -230,15 +254,17 @@ export function HoleTrackingPage() {
     inferredTargetResult?: import('@/models').TargetResult | null;
   } | null>(null);
 
-  // Toggle auto-tracking on/off. On enable: check GPS availability +
+  // Enable/disable auto-tracking. On enable: check GPS availability +
   // permission + at-course, then arm the state machine. On disable: the
   // useAutoTrack hook tears down its watch via the enabled=false branch.
-  const onToggleAutoTrack = async () => {
-    if (autoTrackEnabled) {
+  // Shared by the on-screen FAB and the watch's synced Track toggle.
+  const applyAutoTrack = async (enable: boolean) => {
+    if (!enable) {
       setAutoTrackEnabled(false);
       setTrackingError(null);
       return;
     }
+    if (autoTrackEnabled) return;
     if (!isGpsAvailable()) {
       setTrackingError('GPS not available on this device');
       return;
@@ -283,6 +309,7 @@ export function HoleTrackingPage() {
       setTrackingBusy(false);
     }
   };
+  const onToggleAutoTrack = () => applyAutoTrack(!autoTrackEnabled);
 
   if (!active) return <Navigate to="/round" replace />;
 
@@ -533,12 +560,24 @@ export function HoleTrackingPage() {
   // states where the watch should switch to "Recording: <club>" mode.
   const setWatchSelectedClubId = useWatchHintsStore((s) => s.setSelectedClubId);
   const setWatchRecordingShot = useWatchHintsStore((s) => s.setRecordingShot);
+  const setWatchAtCourse = useWatchHintsStore((s) => s.setAtCourse);
+  const setWatchAutoTracking = useWatchHintsStore((s) => s.setAutoTracking);
+  const setWatchLastShotSummary = useWatchHintsStore((s) => s.setLastShotSummary);
   useEffect(() => {
     setWatchSelectedClubId(defaultClubId ?? null);
   }, [defaultClubId, setWatchSelectedClubId]);
   useEffect(() => {
     setWatchRecordingShot(shotSheet || pendingGps != null);
   }, [shotSheet, pendingGps, setWatchRecordingShot]);
+  // Mirror at-course + auto-track state into the watch snapshot so the watch can
+  // hide its controls off-course and render Track as a synced toggle.
+  const watchAtCourse = atCourseStatus ? atCourseStatus.atCourse : null;
+  useEffect(() => {
+    setWatchAtCourse(watchAtCourse);
+  }, [watchAtCourse, setWatchAtCourse]);
+  useEffect(() => {
+    setWatchAutoTracking(autoTrackEnabled);
+  }, [autoTrackEnabled, setWatchAutoTracking]);
   // Reset the user club pick whenever the hole changes — each new hole starts
   // with a blank slate so the picker doesn't carry e.g. a wedge over to a tee
   // shot on the next hole.
@@ -1162,6 +1201,77 @@ export function HoleTrackingPage() {
     autoCommitRef.current = autoCommitShot;
   });
 
+  // Monotonic id for the watch's post-save overview so each summary shows once.
+  const watchShotSummaryIdRef = useRef(0);
+  // Record a shot the WATCH logged at the user's current GPS (Track-off "I'm at
+  // my ball", or the Add Shot button). Mirrors autoCommitShot but uses the
+  // watch's club + end position; the START is the hole's prior ball position
+  // (last shot end / tee) so distance + inferred lie/result match the phone's
+  // own GPS-aware add. Auto-saves UNVERIFIED (golfer reviews at hole-complete)
+  // and pushes a brief club·result·distance summary back for the watch overview.
+  const recordWatchAutoShot = (msg: {
+    clubId: string | null;
+    startLat?: number | null;
+    startLng?: number | null;
+    endLat?: number | null;
+    endLng?: number | null;
+  }) => {
+    const endLat = msg.endLat ?? null;
+    const endLng = msg.endLng ?? null;
+    if (endLat == null || endLng == null) return;
+    const ballStart =
+      msg.startLat != null && msg.startLng != null
+        ? { lat: msg.startLat, lng: msg.startLng }
+        : autoTrackInitialBallPos ??
+          (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
+
+    const club = bagClubs.find((c) => c.clubId === msg.clubId) ?? null;
+    const tType = upcomingTargetType;
+    const inferred = inferShotAt(endLat, endLng);
+    const tResult: import('@/models').TargetResult = inferred.targetResult ?? 'hit';
+    const lie: import('@/models').Lie | null =
+      inferred.lie ??
+      (tType === 'green' ? 'green' : tType === 'fairway' ? 'fairway' : null);
+    const derived: import('@/models').ShotResult =
+      tType === 'fairway' ? 'fairway' : 'green';
+
+    const calculatedDistanceM = ballStart
+      ? haversineMeters(
+          { lat: ballStart.lat, lng: ballStart.lng, accuracyM: 0, timestamp: 0 },
+          { lat: endLat, lng: endLng, accuracyM: 0, timestamp: 0 }
+        )
+      : null;
+    const distanceYds =
+      calculatedDistanceM != null ? Math.round(calculatedDistanceM * 1.0936133) : null;
+
+    void onSubmitShot({
+      clubId: msg.clubId,
+      clubCategory: club?.category ?? null,
+      distance: distanceYds,
+      distanceUnit: distanceYds != null ? 'yards' : null,
+      targetType: tType,
+      targetResult: tResult,
+      lie,
+      penaltyType: null,
+      derivedShotResult: derived,
+      notes: null,
+      startLat: ballStart?.lat ?? null,
+      startLng: ballStart?.lng ?? null,
+      endLat,
+      endLng,
+      calculatedDistance: calculatedDistanceM,
+      verified: false
+    });
+
+    watchShotSummaryIdRef.current += 1;
+    setWatchLastShotSummary({
+      id: watchShotSummaryIdRef.current,
+      clubName: club ? club.customName || club.name : 'Shot',
+      result: watchResultLabel(tType, tResult),
+      distanceText: distanceYds != null ? `${distanceYds} yds` : '—'
+    });
+  };
+
   // Close + commit any in-flight auto shot (e.g. on hole exit). End position
   // defaults to the latest GPS fix inside resolvePendingShot.
   const flushPendingAutoShot = () => {
@@ -1222,11 +1332,15 @@ export function HoleTrackingPage() {
   const goNextRef = useRef(goNext);
   const onSubmitShotRef = useRef(onSubmitShot);
   const bagClubsRef = useRef(bagClubs);
+  const applyAutoTrackRef = useRef(applyAutoTrack);
+  const recordWatchAutoShotRef = useRef(recordWatchAutoShot);
   useEffect(() => {
     goPrevRef.current = goPrev;
     goNextRef.current = goNext;
     onSubmitShotRef.current = onSubmitShot;
     bagClubsRef.current = bagClubs;
+    applyAutoTrackRef.current = applyAutoTrack;
+    recordWatchAutoShotRef.current = recordWatchAutoShot;
   });
   useEffect(() => {
     let handle: { remove: () => Promise<void> } | null = null;
@@ -1235,6 +1349,26 @@ export function HoleTrackingPage() {
         if (msg.type === 'navigateHole') {
           if (msg.direction === 'prev') goPrevRef.current();
           else if (msg.direction === 'next') goNextRef.current();
+          return;
+        }
+        if (msg.type === 'setAutoTrack') {
+          // Watch toggled round-wide auto-tracking. Run the same gated
+          // enable/disable as the phone FAB; the resulting state echoes back
+          // to the watch via the snapshot's `autoTracking`.
+          void applyAutoTrackRef.current(msg.active);
+          return;
+        }
+        if (msg.type === 'autoShot') {
+          // Watch logged a shot at the user's current GPS (Track-off at the
+          // ball, or Add Shot). Infer fairway/left/right from the landing
+          // point, auto-save, and push a summary back for the watch overview.
+          recordWatchAutoShotRef.current({
+            clubId: msg.clubId,
+            startLat: msg.startLat,
+            startLng: msg.startLng,
+            endLat: msg.endLat,
+            endLng: msg.endLng
+          });
           return;
         }
         if (msg.type === 'trackingShot') {

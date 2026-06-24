@@ -26,6 +26,9 @@ export function useWatchSync() {
   const bag = useBagStore((s) => s.clubs);
   const selectedClubId = useWatchHintsStore((s) => s.selectedClubId);
   const recordingShot = useWatchHintsStore((s) => s.recordingShot);
+  const atCourse = useWatchHintsStore((s) => s.atCourse);
+  const autoTracking = useWatchHintsStore((s) => s.autoTracking);
+  const lastShotSummary = useWatchHintsStore((s) => s.lastShotSummary);
   const shotDetection = useSettingsStore((s) => s.watchShotDetectionEnabled);
 
   // Layout query for the current hole — gives us the OSM par + centerline
@@ -70,6 +73,9 @@ export function useWatchSync() {
       selectedClubId,
       recordingShot,
       shotDetection,
+      atCourse,
+      autoTracking,
+      lastShotSummary,
       pinLat,
       pinLng
     });
@@ -79,7 +85,18 @@ export function useWatchSync() {
     watchBridge.sendState(snapshot).catch((err) => {
       console.warn('[watch-sync] sendState failed', err);
     });
-  }, [active, currentHole, layoutQuery.data, bag, selectedClubId, recordingShot, shotDetection]);
+  }, [
+    active,
+    currentHole,
+    layoutQuery.data,
+    bag,
+    selectedClubId,
+    recordingShot,
+    shotDetection,
+    atCourse,
+    autoTracking,
+    lastShotSummary
+  ]);
 }
 
 interface SnapshotInputs {
@@ -95,6 +112,9 @@ interface SnapshotInputs {
   selectedClubId: string | null;
   recordingShot: boolean;
   shotDetection: boolean;
+  atCourse: boolean | null;
+  autoTracking: boolean;
+  lastShotSummary: WatchRoundState['lastShotSummary'];
   pinLat: number | null;
   pinLng: number | null;
 }
@@ -108,6 +128,9 @@ function buildSnapshot({
   selectedClubId,
   recordingShot,
   shotDetection,
+  atCourse,
+  autoTracking,
+  lastShotSummary,
   pinLat,
   pinLng
 }: SnapshotInputs): WatchRoundState {
@@ -180,6 +203,9 @@ function buildSnapshot({
     selectedClubId,
     recordingShot,
     shotDetection,
+    atCourse: atCourse ?? undefined,
+    autoTracking,
+    lastShotSummary: lastShotSummary ?? undefined,
     pinLat,
     pinLng,
     bag: slimBag
