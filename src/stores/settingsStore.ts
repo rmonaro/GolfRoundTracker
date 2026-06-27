@@ -22,11 +22,19 @@ interface SettingsState {
    * watch is paired (the phone simply never receives strikes).
    */
   watchShotDetectionEnabled: boolean;
+  /**
+   * One-time guided tour of the round (hole-tracking) screen. Defaults to
+   * false; the first time a user opens the round screen the walkthrough auto-
+   * runs, then this flips true so it never auto-opens again. The in-app help
+   * button can replay it on demand regardless of this flag.
+   */
+  roundTourCompleted: boolean;
   setThemeMode: (m: ThemeMode) => void;
   toggleTheme: () => void;
   setWatchMode: (v: boolean) => void;
   setGpsEnabled: (v: boolean) => void;
   setWatchShotDetection: (v: boolean) => void;
+  setRoundTourCompleted: (v: boolean) => void;
 }
 
 export const useSettingsStore = create<SettingsState>()(
@@ -36,13 +44,15 @@ export const useSettingsStore = create<SettingsState>()(
       watchModeEnabled: false,
       gpsEnabled: false,
       watchShotDetectionEnabled: true,
+      roundTourCompleted: false,
       setThemeMode: (themeMode) => set({ themeMode }),
       toggleTheme: () =>
         set((s) => ({ themeMode: s.themeMode === 'dark' ? 'light' : 'dark' })),
       setWatchMode: (watchModeEnabled) => set({ watchModeEnabled }),
       setGpsEnabled: (gpsEnabled) => set({ gpsEnabled }),
       setWatchShotDetection: (watchShotDetectionEnabled) =>
-        set({ watchShotDetectionEnabled })
+        set({ watchShotDetectionEnabled }),
+      setRoundTourCompleted: (roundTourCompleted) => set({ roundTourCompleted })
     }),
     { name: 'grt-settings' }
   )

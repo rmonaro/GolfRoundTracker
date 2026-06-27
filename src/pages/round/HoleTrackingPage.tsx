@@ -33,6 +33,7 @@ import CenterFocusStrongRoundedIcon from '@mui/icons-material/CenterFocusStrongR
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
+import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
 import {
   ensureGpsPermission,
   getCurrentPosition,
@@ -42,6 +43,7 @@ import {
   type GpsPoint
 } from '@/services/gpsService';
 import { useAutoTrack, type ShotDetected } from '@/features/round/useAutoTrack';
+import { RoundTour, type TourStep } from '@/features/round/RoundTour';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
@@ -152,6 +154,8 @@ export function HoleTrackingPage() {
   // GPS opt-in. Off by default so we don't prompt non-GPS users for location.
   const gpsEnabled = useSettingsStore((s) => s.gpsEnabled);
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
+  const roundTourCompleted = useSettingsStore((s) => s.roundTourCompleted);
+  const setRoundTourCompleted = useSettingsStore((s) => s.setRoundTourCompleted);
 
   // At-course detection. Skipped entirely when GPS is disabled.
   const courseQuery = useQuery({
@@ -776,6 +780,83 @@ export function HoleTrackingPage() {
     const stop = watchPosition((fix) => setLiveFix(fix), { maxAccuracyM: 100 });
     return stop;
   }, [gpsEnabled]);
+
+  // --- First-run guided tour of the round screen ---
+  const [tourOpen, setTourOpen] = useState(false);
+  // Guards the auto-open so it fires at most once per mount.
+  const tourAutoStartedRef = useRef(false);
+  const tourSteps = useMemo<TourStep[]>(
+    () => [
+      {
+        selector: null,
+        title: 'Welcome to your round',
+        body: "Here's a quick tour of how to track each hole. It takes about 20 seconds."
+      },
+      {
+        selector: '[data-tour="map"]',
+        title: 'The hole & your position',
+        body: 'The map shows the hole layout. Your live GPS position is the blue dot — tap anywhere on the map to drop a marker where your shot landed.'
+      },
+      {
+        selector: '.grt-aim-handle',
+        title: 'Aim where you want',
+        body: 'This is your aim target. Drag it on the map to your intended landing spot — the distance to it updates as you move it, so you can plan your shot.'
+      },
+      {
+        selector: '[data-tour="topin"]',
+        title: 'Distance to the pin',
+        body: 'This updates as you play and suggests a club for the distance. Live wind shows just below it.'
+      },
+      {
+        selector: '[data-tour="club"]',
+        title: 'Pick your club',
+        body: 'Tap to choose the club you’re hitting. The highlighted suggestion is based on your distance to the pin.'
+      },
+      {
+        selector: '[data-tour="track"]',
+        title: 'Track — auto-record your shots',
+        body: 'Tap Track to start following your position for the round. With your Apple Watch on, each swing is then recorded automatically as you play — no tapping per shot. Tap Track again to stop. This button only appears when GPS is turned on in Settings.'
+      },
+      {
+        selector: '[data-tour="addshot"]',
+        title: 'Log a shot manually',
+        body: 'No watch? Tap Add Shot once you’ve walked up to your ball — the distance from your last shot is filled in from GPS automatically.'
+      },
+      {
+        selector: '[data-tour="measure"]',
+        title: 'Show distances',
+        body: 'Tap the ruler to show the 100/150/200-yard distance markers down the hole. Tap again to hide them.'
+      },
+      {
+        selector: '[data-tour="recenter"]',
+        title: 'Recenter the map',
+        body: 'Panned or zoomed in? Tap this to snap the map back and re-frame the whole hole.'
+      },
+      {
+        selector: '[data-tour="nav"]',
+        title: 'Move between holes',
+        body: 'Use the arrows up top to switch holes. Finish a hole by recording your made putt, then move on.'
+      }
+    ],
+    []
+  );
+
+  const closeTour = useCallback(() => {
+    setTourOpen(false);
+    setRoundTourCompleted(true);
+  }, [setRoundTourCompleted]);
+
+  // Auto-launch the walkthrough the first time a user reaches the round screen,
+  // once the hole layout has loaded so the anchored controls exist in the DOM.
+  useEffect(() => {
+    if (roundTourCompleted) return;
+    if (tourAutoStartedRef.current) return;
+    if (!layoutQuery.data) return;
+    tourAutoStartedRef.current = true;
+    // Small delay so the floating controls have painted before we measure them.
+    const t = setTimeout(() => setTourOpen(true), 600);
+    return () => clearTimeout(t);
+  }, [roundTourCompleted, layoutQuery.data]);
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
@@ -1693,11 +1774,18 @@ export function HoleTrackingPage() {
             </Typography>
           </Box>
           <IconButton
+            data-tour="nav"
             aria-label="next hole"
             onClick={goNext}
             disabled={idx === active.holes.length - 1}
           >
             <ArrowForwardIosRoundedIcon />
+          </IconButton>
+          <IconButton
+            aria-label="how to use this screen"
+            onClick={() => setTourOpen(true)}
+          >
+            <HelpOutlineRoundedIcon />
           </IconButton>
           <IconButton aria-label="view round stats" color="primary" onClick={viewStats}>
             <FlagCircleRoundedIcon />
@@ -1709,6 +1797,7 @@ export function HoleTrackingPage() {
           top bar (hole / par / yardage / nav); the bottom nav has been folded
           into the map via View Shots + Add Shot floating buttons. */}
       <Box
+        data-tour="map"
         sx={{
           position: 'relative',
           height: 'calc(100dvh - 64px - env(safe-area-inset-top))',
@@ -1841,6 +1930,7 @@ export function HoleTrackingPage() {
         >
           {(remainingYards != null || remainingFeet != null) && (
             <Box
+              data-tour="topin"
               sx={{
                 bgcolor: 'rgba(11,20,16,0.88)',
                 color: 'common.white',
@@ -2015,6 +2105,7 @@ export function HoleTrackingPage() {
             slide up the drawer with the full ClubPicker tier-1 / tier-2
             UI. Empty placeholder is "+" when nothing's selected. */}
         <Button
+          data-tour="club"
           onClick={() => setClubPickerOpen(true)}
           sx={{
             position: 'absolute',
@@ -2099,6 +2190,7 @@ export function HoleTrackingPage() {
             not detect shots from its own movement. Tap again to disarm. */}
         {gpsEnabled && (
           <Fab
+            data-tour="track"
             variant="extended"
             color={autoTrackEnabled ? 'error' : 'default'}
             aria-label={autoTrackEnabled ? 'stop auto-tracking' : 'start auto-tracking'}
@@ -2276,6 +2368,7 @@ export function HoleTrackingPage() {
             hole is complete. */}
         {!holeComplete && (
           <Fab
+            data-tour="measure"
             size="small"
             aria-label={showYardageMarkers ? 'hide yardage markers' : 'show yardage markers'}
             onClick={() => setShowYardageMarkers((v) => !v)}
@@ -2304,6 +2397,7 @@ export function HoleTrackingPage() {
             pinch-zoomed the map. Sits one slot (68px) above the ruler button. */}
         {!holeComplete && (
           <Fab
+            data-tour="recenter"
             size="small"
             aria-label="recenter map on hole"
             onClick={() => recenterMapRef.current?.()}
@@ -2330,6 +2424,7 @@ export function HoleTrackingPage() {
             shot. Use the header arrows to move on to the next hole. */}
         {!holeComplete && (
           <Fab
+            data-tour="addshot"
             color="primary"
             aria-label="add shot"
             onClick={() => {
@@ -2804,6 +2899,8 @@ export function HoleTrackingPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <RoundTour open={tourOpen} steps={tourSteps} onClose={closeTour} />
     </Box>
   );
 }
