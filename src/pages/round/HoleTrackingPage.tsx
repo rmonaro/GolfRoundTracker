@@ -220,19 +220,18 @@ export function HoleTrackingPage() {
   // Bumped by the post-hole "Recap" button to replay the shots as a growing
   // tee → landings → pin line with the numbered dots popping in one by one.
   const [recapToken, setRecapToken] = useState(0);
-  // Newest confirmed ball-strike pushed from the watch (Phase 1 impact gate).
-  // Fed to useAutoTrack so a "walked then stopped" pattern only counts as a
-  // shot when a real strike preceded it. Null until the watch sends one;
-  // absence leaves auto-track on its pure-GPS behavior.
+  // Newest confirmed ball-strike pushed from the watch. Fed to useAutoTrack,
+  // where each strike auto-records a shot. Null until the watch sends one;
+  // without a watch, no shots are auto-detected (manual Add Shot only).
   const [lastImpact, setLastImpact] = useState<{
     impactId: number;
     capturedAt: number;
   } | null>(null);
   // True while the watch strike stream is "live" — flipped on each roundImpact
-  // and cleared by a staleness timeout. Gates Phase 2 impact-primary mode: only
-  // when strikes are actually arriving do we hand detection to the watch;
-  // otherwise we stay on Phase 1 GPS-gated tracking so non-watch users are
-  // unaffected.
+  // and cleared by a staleness timeout. Gates impact-primary mode: only when
+  // strikes are actually arriving do we hand detection to the watch. When no
+  // watch is streaming, the phone only tracks position — it does not auto-detect
+  // shots from its own GPS movement.
   const [strikeStreamLive, setStrikeStreamLive] = useState(false);
   const strikeStaleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Headless auto-commit handler, assigned below once onSubmitShot exists.
@@ -720,30 +719,28 @@ export function HoleTrackingPage() {
     return null;
   }, [lastShotForAutoTrack?.endLat, lastShotForAutoTrack?.endLng]);
 
-  // Phase 2 impact-primary mode: hand detection to the watch when GPS + the
-  // shot-detection setting are on AND the strike stream is live. Otherwise fall
-  // back to Phase 1 GPS-gated tracking (impactPrimary off).
+  // Impact-primary mode: shot detection is handed to the watch when GPS + the
+  // shot-detection setting are on AND the strike stream is live. When off, no
+  // auto-detection happens — the phone only tracks position; shots are logged
+  // manually via the Add Shot button.
   const impactPrimary = gpsEnabled && watchShotDetectionEnabled && strikeStreamLive;
 
   const autoTrack = useAutoTrack({
     enabled: autoTrackEnabled,
     initialBallPos: autoTrackInitialBallPos,
-    // Phase 1 impact gate — the latest confirmed strike from the watch,
-    // gated by the user's "watch shot detection" setting.
+    // The latest confirmed strike from the watch — drives detection.
     lastImpact,
-    impactGateEnabled: watchShotDetectionEnabled,
-    // Phase 2 — strikes drive detection; emitted shots carry source:'impact'.
+    // Strikes drive detection; emitted shots carry source:'impact'.
     impactPrimary,
     onShotDetected: (shot) => {
       // Auto-recording is WATCH-driven only. A watch strike (source:'impact')
       // closes the in-flight shot → auto-commit it UNVERIFIED (no sheet
       // interruption; reviewed at hole-complete / round summary).
       //
-      // The phone deliberately does NOT auto-record from its own GPS
-      // "walked then stopped" heuristic (source:'gps') anymore — it just keeps
-      // the live position. Non-watch shots are logged manually via the Add Shot
-      // button, which fills the yardage from the GPS last→current distance.
-      if (shot.source !== 'impact') return;
+      // The phone deliberately does NOT auto-detect shots from its own GPS
+      // movement ("walked then stopped") — it just keeps the live position.
+      // Non-watch shots are logged manually via the Add Shot button, which
+      // fills the yardage from the GPS last→current distance.
       autoCommitRef.current?.(shot);
     }
   });
@@ -2097,10 +2094,9 @@ export function HoleTrackingPage() {
         )}
 
         {/* Auto-track GPS FAB. Only when GPS is enabled in Settings.
-            Tap to arm continuous tracking; the state machine in
-            useAutoTrack detects "walked then stopped" patterns and
-            opens the Add Shot sheet pre-filled when a shot lands.
-            Tap again to disarm. */}
+            Tap to arm continuous position tracking, which lets the watch's
+            ball-strikes auto-record onto your current location. The phone does
+            not detect shots from its own movement. Tap again to disarm. */}
         {gpsEnabled && (
           <Fab
             variant="extended"
@@ -2150,12 +2146,7 @@ export function HoleTrackingPage() {
               textAlign: 'right'
             }}
           >
-            {trackingError ??
-              (autoTrack.state === 'moving'
-                ? 'Auto-track: walking to ball…'
-                : autoTrack.state === 'arrived'
-                  ? 'Shot detected — confirming…'
-                  : 'Auto-track ON — at ball')}
+            {trackingError ?? 'Auto-track ON — watch will record shots'}
           </Box>
         )}
 
@@ -2554,14 +2545,9 @@ export function HoleTrackingPage() {
             <IconButton
               aria-label="cancel landing point"
               onClick={() => {
-                // If this pendingGps came from an auto-track detection
-                // (state machine in 'arrived'), tell the tracker the
-                // detection was a false positive so it re-anchors and
-                // resumes detecting. Manual-tap pendingGps never sets
-                // 'arrived' so this guard is safe.
-                if (autoTrack.state === 'arrived') {
-                  autoTrack.dismissShot();
-                }
+                // pendingGps only ever comes from a manual map tap / Add Shot
+                // now — shot detection is watch-driven, so cancelling just
+                // clears the staged landing point.
                 setPendingGps(null);
               }}
               size="small"
@@ -2688,13 +2674,6 @@ export function HoleTrackingPage() {
         onClose={() => {
           setShotSheet(false);
           setEditingShot(null);
-          // If the sheet was opened by an auto-track detection that the
-          // user is now cancelling, treat the detection as a false
-          // positive: re-arm the tracker anchored at the current location
-          // (the cancelled "end" is presumed to be where the user is now).
-          if (autoTrack.state === 'arrived' && pendingGps) {
-            autoTrack.dismissShot();
-          }
           setPendingGps(null);
         }}
         onSubmit={onSubmitShot}
