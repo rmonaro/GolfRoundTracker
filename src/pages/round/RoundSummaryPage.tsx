@@ -90,6 +90,14 @@ export function RoundSummaryPage() {
   const navigate = useNavigate();
   const detail = useRoundDetails(roundId);
   const reset = useRoundStore((s) => s.reset);
+  // When this summary is a "peek" at the round currently in progress (opened via
+  // the flag button mid-round), the active round is still set and matches. In
+  // that case Back should drop the user back into their round on the same hole
+  // (navigate(-1) → the hole page, which restores currentHoleIndex from the
+  // store). For a completed round — finished, or opened from the list — the
+  // active round has been cleared, so Back goes to the round list instead.
+  const activeRound = useRoundStore((s) => s.active);
+  const isPeekingActiveRound = !!activeRound && activeRound.roundId === roundId;
   const bag = useBagStore((s) => s.clubs);
   const profile = useAuthStore((s) => s.profile);
   const userId = useAuthStore((s) => s.session?.user.id);
@@ -233,7 +241,7 @@ export function RoundSummaryPage() {
       <PageHeader
         title="Round Summary"
         subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
-        back="/round"
+        back={isPeekingActiveRound ? true : '/round'}
       />
 
       {/* Verification backstop — auto-detected shots not yet confirmed. */}
