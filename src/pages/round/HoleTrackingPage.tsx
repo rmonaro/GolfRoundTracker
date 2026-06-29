@@ -44,6 +44,7 @@ import {
 } from '@/services/gpsService';
 import { useAutoTrack, type ShotDetected } from '@/features/round/useAutoTrack';
 import { RoundTour, type TourStep } from '@/features/round/RoundTour';
+import { PuttModePanel } from '@/features/round/PuttModePanel';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
@@ -833,6 +834,15 @@ export function HoleTrackingPage() {
         body: 'Panned or zoomed in? Tap this to snap the map back and re-frame the whole hole.'
       },
       {
+        // Selector-less (centered): the putting panel only renders once the
+        // ball is on the green, so it isn't in the DOM during the first-run
+        // tour. A centered step always shows; on the green it'd be skipped by
+        // the engine anyway if we anchored it.
+        selector: null,
+        title: 'Putting on the green',
+        body: 'Once you reach the green, a putting panel appears with your live distance to the flag. Tap Missed or Made for each putt — use − / + to nudge the distance if GPS reads a touch high. The hole finishes when you tap Made.'
+      },
+      {
         selector: '[data-tour="nav"]',
         title: 'Move between holes',
         body: 'Use the arrows up top to switch holes. Finish a hole by recording your made putt, then move on.'
@@ -887,6 +897,17 @@ export function HoleTrackingPage() {
     () => hole.shots.filter((s) => s.verified === false),
     [hole.shots]
   );
+  // Putts already recorded on this hole — shown in the on-green putting panel.
+  const puttsThisHole = useMemo(
+    () => hole.shots.filter((s) => s.targetType === 'putt').length,
+    [hole.shots]
+  );
+  // The on-green putting panel is the dedicated Missed / Made recorder. It
+  // shows once the ball is on the green (and a putter is in the bag) and stays
+  // up until the hole is made. While it's up the right-side FAB stack lifts
+  // clear of it (it's full-width, anchored at the same bottom slot).
+  const showPuttPanel =
+    !holeComplete && lastShotOnGreen && bagClubs.some((c) => c.category === 'putter');
   // When a hole completes with unverified auto shots, prompt the review once.
   useEffect(() => {
     if (!holeComplete) return;
@@ -1366,6 +1387,36 @@ export function HoleTrackingPage() {
     if (!impactPrimary) autoTrack.clearPendingShot();
   }, [impactPrimary, autoTrack]);
 
+  // Record a putt from the on-green putting panel. The distance (feet to the
+  // flag) is the panel's shown reading — GPS → pin, optionally ± corrected —
+  // and `made` holes out. Start = where the player is standing now (the ball);
+  // every putt is drawn toward the cup, so end = the pin. onSubmitShot itself
+  // closes any pending auto approach shot first (verified save), keeping order.
+  // (The watch records its own putts via the recordShot inbound handler.)
+  const recordPutt = (made: boolean, distanceFeet: number | null) => {
+    const putter = bagClubs.find((c) => c.category === 'putter');
+    if (!putter) return;
+    const startLat = liveFix?.lat ?? lastShot?.endLat ?? null;
+    const startLng = liveFix?.lng ?? lastShot?.endLng ?? null;
+    void onSubmitShot({
+      clubId: putter.clubId,
+      clubCategory: 'putter',
+      distance: distanceFeet,
+      distanceUnit: distanceFeet != null ? 'feet' : null,
+      targetType: 'putt',
+      targetResult: made ? 'made' : 'missed',
+      lie: 'green',
+      penaltyType: null,
+      derivedShotResult: made ? 'made_putt' : 'putt',
+      notes: null,
+      startLat,
+      startLng,
+      endLat: pinLatEff,
+      endLng: pinLngEff,
+      calculatedDistance: distanceFeet != null ? distanceFeet * 0.3048 : null
+    });
+  };
+
   const onDeleteShot = async (shot: LocalShot) => {
     removeShotLocal(hole.holeNumber, shot.tempId);
     syncHole(hole.holeNumber);
@@ -1552,7 +1603,15 @@ export function HoleTrackingPage() {
           let watchDistance: number | null = null;
           let watchDistanceUnit: import('@/models').DistanceUnit | null = null;
           let watchCalculatedDistanceM: number | null = null;
-          if (
+          if (msg.targetType === 'putt' && msg.distanceFeet != null) {
+            // Putts from the watch's on-green panel carry the player-seen (and
+            // possibly ± nudged) feet-to-flag directly — GPS can't measure a
+            // putt, so this is the source of truth. Mirror the phone panel,
+            // which stores feet + the meter equivalent.
+            watchDistance = msg.distanceFeet;
+            watchDistanceUnit = 'feet';
+            watchCalculatedDistanceM = msg.distanceFeet * 0.3048;
+          } else if (
             msg.startLat != null &&
             msg.startLng != null &&
             msg.endLat != null &&
@@ -2287,86 +2346,25 @@ export function HoleTrackingPage() {
           </Box>
         )}
 
-        {/* Made — one-tap putt record. Only on the green and before the hole
-            is complete. Uses the player's putter, the current remaining feet
-            as the putt distance, and records a made-putt shot directly —
-            skipping the Add Shot sheet for the most common end-of-hole
-            action. Sits above the Add Shot FAB to keep the FAB stack
-            consistent on every hole. */}
-        {!holeComplete &&
-          lastShotOnGreen &&
-          bagClubs.some((c) => c.category === 'putter') && (
-            <Fab
-              variant="extended"
-              aria-label="record made putt"
-              onClick={() => {
-                const putter = bagClubs.find((c) => c.category === 'putter');
-                if (!putter) return;
-                // Pin position: prefer the shared course-wide / per-round
-                // pin override; fall back to the OSM green coord. This is
-                // the geographic spot the ball is in once "Made" is
-                // tapped, so use it as the made putt's end position. With
-                // an end coord set, the shot shows up in shotEndPoints
-                // and renders as the next numbered dot on the map — every
-                // shot is visible after hole-out.
-                const pinLng =
-                  pinOverride?.[0] ?? layoutQuery.data?.hole.green_lng ?? null;
-                const pinLat =
-                  pinOverride?.[1] ?? layoutQuery.data?.hole.green_lat ?? null;
-                // Use the last shot's end position as the putt's start
-                // (the ball was sitting there before the putt). Gives the
-                // putt a real start→end pair so any GPS-aware downstream
-                // analytics still works.
-                const startLng = lastShot?.endLng ?? null;
-                const startLat = lastShot?.endLat ?? null;
-                const calculatedDistanceM =
-                  pinLng != null && pinLat != null && startLng != null && startLat != null
-                    ? haversineMeters(
-                        { lat: startLat, lng: startLng, accuracyM: 0, timestamp: 0 },
-                        { lat: pinLat, lng: pinLng, accuracyM: 0, timestamp: 0 }
-                      )
-                    : null;
-                void onSubmitShot({
-                  clubId: putter.clubId,
-                  clubCategory: 'putter',
-                  distance: remainingFeet,
-                  distanceUnit: remainingFeet != null ? 'feet' : null,
-                  targetType: 'putt',
-                  targetResult: 'made',
-                  lie: 'green',
-                  penaltyType: null,
-                  derivedShotResult: 'made_putt',
-                  notes: null,
-                  startLat,
-                  startLng,
-                  endLat: pinLat,
-                  endLng: pinLng,
-                  calculatedDistance: calculatedDistanceM
-                });
-              }}
-              sx={{
-                position: 'absolute',
-                bottom: 'calc(84px + env(safe-area-inset-bottom))',
-                right: 16,
-                zIndex: 4,
-                bgcolor: '#2e7d32',
-                color: 'common.white',
-                fontWeight: 800,
-                px: 2.5,
-                '&:hover': { bgcolor: '#1b5e20' },
-                boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
-              }}
-            >
-              <FlagCircleRoundedIcon sx={{ mr: 1 }} />
-              Made
-            </Fab>
-          )}
+        {/* On-green putting panel — the full Missed / Made recorder with a
+            live GPS → flag distance and a quick ± correction. Replaces the old
+            single "Made" Fab; it captures both outcomes and the putt distance,
+            and stays up until the hole is made. */}
+        {showPuttPanel && (
+          <PuttModePanel
+            holeNumber={hole.holeNumber}
+            liveFeetToPin={remainingFeet}
+            puttsThisHole={puttsThisHole}
+            onPutt={recordPutt}
+          />
+        )}
 
         {/* Yardage markers toggle — small FAB above the Add Shot button.
             Tap to show the 100/150/200/250-yd distance markers from the
             green along the centerline. Tap again to hide. Hidden once the
-            hole is complete. */}
-        {!holeComplete && (
+            hole is complete, and while the putting panel is up (the green-from
+            markers are meaningless once the ball is on the green). */}
+        {!holeComplete && !showPuttPanel && (
           <Fab
             data-tour="measure"
             size="small"
@@ -2403,9 +2401,13 @@ export function HoleTrackingPage() {
             onClick={() => recenterMapRef.current?.()}
             sx={{
               position: 'absolute',
-              bottom: lastShotOnGreen
-                ? 'calc(220px + env(safe-area-inset-bottom))'
-                : 'calc(152px + env(safe-area-inset-bottom))',
+              // While the putting panel is up the yardage toggle is hidden and
+              // the full-width panel fills the lower slots, so sit just above it.
+              bottom: showPuttPanel
+                ? 'calc(244px + env(safe-area-inset-bottom))'
+                : lastShotOnGreen
+                  ? 'calc(220px + env(safe-area-inset-bottom))'
+                  : 'calc(152px + env(safe-area-inset-bottom))',
               right: 16,
               zIndex: 4,
               bgcolor: 'rgba(11,20,16,0.85)',

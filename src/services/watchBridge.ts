@@ -121,6 +121,9 @@ export type WatchInboundMessage =
       startLng?: number | null;
       endLat?: number | null;
       endLng?: number | null;
+      /** Putt distance (feet to flag) the watch user saw / nudged. GPS can't
+       *  measure a putt, so for putts this is the authoritative distance. */
+      distanceFeet?: number | null;
     }
   | { type: 'navigateHole'; direction: 'prev' | 'next' }
   | {

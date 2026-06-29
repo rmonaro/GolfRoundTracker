@@ -224,9 +224,15 @@ function buildSnapshot({
   // (the phone hides the suggestion in that case too).
   const lastShot = currentHole.shots[currentHole.shots.length - 1];
   const ballOnGreen = lastShot?.lie === 'green';
-  // On the green when the last shot stuck the green or was a putt — the watch
-  // uses this to show distance-to-pin in feet rather than yards.
-  const onGreen = ballOnGreen || lastShot?.targetType === 'putt';
+  // Hole is done once the last shot is a made putt. Used to drop putting mode
+  // so the watch stops offering Missed / Made on a holed-out hole (mirrors the
+  // phone's showPuttPanel, which is gated on !holeComplete).
+  const holeComplete =
+    lastShot?.targetType === 'putt' && lastShot?.targetResult === 'made';
+  // On the green when the last shot stuck the green or was a putt (and the hole
+  // isn't already holed out) — the watch uses this to show distance-to-pin in
+  // feet rather than yards AND to swap in the Missed / Made putt controls.
+  const onGreen = (ballOnGreen || lastShot?.targetType === 'putt') && !holeComplete;
   // Precise putt distance (feet) = the ball's resting spot (last shot end) → the
   // pin. Sent so the watch shows the same value the phone does instead of its
   // own noisier live GPS reading. Null off the green / without GPS or a pin.

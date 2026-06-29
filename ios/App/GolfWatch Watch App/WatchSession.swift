@@ -223,7 +223,7 @@ struct WatchClub: Equatable, Identifiable {
 /// `src/services/watchBridge.ts`.
 enum WatchOutboundMessage {
     case recordShot(clubId: String?, targetType: String, targetResult: String,
-                    start: CLLocation?, end: CLLocation?)
+                    start: CLLocation?, end: CLLocation?, distanceFeet: Int? = nil)
     case navigateHole(direction: String) // "prev" | "next"
     /// Watch user toggled the Track-shot button. `active=true` when the
     /// user starts tracking (after captureShotStart), false when they
@@ -270,7 +270,7 @@ enum WatchOutboundMessage {
 
     var payload: [String: Any] {
         switch self {
-        case .recordShot(let clubId, let targetType, let targetResult, let start, let end):
+        case .recordShot(let clubId, let targetType, let targetResult, let start, let end, let distanceFeet):
             var d: [String: Any] = [
                 "type": "recordShot",
                 "clubId": clubId ?? NSNull(),
@@ -284,6 +284,12 @@ enum WatchOutboundMessage {
             if let e = end {
                 d["endLat"] = e.coordinate.latitude
                 d["endLng"] = e.coordinate.longitude
+            }
+            // For putts the watch sends the (player-adjusted) feet-to-flag
+            // directly — GPS can't measure a putt, so this is the source of
+            // truth the phone saves.
+            if let ft = distanceFeet {
+                d["distanceFeet"] = ft
             }
             return d
         case .navigateHole(let direction):
@@ -594,6 +600,20 @@ final class WatchSession: NSObject, ObservableObject {
         send(.recordShot(
             clubId: clubId, targetType: targetType, targetResult: targetResult,
             start: start, end: end
+        ))
+    }
+
+    /// Record a putt from the watch's on-green panel. The distance is the
+    /// feet-to-flag the player sees (and may have nudged with ± ), sent as the
+    /// authoritative value since GPS can't measure a putt. `made` holes out.
+    func recordPutt(clubId: String?, made: Bool, distanceFeet: Int?) {
+        send(.recordShot(
+            clubId: clubId,
+            targetType: "putt",
+            targetResult: made ? "made" : "missed",
+            start: nil,
+            end: bestRecentFix(),
+            distanceFeet: distanceFeet
         ))
     }
 

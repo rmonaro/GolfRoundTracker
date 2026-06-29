@@ -21,6 +21,9 @@ struct HoleHomeView: View {
     /// Id of the last shot summary we've shown the overview for, so each
     /// GPS auto-recorded shot flashes its overview exactly once.
     @State private var shownSummaryId = 0
+    /// Manual ± correction of the on-green putt distance (feet). Null tracks the
+    /// phone's reading; cleared after each putt and when the hole changes.
+    @State private var puttFeetOverride: Int?
     /// Locally-navigated hole (prev/next on the watch). Lets the watch show the
     /// next hole's yardage + club IMMEDIATELY from the per-hole snapshot data,
     /// without waiting on the phone (whose JS is suspended while backgrounded).
@@ -270,7 +273,14 @@ struct HoleHomeView: View {
     /// hole arrows remain.
     @ViewBuilder
     private func bottomControls(_ s: WatchRoundState) -> some View {
-        if s.atCourse == false {
+        if s.onGreen {
+            // Ball's on the green — swap Track / Add Shot for the putt
+            // recorder, mirroring the phone's putting panel. Checked BEFORE the
+            // at-course gate: being on the green means you're on the course, and
+            // it lets the putt view be exercised even when the at-course
+            // heuristic reads false (e.g. testing away from the course).
+            puttControls(s)
+        } else if s.atCourse == false {
             VStack(spacing: 6) {
                 HStack(spacing: 4) {
                     Image(systemName: "location.slash")
@@ -312,6 +322,97 @@ struct HoleHomeView: View {
                 navRow(s)
             }
         }
+    }
+
+    /// On-green putt controls — replaces Track / Add Shot once the ball is on
+    /// the green, mirroring the phone's putting panel: the feet-to-flag with a
+    /// ± nudge on top, then "Missed" / "Made". "Made" holes out. The hole
+    /// arrows are intentionally hidden here so the player can't skip ahead
+    /// mid-hole; they return once the putt is made (onGreen clears).
+    @ViewBuilder
+    private func puttControls(_ s: WatchRoundState) -> some View {
+        let displayed = puttFeetOverride ?? s.distanceFeet
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                stepButton(system: "minus") {
+                    puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) - 1)
+                }
+                VStack(spacing: 0) {
+                    Text(displayed.map { "\($0) ft" } ?? "—")
+                        .font(.system(size: 38, weight: .heavy, design: .rounded))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                    Text("TO FLAG")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity)
+                stepButton(system: "plus") {
+                    puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) + 1)
+                }
+            }
+            HStack(spacing: 6) {
+                puttButton(title: "Missed", system: "xmark.circle", tint: .gray) {
+                    recordPutt(made: false, s)
+                }
+                puttButton(title: "Made", system: "flag.fill", tint: .green) {
+                    recordPutt(made: true, s)
+                }
+            }
+        }
+        // Forget any ± correction when moving to a different hole.
+        .onChange(of: displayedHoleNumber(s)) { _, _ in puttFeetOverride = nil }
+    }
+
+    /// Compact Missed / Made button — shorter than the standard bigButton so the
+    /// feet-to-flag readout above it can dominate the screen.
+    @ViewBuilder
+    private func puttButton(
+        title: String,
+        system: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: system)
+                    .font(.system(size: 12, weight: .bold))
+                Text(title)
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 28)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(tint)
+    }
+
+    /// Small circular ± button used to nudge the putt distance.
+    @ViewBuilder
+    private func stepButton(system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.yellow)
+                .frame(width: 34, height: 34)
+                .background(Color.yellow.opacity(0.15))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Record a putt from the watch. Uses the bag's putter (falling back to the
+    /// shown club) and sends the shown feet-to-flag (± corrected) as the putt
+    /// distance. `made` holes out, which clears onGreen on the next snapshot and
+    /// restores the normal Track / Add Shot controls for the next hole.
+    private func recordPutt(made: Bool, _ s: WatchRoundState) {
+        let putterId = s.bag.first(where: { $0.isPutter })?.id ?? effectiveClubId(s)
+        let feet = puttFeetOverride ?? s.distanceFeet
+        session.recordPutt(clubId: putterId, made: made, distanceFeet: feet)
+        puttFeetOverride = nil
     }
 
     /// Prev / next hole arrows — the second row, under Track & Add Shot. These
