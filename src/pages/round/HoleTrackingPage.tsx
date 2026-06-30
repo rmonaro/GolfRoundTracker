@@ -133,6 +133,34 @@ export function HoleTrackingPage() {
   useTournamentResumeReconcile();
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
+  // Stable edit draft for AddShotSheet. MUST be memoized on `editingShot`: the
+  // sheet's init effect re-pre-fills its fields whenever this prop's identity
+  // changes, and this page re-renders ~once/sec from the live GPS watch. A fresh
+  // object literal each render would re-run that effect on every fix and snap
+  // the user's in-progress edits (club / yards / lie) back to the original
+  // values — making the shot look un-editable. Keyed on the shot identity so it
+  // only rebuilds when a different shot is opened for editing.
+  const editingDraft = useMemo<ShotEditDraft | null>(
+    () =>
+      editingShot
+        ? {
+            clubId: editingShot.clubId,
+            distance: editingShot.distance,
+            distanceUnit: editingShot.distanceUnit,
+            targetType: editingShot.targetType,
+            targetResult: editingShot.targetResult,
+            lie: editingShot.lie,
+            penaltyType: editingShot.penaltyType,
+            notes: editingShot.notes,
+            startLat: editingShot.startLat ?? null,
+            startLng: editingShot.startLng ?? null,
+            endLat: editingShot.endLat ?? null,
+            endLng: editingShot.endLng ?? null,
+            calculatedDistance: editingShot.calculatedDistance ?? null
+          }
+        : null,
+    [editingShot]
+  );
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
   /** Phone-side mirror of the watch's tracking state. Set true when the
@@ -2823,25 +2851,7 @@ export function HoleTrackingPage() {
       <AddShotSheet
         open={shotSheet}
         shotNumber={editingShot ? editingShot.shotNumber : hole.shots.length + 1}
-        editing={
-          editingShot
-            ? ({
-                clubId: editingShot.clubId,
-                distance: editingShot.distance,
-                distanceUnit: editingShot.distanceUnit,
-                targetType: editingShot.targetType,
-                targetResult: editingShot.targetResult,
-                lie: editingShot.lie,
-                penaltyType: editingShot.penaltyType,
-                notes: editingShot.notes,
-                startLat: editingShot.startLat ?? null,
-                startLng: editingShot.startLng ?? null,
-                endLat: editingShot.endLat ?? null,
-                endLng: editingShot.endLng ?? null,
-                calculatedDistance: editingShot.calculatedDistance ?? null
-              } satisfies ShotEditDraft)
-            : null
-        }
+        editing={editingDraft}
         holePar={hole.par}
         bagClubs={bagClubs}
         defaultClubId={defaultClubId}
