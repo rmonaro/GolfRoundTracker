@@ -20,11 +20,21 @@ interface WatchHintsState {
   autoTracking: boolean;
   /** Latest auto-recorded shot summary for the watch overview (id increments). */
   lastShotSummary: WatchShotSummary | null;
+  /** Phone's live-position-aware suggested club id for the CURRENT hole. Reflects
+   *  the player's GPS distance to the pin as they walk (not just recorded shots),
+   *  so the watch's club hint updates mid-walk. Null when no live suggestion. */
+  liveSuggestedClubId: string | null;
+  /** True when the phone's LIVE GPS position is on the green polygon. Lets the
+   *  watch flip into putting mode the moment the player walks onto the green,
+   *  even under auto-track where the approach shot isn't committed yet. */
+  liveOnGreen: boolean;
   setSelectedClubId: (id: string | null) => void;
   setRecordingShot: (recording: boolean) => void;
   setAtCourse: (atCourse: boolean | null) => void;
   setAutoTracking: (on: boolean) => void;
   setLastShotSummary: (summary: WatchShotSummary | null) => void;
+  setLiveSuggestedClubId: (id: string | null) => void;
+  setLiveOnGreen: (on: boolean) => void;
 }
 
 /**
@@ -40,9 +50,13 @@ export const useWatchHintsStore = create<WatchHintsState>((set) => ({
   atCourse: null,
   autoTracking: false,
   lastShotSummary: null,
+  liveSuggestedClubId: null,
+  liveOnGreen: false,
   setSelectedClubId: (id) => set({ selectedClubId: id }),
   setRecordingShot: (recording) => set({ recordingShot: recording }),
   setAtCourse: (atCourse) => set({ atCourse }),
   setAutoTracking: (on) => set({ autoTracking: on }),
-  setLastShotSummary: (summary) => set({ lastShotSummary: summary })
+  setLastShotSummary: (summary) => set({ lastShotSummary: summary }),
+  setLiveSuggestedClubId: (id) => set({ liveSuggestedClubId: id }),
+  setLiveOnGreen: (on) => set({ liveOnGreen: on })
 }));

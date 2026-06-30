@@ -69,6 +69,7 @@ import { metersToYards } from '@/features/course/distance';
 import {
   recommendClub,
   classifyTap,
+  classifyLie,
   teeToGreenBearing
 } from '@/features/course/HoleLayout';
 import { WindIndicator } from '@/components/ui/WindIndicator';
@@ -520,11 +521,26 @@ export function HoleTrackingPage() {
   //   • last shot was a putt (you were on the green when it was taken)
   //   • last shot was an approach to the green tagged as a hit
   //   • the user already picked the putter for the next shot
+  // Live-position green detection: are we PHYSICALLY standing on the putting
+  // surface right now? Hit-tests the current GPS fix against the mapped green
+  // polygon — independent of the committed shot list. This is what lets putting
+  // mode engage under AUTO-TRACK: there the approach that lands on the green
+  // stays in-flight (uncommitted) until the next strike closes it, so committed
+  // shots alone can't tell us we've reached the green. Guarded on a trustworthy
+  // fix (≤30 m) so a noisy reading near the green can't false-trigger it.
+  const liveFeatures = layoutQuery.data?.features;
+  const liveOnGreen =
+    liveFix != null &&
+    (liveFix.accuracyM == null || liveFix.accuracyM <= 30) &&
+    liveFeatures != null &&
+    liveFeatures.length > 0 &&
+    classifyLie([liveFix.lng, liveFix.lat], liveFeatures) === 'green';
   const ballOnGreen =
     lastShot?.lie === 'green' ||
     lastShotWasPutt ||
     (lastShot?.targetType === 'green' && lastShot?.targetResult === 'hit') ||
-    userPickedPutter;
+    userPickedPutter ||
+    liveOnGreen;
 
   // Pre-select the user's putter when on the green. Uses the first putter in
   // the bag (most users have only one). The user-driven `selectedClubId`
@@ -567,6 +583,8 @@ export function HoleTrackingPage() {
   const setWatchAtCourse = useWatchHintsStore((s) => s.setAtCourse);
   const setWatchAutoTracking = useWatchHintsStore((s) => s.setAutoTracking);
   const setWatchLastShotSummary = useWatchHintsStore((s) => s.setLastShotSummary);
+  const setWatchLiveSuggestedClubId = useWatchHintsStore((s) => s.setLiveSuggestedClubId);
+  const setWatchLiveOnGreen = useWatchHintsStore((s) => s.setLiveOnGreen);
   useEffect(() => {
     setWatchSelectedClubId(defaultClubId ?? null);
   }, [defaultClubId, setWatchSelectedClubId]);
@@ -737,6 +755,14 @@ export function HoleTrackingPage() {
     lastImpact,
     // Strikes drive detection; emitted shots carry source:'impact'.
     impactPrimary,
+    // Latch the club at the moment a strike OPENS a shot — the club the player
+    // just swung — so it travels with the shot and isn't overwritten by the
+    // (live) suggestion that has since drifted to the NEXT club by the time the
+    // following strike commits this one. Evaluated at strike time, so the
+    // suggestedClub const declared lower in this component is already resolved.
+    captureShotMeta: () => ({
+      clubId: selectedClubId ?? suggestedClub?.clubId ?? null
+    }),
     onShotDetected: (shot) => {
       // Auto-recording is WATCH-driven only. A watch strike (source:'impact')
       // closes the in-flight shot → auto-commit it UNVERIFIED (no sheet
@@ -903,11 +929,18 @@ export function HoleTrackingPage() {
     [hole.shots]
   );
   // The on-green putting panel is the dedicated Missed / Made recorder. It
-  // shows once the ball is on the green (and a putter is in the bag) and stays
-  // up until the hole is made. While it's up the right-side FAB stack lifts
-  // clear of it (it's full-width, anchored at the same bottom slot).
+  // shows once the ball is actually on the green (and a putter is in the bag)
+  // and stays up until the hole is made. While it's up the right-side FAB stack
+  // lifts clear of it (it's full-width, anchored at the same bottom slot).
+  //
+  // Gated on the STRICT `ballOnGreen` — NOT `lastShotOnGreen`. The latter folds
+  // in the ~30 yd "around the green" heuristic (good for map zoom / aim
+  // suppression), but it popped the putt recorder when the player was merely
+  // NEAR the green on a chip/pitch. `ballOnGreen` requires the ball to be on the
+  // putting surface (lie green / approach stuck the green / a putt was taken),
+  // with a manual putter pick as the deliberate escape hatch for fringe putts.
   const showPuttPanel =
-    !holeComplete && lastShotOnGreen && bagClubs.some((c) => c.category === 'putter');
+    !holeComplete && ballOnGreen && bagClubs.some((c) => c.category === 'putter');
   // When a hole completes with unverified auto shots, prompt the review once.
   useEffect(() => {
     if (!holeComplete) return;
@@ -963,17 +996,52 @@ export function HoleTrackingPage() {
         (remainingYards != null ? remainingYards * 3 : null)
     : null;
 
+  // Yards from the player's CURRENT position to the pin. Unlike remainingYards
+  // (which only changes when a shot is committed), this updates live as the
+  // player walks up to the ball — so the club suggestion stays honest mid-walk.
+  // Guarded on a reasonably accurate fix so a noisy GPS reading can't swing the
+  // recommendation; falls back to the recorded-shot remainingYards otherwise.
+  const liveYardsToPin =
+    liveFix != null &&
+    (liveFix.accuracyM == null || liveFix.accuracyM <= 30) &&
+    pinLatEff != null &&
+    pinLngEff != null
+      ? Math.round(
+          haversineMeters(
+            { lat: liveFix.lat, lng: liveFix.lng, accuracyM: 0, timestamp: 0 },
+            { lat: pinLatEff, lng: pinLngEff, accuracyM: 0, timestamp: 0 }
+          ) * 1.0936133
+        )
+      : null;
+  // The yardage the club recommendation runs off: live position when we have a
+  // trustworthy fix, else the recorded-shot remaining yardage.
+  const clubYards = liveYardsToPin ?? remainingYards;
+
   // Putters are filtered out of the recommendation — the panel hides the
   // suggestion entirely once the ball is on the green (lastShotOnGreen).
   // The driver exclusion mirrors the defaultClubId recommendation above so
   // the TO PIN panel and the bottom-left club button never disagree.
   const suggestedClub =
-    remainingYards != null && !lastShotOnGreen
-      ? recommendClub(bagClubs, remainingYards, {
+    clubYards != null && !lastShotOnGreen
+      ? recommendClub(bagClubs, clubYards, {
           excludeDriver:
-            ballDistanceFromTeeM > 0 && remainingYards > 200
+            ballDistanceFromTeeM > 0 && clubYards > 200
         })
       : null;
+
+  // Push the live-position suggestion to the watch (via the hints store →
+  // useWatchSync snapshot) so the watch's club hint tracks the player as they
+  // walk up to the ball, not just when a shot is committed.
+  useEffect(() => {
+    setWatchLiveSuggestedClubId(suggestedClub?.clubId ?? null);
+  }, [suggestedClub?.clubId, setWatchLiveSuggestedClubId]);
+
+  // Push live-position green detection to the watch so it flips into putting
+  // mode the instant the player walks onto the green — even under auto-track,
+  // where the approach shot stays in-flight (uncommitted) until the next strike.
+  useEffect(() => {
+    setWatchLiveOnGreen(liveOnGreen);
+  }, [liveOnGreen, setWatchLiveOnGreen]);
 
   // Live wind, resolved against the direction the player is hitting. Target
   // bearing: from the current position to the pin/green when we have a fix,
@@ -1265,7 +1333,14 @@ export function HoleTrackingPage() {
   // best-effort defaults (selected club, optimistic "hit") — the golfer
   // reviews and edits before verifying at hole-complete / round summary.
   const autoCommitShot = (shot: ShotDetected) => {
-    const club = bagClubs.find((c) => c.clubId === selectedClubId) ?? null;
+    // Prefer the club latched when this shot was STRUCK (shot.meta) so it
+    // reflects the swing, not the suggestion that has since drifted to the next
+    // club. Fall back to the current selection/suggestion only if nothing was
+    // latched, so an auto-committed shot is never saved with "no club". The
+    // golfer still reviews/changes it before verifying.
+    const autoClubId =
+      shot.meta?.clubId ?? selectedClubId ?? suggestedClub?.clubId ?? null;
+    const club = bagClubs.find((c) => c.clubId === autoClubId) ?? null;
     const tType = upcomingTargetType;
     // Classify lie + target result from the actual landing point against the
     // mapped features first; only fall back to the target-type lie guess /
@@ -1279,7 +1354,7 @@ export function HoleTrackingPage() {
     const derived: import('@/models').ShotResult =
       tType === 'fairway' ? 'fairway' : 'green';
     void onSubmitShot({
-      clubId: selectedClubId,
+      clubId: autoClubId,
       clubCategory: club?.category ?? null,
       distance: Math.round(shot.distanceM * 1.0936133),
       distanceUnit: 'yards',
@@ -1326,7 +1401,10 @@ export function HoleTrackingPage() {
         : autoTrackInitialBallPos ??
           (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
 
-    const club = bagClubs.find((c) => c.clubId === msg.clubId) ?? null;
+    // Prefer the watch's club, then the phone's selection, then the live
+    // suggestion — never save a watch auto shot with no club.
+    const autoClubId = msg.clubId ?? selectedClubId ?? suggestedClub?.clubId ?? null;
+    const club = bagClubs.find((c) => c.clubId === autoClubId) ?? null;
     const tType = upcomingTargetType;
     const inferred = inferShotAt(endLat, endLng);
     const tResult: import('@/models').TargetResult = inferred.targetResult ?? 'hit';
@@ -1346,7 +1424,7 @@ export function HoleTrackingPage() {
       calculatedDistanceM != null ? Math.round(calculatedDistanceM * 1.0936133) : null;
 
     void onSubmitShot({
-      clubId: msg.clubId,
+      clubId: autoClubId,
       clubCategory: club?.category ?? null,
       distance: distanceYds,
       distanceUnit: distanceYds != null ? 'yards' : null,

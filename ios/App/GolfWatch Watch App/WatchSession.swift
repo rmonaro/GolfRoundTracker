@@ -416,6 +416,17 @@ final class WatchSession: NSObject, ObservableObject {
     /// state update → snapshot back). Cleared on the next snapshot
     /// arrival, since by then the phone has confirmed the pick.
     @Published private(set) var localSelectedClubId: String?
+    /// Optimistic local override of the auto-track on/off state. Set the instant
+    /// the user taps Track so the button flips immediately instead of waiting on
+    /// the phone roundtrip (setAutoTrack → phone applyAutoTrack → snapshot back),
+    /// which can take seconds — or stall entirely when the phone is backgrounded
+    /// — and made the button feel like it needed several taps. Cleared when the
+    /// phone's snapshot confirms the new state, or by a safety timeout if the
+    /// phone never does (e.g. the at-course gate refused to start tracking).
+    @Published private(set) var localAutoTracking: Bool?
+    /// Pending auto-clear for `localAutoTracking` so a refused/lost toggle falls
+    /// back to the phone's real state instead of sticking optimistically.
+    private var autoTrackOverrideTask: Task<Void, Never>?
 
     private let locationManager = CLLocationManager()
     /// Latched start-position for the current "in-progress" shot. Captured
@@ -646,9 +657,21 @@ final class WatchSession: NSObject, ObservableObject {
         trackingShotActive = false
     }
 
-    /// Request the phone enable/disable round-wide auto-tracking. The resulting
-    /// state comes back via the snapshot's `autoTracking`.
+    /// Request the phone enable/disable round-wide auto-tracking. Flips the
+    /// optimistic local state immediately (so the button responds on the first
+    /// tap) and arms a safety timeout to drop the override if the phone never
+    /// confirms. The authoritative state still comes back via the snapshot's
+    /// `autoTracking`, which clears the override on match.
     func setAutoTrack(_ active: Bool) {
+        localAutoTracking = active
+        autoTrackOverrideTask?.cancel()
+        autoTrackOverrideTask = Task { [weak self] in
+            // ~4s is long enough for a normal roundtrip to confirm (which clears
+            // the override sooner) but short enough that a refusal self-heals.
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.localAutoTracking = nil
+        }
         send(.setAutoTrack(active: active))
     }
 
@@ -706,6 +729,14 @@ extension WatchSession: WCSessionDelegate {
             if let local = self.localSelectedClubId,
                snapshot.selectedClubId == local {
                 self.localSelectedClubId = nil
+            }
+            // Same for the optimistic Track toggle: once the phone's snapshot
+            // reflects the state we tapped, drop the override and cancel its
+            // safety timeout so the button is fully back in lock-step.
+            if let localTrack = self.localAutoTracking,
+               snapshot.autoTracking == localTrack {
+                self.localAutoTracking = nil
+                self.autoTrackOverrideTask?.cancel()
             }
         }
     }

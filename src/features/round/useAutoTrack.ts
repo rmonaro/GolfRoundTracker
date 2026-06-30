@@ -20,6 +20,28 @@ import { haversineMeters, watchPosition, type GpsPoint } from '@/services/gpsSer
  */
 export type AutoTrackState = 'idle' | 'armed';
 
+/**
+ * Minimum ball travel (metres) for a strike to close the in-flight shot as a
+ * real shot. Two impacts landing within this of each other — a waggle, a
+ * practice swing that crossed the impact threshold, a double-trigger, or
+ * re-addressing the ball — would otherwise commit a phantom shot with ~0 yards.
+ * Below this we treat the strike as noise: keep the original in-flight start
+ * (don't corrupt it) and emit nothing. ~5 m ≈ 5.5 yds, well under any real
+ * chip, so legitimate short shots still register.
+ */
+const MIN_SHOT_M = 5;
+
+/**
+ * Opaque per-shot metadata latched when a strike OPENS a shot and carried
+ * through to when that shot is CLOSED. The hook never inspects it — it only
+ * snapshots (via `captureShotMeta`) and hands it back on the emitted shot.
+ * The consumer uses it to record the club the player was set to AT THE SWING,
+ * not the (possibly different) club showing when the next strike commits it.
+ */
+export interface ShotMeta {
+  clubId: string | null;
+}
+
 export interface ShotDetected {
   startLat: number;
   startLng: number;
@@ -28,6 +50,11 @@ export interface ShotDetected {
   distanceM: number;
   /** Always 'impact' — shots are detected from watch strikes only. */
   source: 'impact';
+  /**
+   * Metadata latched when THIS shot's launch strike opened it (see ShotMeta).
+   * Null when no `captureShotMeta` was provided or it returned null.
+   */
+  meta: ShotMeta | null;
 }
 
 export interface UseAutoTrackOptions {
@@ -49,6 +76,13 @@ export interface UseAutoTrackOptions {
    * gating this on a live strike stream + the user's shot-detection setting.
    */
   impactPrimary?: boolean;
+  /**
+   * Snapshot metadata for the shot a strike is OPENING, evaluated at strike
+   * time. The returned value travels with the in-flight shot and comes back on
+   * `ShotDetected.meta` when the NEXT strike (or resolvePendingShot) closes it.
+   * This is how the club latches to the swing rather than to the commit moment.
+   */
+  captureShotMeta?: () => ShotMeta | null;
   /** Fired when a shot is detected. */
   onShotDetected: (shot: ShotDetected) => void;
 }
@@ -90,6 +124,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
     initialBallPos = null,
     lastImpact = null,
     impactPrimary = false,
+    captureShotMeta,
     onShotDetected
   } = opts;
 
@@ -104,6 +139,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   const ballPosRef = useRef(ballPos);
   const stateRef = useRef<AutoTrackState>(state);
   const onShotDetectedRef = useRef(onShotDetected);
+  const captureShotMetaRef = useRef(captureShotMeta);
   const impactPrimaryRef = useRef(impactPrimary);
   // Latest GPS fix, readable synchronously by the strike handler (which fires
   // off a prop change, not inside the GPS callback).
@@ -111,11 +147,19 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   // The in-flight shot's launch point (start). Set on each strike; its END
   // resolves on the NEXT strike — or via resolvePendingShot(). Null = nothing
   // currently in flight.
-  const inFlightRef = useRef<{ lat: number; lng: number; t: number } | null>(null);
+  const inFlightRef = useRef<{
+    lat: number;
+    lng: number;
+    t: number;
+    meta: ShotMeta | null;
+  } | null>(null);
 
   useEffect(() => {
     impactPrimaryRef.current = impactPrimary;
   }, [impactPrimary]);
+  useEffect(() => {
+    captureShotMetaRef.current = captureShotMeta;
+  }, [captureShotMeta]);
   useEffect(() => {
     ballPosRef.current = ballPos;
   }, [ballPos]);
@@ -141,16 +185,31 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
         { lat: prev.lat, lng: prev.lng, accuracyM: 0, timestamp: 0 },
         fix
       );
+      // Strike landed essentially on top of the in-flight start — almost
+      // certainly a waggle / practice swing / double-trigger, not a real shot.
+      // Drop it WITHOUT moving the in-flight start, so the next real strike
+      // still measures from the true launch point. This is what stops the
+      // "extra shots to verify with ~0 yards" the auto-tracker was producing.
+      if (distM < MIN_SHOT_M) return;
       onShotDetectedRef.current({
         startLat: prev.lat,
         startLng: prev.lng,
         endLat: fix.lat,
         endLng: fix.lng,
         distanceM: distM,
-        source: 'impact'
+        source: 'impact',
+        // Club latched when THIS shot was struck (its launch strike), not the
+        // club showing now as the player stands over the next ball.
+        meta: prev.meta
       });
     }
-    inFlightRef.current = { lat: fix.lat, lng: fix.lng, t: Date.now() };
+    // Open the next shot, latching the club the player is set to at THIS strike.
+    inFlightRef.current = {
+      lat: fix.lat,
+      lng: fix.lng,
+      t: Date.now(),
+      meta: captureShotMetaRef.current?.() ?? null
+    };
   }, [lastImpact]);
 
   // Resolve the in-flight shot immediately (hole-out, or right before a manual
@@ -177,7 +236,9 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
         endLat: endPos.lat,
         endLng: endPos.lng,
         distanceM: distM,
-        source: 'impact'
+        source: 'impact',
+        // Carry the club latched when this (now hole-out / flushed) shot opened.
+        meta: prev.meta
       };
     },
     []

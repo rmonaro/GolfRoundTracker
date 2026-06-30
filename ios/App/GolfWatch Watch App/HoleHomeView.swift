@@ -296,7 +296,9 @@ struct HoleHomeView: View {
                 navRow(s)
             }
         } else {
-            let tracking = s.autoTracking
+            // Optimistic local override wins so the button flips the instant
+            // it's tapped, before the phone roundtrip confirms.
+            let tracking = session.localAutoTracking ?? s.autoTracking
             VStack(spacing: 6) {
                 HStack(spacing: 6) {
                     bigButton(

@@ -32,6 +32,8 @@ export function useWatchSync() {
   const atCourse = useWatchHintsStore((s) => s.atCourse);
   const autoTracking = useWatchHintsStore((s) => s.autoTracking);
   const lastShotSummary = useWatchHintsStore((s) => s.lastShotSummary);
+  const liveSuggestedClubId = useWatchHintsStore((s) => s.liveSuggestedClubId);
+  const liveOnGreen = useWatchHintsStore((s) => s.liveOnGreen);
   const shotDetection = useSettingsStore((s) => s.watchShotDetectionEnabled);
 
   // Layout query for the current hole — gives us the OSM par + centerline
@@ -108,6 +110,8 @@ export function useWatchSync() {
       atCourse,
       autoTracking,
       lastShotSummary,
+      liveSuggestedClubId,
+      liveOnGreen,
       holesMeta: holesMetaQuery.data ?? null,
       pinLat,
       pinLng
@@ -129,6 +133,8 @@ export function useWatchSync() {
     atCourse,
     autoTracking,
     lastShotSummary,
+    liveSuggestedClubId,
+    liveOnGreen,
     holesMetaQuery.data
   ]);
 }
@@ -159,6 +165,12 @@ interface SnapshotInputs {
   atCourse: boolean | null;
   autoTracking: boolean;
   lastShotSummary: WatchRoundState['lastShotSummary'];
+  /** Live-position club suggestion for the current hole (overrides the
+   *  recorded-shot suggestion below when present). */
+  liveSuggestedClubId: string | null;
+  /** True when the phone's live GPS position is on the green polygon — flips
+   *  the watch into putting mode even before the approach shot is committed. */
+  liveOnGreen: boolean;
   holesMeta: Record<number, HoleMeta> | null;
   pinLat: number | null;
   pinLng: number | null;
@@ -176,6 +188,8 @@ function buildSnapshot({
   atCourse,
   autoTracking,
   lastShotSummary,
+  liveSuggestedClubId,
+  liveOnGreen,
   holesMeta,
   pinLat,
   pinLng
@@ -223,7 +237,22 @@ function buildSnapshot({
   // no distance to work with or when the last shot landed on the green
   // (the phone hides the suggestion in that case too).
   const lastShot = currentHole.shots[currentHole.shots.length - 1];
-  const ballOnGreen = lastShot?.lie === 'green';
+  // Manual putter pick is the deliberate escape hatch for fringe/off-green
+  // putts — mirrors the phone so picking the putter on the watch flips it into
+  // putting mode even when the ball isn't tagged on the green.
+  const userPickedPutter =
+    selectedClubId != null &&
+    bag.find((c) => c.clubId === selectedClubId)?.category === 'putter';
+  // Strict "ball is on the putting surface" — mirrors the phone's `ballOnGreen`.
+  // Deliberately excludes any near-green distance heuristic so it doesn't flip
+  // to putting mode when the player is merely AROUND the green on a chip.
+  // `liveOnGreen` is the phone's live GPS-on-green hit-test, which is what lets
+  // putting mode engage under auto-track before the approach shot is committed.
+  const ballOnGreen =
+    lastShot?.lie === 'green' ||
+    (lastShot?.targetType === 'green' && lastShot?.targetResult === 'hit') ||
+    userPickedPutter ||
+    liveOnGreen;
   // Hole is done once the last shot is a made putt. Used to drop putting mode
   // so the watch stops offering Missed / Made on a holed-out hole (mirrors the
   // phone's showPuttPanel, which is gated on !holeComplete).
@@ -255,6 +284,13 @@ function buildSnapshot({
           excludeDriver: ballDistanceM > 0 && distanceYards > 200
         })
       : null;
+  // The phone's live-position suggestion (from the player's current GPS → pin)
+  // wins for the current hole so the watch's club hint updates as they walk up
+  // to the ball. Suppressed on the green, where no club is suggested.
+  const currentSuggestedClubId =
+    !ballOnGreen && liveSuggestedClubId != null
+      ? liveSuggestedClubId
+      : (suggested?.clubId ?? null);
 
   // Per-hole array so the watch can navigate holes locally (and show tee
   // yardage + suggested club) without a phone roundtrip. Mirrors the
@@ -303,7 +339,7 @@ function buildSnapshot({
     scoreVsPar: watchScore,
     shotsThisHole: currentHole.shots.length,
     puttsThisHole,
-    suggestedClubId: suggested?.clubId ?? null,
+    suggestedClubId: currentSuggestedClubId,
     selectedClubId,
     recordingShot,
     shotDetection,
