@@ -1423,15 +1423,32 @@ export function HoleTrackingPage() {
     const endLat = msg.endLat ?? null;
     const endLng = msg.endLng ?? null;
     if (endLat == null || endLng == null) return;
-    const ballStart =
-      msg.startLat != null && msg.startLng != null
+
+    // Under impact-primary with a shot already in flight, "Add Shot" / "Stop"
+    // means "close the shot I just hit, here". Flush the in-flight shot at the
+    // watch's GPS and use ITS launch point as the start — instead of fabricating
+    // a separate shot from the hole's last-committed position. Fabricating would
+    // (a) double-count once the next strike also closes the still-open in-flight
+    // shot and (b) measure from the wrong start. resolvePendingShot also CLEARS
+    // the in-flight anchor, so the next strike opens fresh. Falls back to a plain
+    // GPS log when nothing is in flight (auto-track armed but unstruck, or
+    // impact-primary off).
+    const flushed =
+      impactPrimary && autoTrack.hasPendingShot()
+        ? autoTrack.resolvePendingShot({ lat: endLat, lng: endLng })
+        : null;
+    const ballStart = flushed
+      ? { lat: flushed.startLat, lng: flushed.startLng }
+      : msg.startLat != null && msg.startLng != null
         ? { lat: msg.startLat, lng: msg.startLng }
         : autoTrackInitialBallPos ??
           (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
 
-    // Prefer the watch's club, then the phone's selection, then the live
-    // suggestion — never save a watch auto shot with no club.
-    const autoClubId = msg.clubId ?? selectedClubId ?? suggestedClub?.clubId ?? null;
+    // Prefer the watch's explicit club, then the club latched when the in-flight
+    // shot was struck, then the phone's selection / live suggestion — never save
+    // a watch auto shot with no club.
+    const autoClubId =
+      msg.clubId ?? flushed?.meta?.clubId ?? selectedClubId ?? suggestedClub?.clubId ?? null;
     const club = bagClubs.find((c) => c.clubId === autoClubId) ?? null;
     const tType = upcomingTargetType;
     const inferred = inferShotAt(endLat, endLng);
