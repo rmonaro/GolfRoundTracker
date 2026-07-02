@@ -103,6 +103,9 @@ interface RoundState {
   setCurrentHole: (idx: number) => void;
   updateHole: (holeNumber: number, patch: Partial<LocalHole>) => void;
   addShot: (holeNumber: number, shot: LocalShot) => void;
+  /** Move the shot with `tempId` to array position `toIndex` (0-based) and
+   *  renumber the hole. Backs the shots-list reorder controls. */
+  moveShot: (holeNumber: number, tempId: string, toIndex: number) => void;
   updateShot: (holeNumber: number, tempId: string, patch: Partial<LocalShot>) => void;
   removeShot: (holeNumber: number, tempId: string) => void;
   markShotSynced: (holeNumber: number, tempId: string, remoteId: string) => void;
@@ -140,6 +143,26 @@ export const useRoundStore = create<RoundState>()(
               ? { ...h, shots: [...h.shots, shot], dirty: true }
               : h
           );
+          return { active: { ...s.active, holes } };
+        }),
+
+      moveShot: (holeNumber, tempId, toIndex) =>
+        set((s) => {
+          if (!s.active) return s;
+          const holes = s.active.holes.map((h) => {
+            if (h.holeNumber !== holeNumber) return h;
+            const from = h.shots.findIndex((sh) => sh.tempId === tempId);
+            if (from < 0) return h;
+            const next = [...h.shots];
+            const [moved] = next.splice(from, 1);
+            const at = Math.max(0, Math.min(toIndex, next.length));
+            next.splice(at, 0, moved);
+            return {
+              ...h,
+              shots: next.map((sh, idx) => ({ ...sh, shotNumber: idx + 1 })),
+              dirty: true
+            };
+          });
           return { active: { ...s.active, holes } };
         }),
 

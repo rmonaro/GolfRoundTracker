@@ -34,6 +34,8 @@ import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
+import KeyboardArrowUpRoundedIcon from '@mui/icons-material/KeyboardArrowUpRounded';
+import KeyboardArrowDownRoundedIcon from '@mui/icons-material/KeyboardArrowDownRounded';
 import {
   ensureGpsPermission,
   getCurrentPosition,
@@ -119,6 +121,7 @@ export function HoleTrackingPage() {
   const updateHole = useRoundStore((s) => s.updateHole);
   const setCurrentHole = useRoundStore((s) => s.setCurrentHole);
   const addShotLocal = useRoundStore((s) => s.addShot);
+  const moveShotLocal = useRoundStore((s) => s.moveShot);
   const updateShotLocal = useRoundStore((s) => s.updateShot);
   const removeShotLocal = useRoundStore((s) => s.removeShot);
   const markShotSynced = useRoundStore((s) => s.markShotSynced);
@@ -466,6 +469,29 @@ export function HoleTrackingPage() {
   // at the tee before the drive, so the drive's start is the tee).
   const teeLat = layoutQuery.data?.hole.tee_lat ?? null;
   const teeLng = layoutQuery.data?.hole.tee_lng ?? null;
+
+  // Effective pin: the precise shared/per-round pin when set, else the green
+  // centroid. Hoisted above the club recommendation so the live GPS→pin
+  // distance can drive the recommended club as the player walks up to the ball.
+  const pinLatEff = sharedPinLat ?? localPinLat ?? greenLat;
+  const pinLngEff = sharedPinLng ?? localPinLng ?? greenLng;
+  // Yards from the player's CURRENT GPS position to the pin. Updates live as
+  // they walk (unlike the recorded-shot remaining) and self-corrects through a
+  // missed strike. Guarded on a trustworthy fix (≤30 m accuracy) so a noisy
+  // reading can't swing the club; null when untrustworthy so callers fall back
+  // to the recorded-shot remaining yardage.
+  const liveYardsToPin =
+    liveFix != null &&
+    (liveFix.accuracyM == null || liveFix.accuracyM <= 30) &&
+    pinLatEff != null &&
+    pinLngEff != null
+      ? Math.round(
+          haversineMeters(
+            { lat: liveFix.lat, lng: liveFix.lng, accuracyM: 0, timestamp: 0 },
+            { lat: pinLatEff, lng: pinLngEff, accuracyM: 0, timestamp: 0 }
+          ) * 1.0936133
+        )
+      : null;
   const AROUND_GREEN_THRESHOLD_M = 27;
   let lastShotEndDistFromGreenM: number | null = null;
   if (
@@ -557,12 +583,21 @@ export function HoleTrackingPage() {
   // shots alone can't tell us we've reached the green. Guarded on a trustworthy
   // fix (≤30 m) so a noisy reading near the green can't false-trigger it.
   const liveFeatures = layoutQuery.data?.features;
+  // Does this hole actually have a mapped green OUTLINE we can hit-test? Many
+  // courses only carry a pin / green-centre point, no polygon — in which case
+  // classifyLie can never return 'green' and putting mode would never auto-arm.
+  const hasGreenPolygon =
+    !!liveFeatures && liveFeatures.some((f) => f.feature_type === 'green' && !f.is_line);
+  // Fallback radius (yards from the pin) that counts as "on the green" when no
+  // green polygon is mapped. Kept tight so a chip from just off the green
+  // doesn't read as on the surface; tunable if it proves too strict on-course.
+  const ON_GREEN_FALLBACK_YDS = 8;
   const liveOnGreen =
     liveFix != null &&
     (liveFix.accuracyM == null || liveFix.accuracyM <= 30) &&
-    liveFeatures != null &&
-    liveFeatures.length > 0 &&
-    classifyLie([liveFix.lng, liveFix.lat], liveFeatures) === 'green';
+    (hasGreenPolygon
+      ? classifyLie([liveFix.lng, liveFix.lat], liveFeatures!) === 'green'
+      : liveYardsToPin != null && liveYardsToPin <= ON_GREEN_FALLBACK_YDS);
   const ballOnGreen =
     lastShot?.lie === 'green' ||
     lastShotWasPutt ||
@@ -588,13 +623,16 @@ export function HoleTrackingPage() {
   // never suggest the driver — you don't swing one off the deck. The
   // recommender falls back to the longest non-driver in the bag (typically
   // a 3-wood or hybrid). For shot 1 from the tee we still allow the driver.
+  // Yardage the recommendation runs off: live GPS→pin when we have a trustworthy
+  // fix (so the recommended club tracks the player as they walk up to the ball),
+  // else the recorded-shot remaining. Same live-first source as the TO PIN panel
+  // so the button and the panel agree.
+  const recClubYards = liveYardsToPin ?? remainingYardsEarly;
   const excludeDriverForRec =
-    ballDistanceFromTeeM > 0 &&
-    remainingYardsEarly != null &&
-    remainingYardsEarly > 200;
+    ballDistanceFromTeeM > 0 && recClubYards != null && recClubYards > 200;
   const recommendedClubId =
-    !ballOnGreen && remainingYardsEarly != null && remainingYardsEarly > 0
-      ? recommendClub(bagClubs, remainingYardsEarly, {
+    !ballOnGreen && recClubYards != null && recClubYards > 0
+      ? recommendClub(bagClubs, recClubYards, {
           excludeDriver: excludeDriverForRec
         })?.clubId ?? null
       : null;
@@ -994,11 +1032,9 @@ export function HoleTrackingPage() {
   // On the green the "to pin" reading should be the distance from WHERE THE
   // USER IS to the actual pin, in feet — so it tracks them as they walk to the
   // ball. Prefer the live GPS fix → pin; fall back to the last shot's end → pin,
-  // then a rough yards×3. The pin is the precise (shared/per-round) pin when set,
-  // else the green centroid. (Previously this used last-shot-end → green CENTROID,
-  // which read stale + offset — e.g. 21 ft when the user was ~5 ft from the pin.)
-  const pinLatEff = sharedPinLat ?? localPinLat ?? greenLat;
-  const pinLngEff = sharedPinLng ?? localPinLng ?? greenLng;
+  // then a rough yards×3. Uses the effective pin (pinLatEff/pinLngEff) hoisted
+  // above. (Previously this used last-shot-end → green CENTROID, which read
+  // stale + offset — e.g. 21 ft when the user was ~5 ft from the pin.)
   const feetToPinFrom = (lat: number | null, lng: number | null): number | null =>
     lat != null && lng != null && pinLatEff != null && pinLngEff != null
       ? Math.round(
@@ -1024,36 +1060,23 @@ export function HoleTrackingPage() {
         (remainingYards != null ? remainingYards * 3 : null)
     : null;
 
-  // Yards from the player's CURRENT position to the pin. Unlike remainingYards
-  // (which only changes when a shot is committed), this updates live as the
-  // player walks up to the ball — so the club suggestion stays honest mid-walk.
-  // Guarded on a reasonably accurate fix so a noisy GPS reading can't swing the
-  // recommendation; falls back to the recorded-shot remainingYards otherwise.
-  const liveYardsToPin =
-    liveFix != null &&
-    (liveFix.accuracyM == null || liveFix.accuracyM <= 30) &&
-    pinLatEff != null &&
-    pinLngEff != null
-      ? Math.round(
-          haversineMeters(
-            { lat: liveFix.lat, lng: liveFix.lng, accuracyM: 0, timestamp: 0 },
-            { lat: pinLatEff, lng: pinLngEff, accuracyM: 0, timestamp: 0 }
-          ) * 1.0936133
-        )
-      : null;
-  // The yardage the club recommendation runs off: live position when we have a
-  // trustworthy fix, else the recorded-shot remaining yardage.
-  const clubYards = liveYardsToPin ?? remainingYards;
+  // The single "yards to the pin" value that drives BOTH the headline TO PIN
+  // number and the club recommendation: live GPS→pin when we have a trustworthy
+  // fix (so it updates as the player walks AND self-corrects when a watch strike
+  // is missed), else the recorded-shot remaining yardage. Using live position as
+  // the primary source is what stops the "150 shows 300+ and stays stuck" bug —
+  // the summed-remaining value never grows when a strike goes undetected.
+  const toPinYards = liveYardsToPin ?? remainingYards;
 
   // Putters are filtered out of the recommendation — the panel hides the
   // suggestion entirely once the ball is on the green (lastShotOnGreen).
   // The driver exclusion mirrors the defaultClubId recommendation above so
   // the TO PIN panel and the bottom-left club button never disagree.
   const suggestedClub =
-    clubYards != null && !lastShotOnGreen
-      ? recommendClub(bagClubs, clubYards, {
+    toPinYards != null && !lastShotOnGreen
+      ? recommendClub(bagClubs, toPinYards, {
           excludeDriver:
-            ballDistanceFromTeeM > 0 && clubYards > 200
+            ballDistanceFromTeeM > 0 && toPinYards > 200
         })
       : null;
 
@@ -1242,6 +1265,8 @@ export function HoleTrackingPage() {
     const freshHole = useRoundStore
       .getState()
       .active?.holes.find((h) => h.holeNumber === hole.holeNumber);
+    // Append at the end. A shot logged out of order is moved into position with
+    // the up/down reorder controls in the shots list, so add is always append.
     const nextNum = (freshHole?.shots.length ?? hole.shots.length ?? 0) + 1;
     const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     addShotLocal(hole.holeNumber, {
@@ -1265,6 +1290,13 @@ export function HoleTrackingPage() {
       calculatedDistance
     });
     setShotSheet(false);
+    // Clear the manual club pick now that this shot is committed, so the NEXT
+    // shot re-recommends off live yardage instead of sticking on the club that
+    // was used for the shot just played. The club for THIS shot is already
+    // latched into the payload above; a manual pick sticks only for the shot the
+    // player is currently on. (Hole change also clears it.) On the green the
+    // putter auto-select re-affirms itself, so putting isn't affected.
+    setSelectedClubId(null);
     // Live-push this hole to TM (tournament rounds only; debounced + no-op otherwise).
     syncHole(hole.holeNumber);
 
@@ -1540,6 +1572,42 @@ export function HoleTrackingPage() {
     });
   };
 
+  // Push every synced shot's current local shotNumber to remote for the hole.
+  // Called after an insert, reorder, or delete renumbers the hole, so the play
+  // order survives a reload (hydrate sorts by shot_number). Best-effort — the
+  // local store already reflects the order for the live session.
+  const persistShotNumbers = async (holeNumber: number) => {
+    const fresh = useRoundStore
+      .getState()
+      .active?.holes.find((h) => h.holeNumber === holeNumber);
+    if (!fresh) return;
+    await Promise.all(
+      fresh.shots
+        .filter((sh) => sh.remoteId)
+        .map((sh) =>
+          roundRepo
+            .updateShot(sh.remoteId!, { shot_number: sh.shotNumber })
+            .catch((err) => console.warn('[shot] shot_number persist failed', err))
+        )
+    );
+  };
+
+  // Nudge a shot one slot earlier/later in the hole and persist the new order.
+  const onMoveShot = (shot: LocalShot, dir: -1 | 1) => {
+    const fresh = useRoundStore
+      .getState()
+      .active?.holes.find((h) => h.holeNumber === hole.holeNumber);
+    const sorted = [...(fresh?.shots ?? hole.shots)].sort(
+      (a, b) => a.shotNumber - b.shotNumber
+    );
+    const idx = sorted.findIndex((s) => s.tempId === shot.tempId);
+    const toIndex = idx + dir;
+    if (idx < 0 || toIndex < 0 || toIndex >= sorted.length) return;
+    moveShotLocal(hole.holeNumber, shot.tempId, toIndex);
+    syncHole(hole.holeNumber);
+    void persistShotNumbers(hole.holeNumber);
+  };
+
   const onDeleteShot = async (shot: LocalShot) => {
     removeShotLocal(hole.holeNumber, shot.tempId);
     syncHole(hole.holeNumber);
@@ -1550,6 +1618,9 @@ export function HoleTrackingPage() {
         console.error('[shot] delete failed', err);
       }
     }
+    // Deleting renumbers the remaining shots locally; push the new numbers so
+    // the order is consistent after a reload too.
+    void persistShotNumbers(hole.holeNumber);
   };
 
   // Confirm an auto-detected shot — clears its pending-review flag locally and
@@ -2110,7 +2181,7 @@ export function HoleTrackingPage() {
             pointerEvents: 'none'
           }}
         >
-          {(remainingYards != null || remainingFeet != null) && (
+          {(toPinYards != null || remainingFeet != null) && (
             <Box
               data-tour="topin"
               sx={{
@@ -2148,7 +2219,7 @@ export function HoleTrackingPage() {
               >
                 {lastShotOnGreen && remainingFeet != null
                   ? `${remainingFeet} ft`
-                  : `${remainingYards} yds`}
+                  : `${toPinYards} yds`}
               </Typography>
               {suggestedClub && (
                 <Typography
@@ -2860,6 +2931,7 @@ export function HoleTrackingPage() {
               setEditingShot(shot);
               setShotSheet(true);
             }}
+            onMove={onMoveShot}
             onDelete={onDeleteShot}
           />
         </Box>
@@ -3025,10 +3097,18 @@ interface ShotsCardProps {
   bagClubs: BagClub[];
   onAdd: () => void;
   onEdit: (shot: LocalShot) => void;
+  onMove: (shot: LocalShot, dir: -1 | 1) => void;
   onDelete: (shot: LocalShot) => void;
 }
 
-function ShotsCard({ shots, bagClubs, onAdd, onEdit, onDelete }: ShotsCardProps) {
+function ShotsCard({
+  shots,
+  bagClubs,
+  onAdd,
+  onEdit,
+  onMove,
+  onDelete
+}: ShotsCardProps) {
   return (
     <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
       <CardContent>
@@ -3076,12 +3156,16 @@ function ShotsCard({ shots, bagClubs, onAdd, onEdit, onDelete }: ShotsCardProps)
               {shots
                 .slice()
                 .sort((a, b) => a.shotNumber - b.shotNumber)
-                .map((shot) => (
+                .map((shot, idx, arr) => (
                   <ShotRow
                     key={shot.tempId}
                     shot={shot}
                     bagClubs={bagClubs}
+                    canMoveUp={idx > 0}
+                    canMoveDown={idx < arr.length - 1}
                     onEdit={() => onEdit(shot)}
+                    onMoveUp={() => onMove(shot, -1)}
+                    onMoveDown={() => onMove(shot, 1)}
                     onDelete={() => onDelete(shot)}
                   />
                 ))}
@@ -3096,12 +3180,20 @@ function ShotsCard({ shots, bagClubs, onAdd, onEdit, onDelete }: ShotsCardProps)
 function ShotRow({
   shot,
   bagClubs,
+  canMoveUp,
+  canMoveDown,
   onEdit,
+  onMoveUp,
+  onMoveDown,
   onDelete
 }: {
   shot: LocalShot;
   bagClubs: BagClub[];
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   onEdit: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
   onDelete: () => void;
 }) {
   const club = bagClubs.find((c) => c.clubId === shot.clubId);
@@ -3145,6 +3237,34 @@ function ShotRow({
         }
       }}
     >
+      {/* Reorder — stacked up/down to the LEFT of the shot number. Add appends
+          via the header button; these nudge a shot into its play position. */}
+      <Box sx={{ display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+        <IconButton
+          size="small"
+          aria-label="move shot earlier"
+          disabled={!canMoveUp}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMoveUp();
+          }}
+          sx={{ p: 0.25 }}
+        >
+          <KeyboardArrowUpRoundedIcon fontSize="small" />
+        </IconButton>
+        <IconButton
+          size="small"
+          aria-label="move shot later"
+          disabled={!canMoveDown}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMoveDown();
+          }}
+          sx={{ p: 0.25 }}
+        >
+          <KeyboardArrowDownRoundedIcon fontSize="small" />
+        </IconButton>
+      </Box>
       <Box
         sx={{
           width: 32,
@@ -3199,6 +3319,7 @@ function ShotRow({
           </Typography>
         )}
       </Box>
+      {/* Delete. stopPropagation so it doesn't trigger the row's tap-to-edit. */}
       <IconButton
         size="small"
         aria-label="delete shot"
@@ -3207,6 +3328,7 @@ function ShotRow({
           onDelete();
         }}
         color="error"
+        sx={{ flexShrink: 0 }}
       >
         <DeleteOutlineRoundedIcon fontSize="small" />
       </IconButton>

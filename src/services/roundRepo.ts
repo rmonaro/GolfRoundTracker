@@ -177,6 +177,9 @@ export const roundRepo = {
     shotId: string,
     patch: {
       club_id?: string | null;
+      /** Position of the shot in the hole (1-based). Set when renumbering after
+       *  an insert or reorder so the new play order survives a reload. */
+      shot_number?: number;
       shot_result?: ShotResult;
       target_type?: TargetType | null;
       target_result?: TargetResult | null;

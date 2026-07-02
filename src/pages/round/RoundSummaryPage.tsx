@@ -29,6 +29,9 @@ import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import GpsFixedRoundedIcon from '@mui/icons-material/GpsFixedRounded';
 import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
+import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
+import KeyboardArrowUpRoundedIcon from '@mui/icons-material/KeyboardArrowUpRounded';
+import KeyboardArrowDownRoundedIcon from '@mui/icons-material/KeyboardArrowDownRounded';
 import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import MapRoundedIcon from '@mui/icons-material/MapRounded';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
@@ -105,6 +108,10 @@ export function RoundSummaryPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [verifyingAll, setVerifyingAll] = useState(false);
   const [tab, setTab] = useState<'overview' | 'holes' | 'game'>('overview');
+  // When set (via a "needs review" hole chip), the Holes tab jumps to this hole
+  // so the golfer lands right on the shots that need confirming. Reset to null
+  // once consumed so tapping the same hole again re-triggers the jump.
+  const [focusHoleNumber, setFocusHoleNumber] = useState<number | null>(null);
 
   useEffect(() => {
     if (!detail.data?.round) return;
@@ -187,6 +194,24 @@ export function RoundSummaryPage() {
   // confirmed per-hole surface here. "Verify all" clears the whole round; to
   // edit/delete an individual shot they use the per-hole map / scorecard.
   const unverifiedShots = shots.filter((s) => s.verified === false);
+  // Which holes have shots still needing review, and how many each — so the
+  // backstop card can show the golfer exactly where to look and jump them there.
+  const holeNumberById = new Map(rawHoles.map((h) => [h.id, h.hole_number]));
+  const unverifiedByHole = (() => {
+    const counts = new Map<number, number>();
+    for (const s of unverifiedShots) {
+      const n = holeNumberById.get(s.hole_id);
+      if (n == null) continue;
+      counts.set(n, (counts.get(n) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .map(([holeNumber, count]) => ({ holeNumber, count }))
+      .sort((a, b) => a.holeNumber - b.holeNumber);
+  })();
+  const jumpToHole = (holeNumber: number) => {
+    setTab('holes');
+    setFocusHoleNumber(holeNumber);
+  };
   const verifyAllRound = async () => {
     if (verifyingAll || unverifiedShots.length === 0) return;
     setVerifyingAll(true);
@@ -258,37 +283,56 @@ export function RoundSummaryPage() {
           >
             <CardContent
               sx={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: 1.5,
                 py: 1.5,
                 '&:last-child': { pb: 1.5 }
               }}
             >
-              <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>
-                  {unverifiedShots.length}{' '}
-                  {unverifiedShots.length === 1 ? 'shot needs' : 'shots need'} review
-                </Typography>
-                <Typography variant="caption" color="text.secondary">
-                  Auto-detected from your watch. Open a hole to edit, or confirm
-                  them all.
-                </Typography>
+              <Stack direction="row" alignItems="center" gap={1.5}>
+                <Box sx={{ flex: 1, minWidth: 0 }}>
+                  <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>
+                    {unverifiedShots.length}{' '}
+                    {unverifiedShots.length === 1 ? 'shot needs' : 'shots need'} review
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    Auto-detected from your watch. Tap a hole below to review and
+                    edit, or confirm them all.
+                  </Typography>
+                </Box>
+                <Button
+                  variant="contained"
+                  size="small"
+                  disabled={verifyingAll}
+                  onClick={() => void verifyAllRound()}
+                  sx={{
+                    textTransform: 'none',
+                    fontWeight: 700,
+                    borderRadius: '6px',
+                    whiteSpace: 'nowrap'
+                  }}
+                >
+                  {verifyingAll ? 'Verifying…' : 'Verify all'}
+                </Button>
+              </Stack>
+              {/* The specific holes needing review — tap to jump straight to that
+                  hole's shots in the Holes tab. */}
+              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mt: 1.25 }}>
+                {unverifiedByHole.map(({ holeNumber, count }) => (
+                  <Chip
+                    key={holeNumber}
+                    label={`Hole ${holeNumber} · ${count}`}
+                    size="small"
+                    clickable
+                    onClick={() => jumpToHole(holeNumber)}
+                    sx={{
+                      fontWeight: 700,
+                      bgcolor: 'rgba(251,191,36,0.18)',
+                      border: 1,
+                      borderColor: 'rgba(251,191,36,0.55)',
+                      '&:hover': { bgcolor: 'rgba(251,191,36,0.3)' }
+                    }}
+                  />
+                ))}
               </Box>
-              <Button
-                variant="contained"
-                size="small"
-                disabled={verifyingAll}
-                onClick={() => void verifyAllRound()}
-                sx={{
-                  textTransform: 'none',
-                  fontWeight: 700,
-                  borderRadius: '6px',
-                  whiteSpace: 'nowrap'
-                }}
-              >
-                {verifyingAll ? 'Verifying…' : 'Verify all'}
-              </Button>
             </CardContent>
           </Card>
         </Box>
@@ -428,6 +472,8 @@ export function RoundSummaryPage() {
           holes={holes}
           shots={shots}
           bag={bag}
+          focusHoleNumber={focusHoleNumber}
+          onFocusConsumed={() => setFocusHoleNumber(null)}
         />
       )}
 
@@ -918,10 +964,16 @@ function HolesTab({
   courseId,
   holes,
   shots,
-  bag
+  bag,
+  focusHoleNumber,
+  onFocusConsumed
 }: {
   roundId: string;
   courseId: string | null;
+  /** When set (from a "needs review" chip), select this hole. */
+  focusHoleNumber?: number | null;
+  /** Called after focusHoleNumber has been applied so the parent can reset it. */
+  onFocusConsumed?: () => void;
   holes: Array<{
     id: string;
     hole_number: number;
@@ -940,18 +992,111 @@ function HolesTab({
   const [editingShot, setEditingShot] = useState<HolesTabShot | null>(null);
   /** Shot pending delete-confirmation. null = no confirm dialog open. */
   const [deletingShot, setDeletingShot] = useState<HolesTabShot | null>(null);
+  /** Open the shot sheet to ADD a shot (appended) to this hole. Use the row
+   *  reorder controls to move it into position. */
+  const [addContext, setAddContext] = useState<{
+    holeId: string;
+    holePar: number;
+  } | null>(null);
   /** Currently-open map dialog (which hole's map to show). null = closed. */
   const [mapHoleNumber, setMapHoleNumber] = useState<number | null>(null);
 
+  // Persist shot_number = idx+1 for a hole's shots in the given order. Only the
+  // rows whose number actually changed are written. Backs insert / reorder /
+  // delete so the play order survives (summary reads shot_number from remote).
+  const persistHoleOrder = async (ordered: HolesTabShot[]) => {
+    await Promise.all(
+      ordered.map((s, idx) =>
+        s.shot_number === idx + 1
+          ? null
+          : roundRepo
+              .updateShot(s.id, { shot_number: idx + 1 })
+              .catch((err) => console.error('[summary] renumber failed', err))
+      )
+    );
+    queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+  };
+
+  // A hole's shots in play order, read from the current (remote) shots prop.
+  const holeShotsSorted = (holeId: string) =>
+    shots
+      .filter((s) => s.hole_id === holeId)
+      .sort((a, b) => a.shot_number - b.shot_number);
+
   const onConfirmDelete = async () => {
     if (!deletingShot) return;
+    const holeId = deletingShot.hole_id;
     try {
       await roundRepo.deleteShot(deletingShot.id);
-      queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      // Renumber the survivors so the hole stays 1..N with no gap.
+      await persistHoleOrder(
+        holeShotsSorted(holeId).filter((s) => s.id !== deletingShot.id)
+      );
     } catch (err) {
       console.error('[summary] shot delete failed', err);
     }
     setDeletingShot(null);
+  };
+
+  // Nudge a shot one slot earlier/later within its hole and persist the order.
+  const onMoveShotSummary = async (shot: HolesTabShot, dir: -1 | 1) => {
+    const list = holeShotsSorted(shot.hole_id);
+    const idx = list.findIndex((s) => s.id === shot.id);
+    const to = idx + dir;
+    if (idx < 0 || to < 0 || to >= list.length) return;
+    const next = [...list];
+    const [moved] = next.splice(idx, 1);
+    next.splice(to, 0, moved);
+    await persistHoleOrder(next);
+  };
+
+  // Save a brand-new shot (append or insert-after), then bump the shots after
+  // the insert point so numbering stays contiguous.
+  const onSubmitAdd = async (payload: {
+    clubId: string | null;
+    distance: number | null;
+    distanceUnit: DistanceUnit | null;
+    targetType: TargetType;
+    targetResult: TargetResult;
+    lie: Lie | null;
+    penaltyType: PenaltyType | null;
+    derivedShotResult: import('@/models').ShotResult;
+    notes: string | null;
+    startLat: number | null;
+    startLng: number | null;
+    endLat: number | null;
+    endLng: number | null;
+    calculatedDistance: number | null;
+  }) => {
+    if (!addContext) return;
+    const list = holeShotsSorted(addContext.holeId);
+    try {
+      await roundRepo.addShot({
+        round_id: roundId,
+        hole_id: addContext.holeId,
+        // Append at the end; the reorder controls move it into position.
+        shot_number: list.length + 1,
+        club_id: payload.clubId,
+        shot_result: payload.derivedShotResult,
+        target_type: payload.targetType,
+        target_result: payload.targetResult,
+        lie: payload.lie,
+        penalty_type: payload.penaltyType,
+        distance: payload.distance,
+        distance_unit: payload.distanceUnit,
+        notes: payload.notes,
+        start_lat: payload.startLat,
+        start_lng: payload.startLng,
+        end_lat: payload.endLat,
+        end_lng: payload.endLng,
+        calculated_distance: payload.calculatedDistance,
+        verified: true
+      });
+      queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      setAddContext(null);
+    } catch (err) {
+      console.error('[summary] add shot failed', err);
+    }
   };
 
   const editingDraft: ShotEditDraft | null = useMemo(() => {
@@ -1010,7 +1155,10 @@ function HolesTab({
         start_lng: payload.startLng,
         end_lat: payload.endLat,
         end_lng: payload.endLng,
-        calculated_distance: payload.calculatedDistance
+        calculated_distance: payload.calculatedDistance,
+        // Reviewing/saving a shot here confirms it — clears the "needs review"
+        // flag just like editing it on the live per-hole page does.
+        verified: true
       });
       // Refresh the summary data so the edited row re-renders with the
       // new values + any downstream cards (Scorecard, stats) recompute.
@@ -1064,6 +1212,32 @@ function HolesTab({
     sorted[firstPlayedIdx >= 0 ? firstPlayedIdx : 0]?.hole_number ?? 1
   );
 
+  // Jump to a hole requested from the summary's "needs review" chips, then tell
+  // the parent it's been consumed so re-tapping the same hole re-triggers it.
+  useEffect(() => {
+    if (focusHoleNumber == null) return;
+    setSelectedHoleNumber(focusHoleNumber);
+    onFocusConsumed?.();
+  }, [focusHoleNumber, onFocusConsumed]);
+
+  // Hole numbers that still have an unverified (auto-detected) shot — drives the
+  // amber "needs review" dot on the hole strip and the per-shot flag below.
+  const holesNeedingReview = useMemo(() => {
+    const out = new Set<string>();
+    for (const s of shots) if (s.verified === false) out.add(s.hole_id);
+    return out;
+  }, [shots]);
+
+  // Mark a single auto-detected shot as confirmed, in place.
+  const verifyShotRow = async (shot: HolesTabShot) => {
+    try {
+      await roundRepo.updateShot(shot.id, { verified: true });
+      queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+    } catch (err) {
+      console.error('[summary] shot verify failed', err);
+    }
+  };
+
   const selected =
     sorted.find((h) => h.hole_number === selectedHoleNumber) ?? sorted[0];
   if (!selected) {
@@ -1096,24 +1270,44 @@ function HolesTab({
         {sorted.map((h) => {
           const hScore = h.strokes + h.penalty_strokes;
           const isSelected = h.hole_number === selectedHoleNumber;
+          const needsReview = holesNeedingReview.has(h.id);
           return (
             <Box
               key={h.hole_number}
               onClick={() => setSelectedHoleNumber(h.hole_number)}
               role="button"
               sx={{
+                position: 'relative',
                 minWidth: 64,
                 px: 1,
                 py: 0.75,
                 borderRadius: '5px',
                 bgcolor: isSelected ? 'rgba(22,163,74,0.22)' : 'background.paper',
                 border: 1,
-                borderColor: isSelected ? '#16a34a' : 'divider',
+                borderColor: isSelected
+                  ? '#16a34a'
+                  : needsReview
+                    ? 'rgba(251,191,36,0.55)'
+                    : 'divider',
                 textAlign: 'center',
                 cursor: 'pointer',
                 flexShrink: 0
               }}
             >
+              {needsReview && (
+                <Box
+                  aria-label="needs review"
+                  sx={{
+                    position: 'absolute',
+                    top: 4,
+                    right: 4,
+                    width: 8,
+                    height: 8,
+                    borderRadius: '50%',
+                    bgcolor: '#fbbf24'
+                  }}
+                />
+              )}
               <Typography
                 variant="caption"
                 color="text.secondary"
@@ -1256,11 +1450,33 @@ function HolesTab({
           hole_id (see shotsByHole above). */}
       <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
         <CardContent>
-          <Stack direction="row" alignItems="center" spacing={1} mb={1}>
-            <FlagRoundedIcon fontSize="small" color="primary" />
-            <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-              Shots
-            </Typography>
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            spacing={1}
+            mb={1}
+          >
+            <Stack direction="row" alignItems="center" spacing={1}>
+              <FlagRoundedIcon fontSize="small" color="primary" />
+              <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                Shots
+              </Typography>
+            </Stack>
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={<AddRoundedIcon />}
+              onClick={() =>
+                setAddContext({
+                  holeId: selected.id,
+                  holePar: selected.par || 4
+                })
+              }
+              sx={{ borderRadius: '5px', textTransform: 'none' }}
+            >
+              Add shot
+            </Button>
           </Stack>
           {(() => {
             const list = shotsByHole.get(selected.id) ?? [];
@@ -1273,11 +1489,13 @@ function HolesTab({
             }
             return (
               <Stack spacing={1}>
-                {list.map((s) => {
+                {list.map((s, sIdx, sArr) => {
                   const clubLabel = s.club_id ? nameForClubId(s.club_id) : 'No club';
                   const dist = formatShotDistance(s.distance, s.distance_unit);
                   const outcome = formatShotOutcome(s.target_type, s.target_result, s.lie);
                   const penalty = formatPenalty(s.penalty_type);
+                  const canMoveUp = sIdx > 0;
+                  const canMoveDown = sIdx < sArr.length - 1;
                   return (
                     <Box
                       key={s.id}
@@ -1292,30 +1510,73 @@ function HolesTab({
                       }}
                       sx={{
                         display: 'grid',
-                        // 5 columns: shot#, body, distance, edit icon,
-                        // delete icon. Edit + delete are visible
-                        // affordances; the row's body still triggers
-                        // edit-on-tap. The trash icon has its own
-                        // click handler with stopPropagation so it
-                        // doesn't bubble to the row click.
-                        gridTemplateColumns: '32px 1fr auto 24px 24px',
+                        // Columns: reorder (stacked up/down, LEFT of the number),
+                        // shot#, body, distance, verify, delete. Add is via the
+                        // header button only (append) — reorder positions it. The
+                        // row body is tap-to-edit (no separate pencil). Verify
+                        // only acts on unverified rows (empty spacer otherwise).
+                        // Icon handlers stopPropagation so they don't bubble to
+                        // the row's edit-on-tap.
+                        gridTemplateColumns: '22px 30px 1fr auto 24px 24px',
                         alignItems: 'center',
                         columnGap: 1,
                         rowGap: 0.25,
                         py: 0.75,
                         px: 0.5,
+                        // Amber wash + left accent flags an unverified shot.
+                        bgcolor: s.verified ? undefined : 'rgba(251,191,36,0.08)',
+                        borderLeft: s.verified ? undefined : '3px solid #fbbf24',
                         borderBottom: 1,
                         borderColor: 'divider',
                         borderRadius: '5px',
                         cursor: 'pointer',
                         '&:hover': {
-                          bgcolor: 'rgba(255,255,255,0.04)',
+                          bgcolor: s.verified
+                            ? 'rgba(255,255,255,0.04)'
+                            : 'rgba(251,191,36,0.14)',
                           '& .shot-edit-icon': { opacity: 1 }
                         },
                         '&:active': { bgcolor: 'rgba(255,255,255,0.06)' },
                         '&:last-of-type': { borderBottom: 'none' }
                       }}
                     >
+                      {/* Reorder — stacked up/down to the LEFT of the number. */}
+                      <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+                        <Box
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Move shot ${s.shot_number} earlier`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (canMoveUp) void onMoveShotSummary(s, -1);
+                          }}
+                          sx={{
+                            display: 'flex',
+                            justifyContent: 'center',
+                            cursor: canMoveUp ? 'pointer' : 'default',
+                            opacity: canMoveUp ? 0.7 : 0.2
+                          }}
+                        >
+                          <KeyboardArrowUpRoundedIcon sx={{ fontSize: 18 }} />
+                        </Box>
+                        <Box
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Move shot ${s.shot_number} later`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            if (canMoveDown) void onMoveShotSummary(s, 1);
+                          }}
+                          sx={{
+                            display: 'flex',
+                            justifyContent: 'center',
+                            cursor: canMoveDown ? 'pointer' : 'default',
+                            opacity: canMoveDown ? 0.7 : 0.2
+                          }}
+                        >
+                          <KeyboardArrowDownRoundedIcon sx={{ fontSize: 18 }} />
+                        </Box>
+                      </Box>
                       <Typography
                         variant="caption"
                         sx={{ fontWeight: 800, color: 'text.secondary' }}
@@ -1330,6 +1591,21 @@ function HolesTab({
                           {[outcome, penalty].filter(Boolean).join(' · ') || '—'}
                           {s.notes ? ` · ${s.notes}` : ''}
                         </Typography>
+                        {!s.verified && (
+                          <Typography
+                            variant="caption"
+                            sx={{
+                              display: 'block',
+                              color: '#d97706',
+                              fontWeight: 800,
+                              textTransform: 'uppercase',
+                              letterSpacing: 0.4,
+                              fontSize: '0.62rem'
+                            }}
+                          >
+                            Needs review
+                          </Typography>
+                        )}
                       </Box>
                       <Typography
                         variant="body2"
@@ -1337,19 +1613,38 @@ function HolesTab({
                       >
                         {dist}
                       </Typography>
-                      <EditRoundedIcon
-                        className="shot-edit-icon"
-                        sx={{
-                          fontSize: 18,
-                          color: 'text.secondary',
-                          // 60% opacity baseline so the affordance is
-                          // visible at a glance on phone (no hover) but
-                          // not loud enough to compete with the shot
-                          // content. Lifts to full on hover.
-                          opacity: 0.6,
-                          transition: 'opacity 120ms ease'
-                        }}
-                      />
+                      {/* Confirm an auto-detected shot as-is. Empty spacer on
+                          already-verified rows to hold the grid column. */}
+                      {s.verified ? (
+                        <Box />
+                      ) : (
+                        <Box
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`Verify shot ${s.shot_number}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void verifyShotRow(s);
+                          }}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              void verifyShotRow(s);
+                            }
+                          }}
+                          sx={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          <CheckCircleRoundedIcon
+                            sx={{ fontSize: 20, color: 'success.main' }}
+                          />
+                        </Box>
+                      )}
                       <Box
                         role="button"
                         tabIndex={0}
@@ -1390,13 +1685,22 @@ function HolesTab({
       </Card>
 
       <AddShotSheet
-        open={editingShot !== null}
-        shotNumber={editingShot?.shot_number ?? 1}
-        editing={editingDraft}
-        holePar={editingHolePar}
+        open={editingShot !== null || addContext !== null}
+        shotNumber={
+          editingShot
+            ? editingShot.shot_number
+            : addContext
+              ? holeShotsSorted(addContext.holeId).length + 1
+              : 1
+        }
+        editing={addContext ? null : editingDraft}
+        holePar={addContext ? addContext.holePar : editingHolePar}
         bagClubs={bag}
-        onClose={() => setEditingShot(null)}
-        onSubmit={onSubmitEdit}
+        onClose={() => {
+          setEditingShot(null);
+          setAddContext(null);
+        }}
+        onSubmit={addContext ? onSubmitAdd : onSubmitEdit}
       />
 
       <Dialog
@@ -1633,7 +1937,7 @@ function HoleMapDialog({
           await roundRepo.addShot({
             round_id: roundId,
             hole_id: hole.id,
-            // Append after the highest existing shot number on this hole.
+            // Append at the end; reorder in the shot list to fix the sequence.
             shot_number: allShotsForHole.length + 1,
             club_id: null,
             shot_result: shotResult,
@@ -1670,7 +1974,41 @@ function HoleMapDialog({
         console.error('[summary] add shot position failed', err);
       }
     };
-  }, [editMode, addingShot, unmappedShots, allShotsForHole.length, hole, queryClient, roundId]);
+  }, [editMode, addingShot, unmappedShots, allShotsForHole, hole, queryClient, roundId]);
+
+  // Reorder / delete for the map's Edit-mode shot list. Both renumber the hole
+  // to keep it 1..N and refetch so the dots relabel.
+  const persistMapOrder = async (ordered: HolesTabShot[]) => {
+    await Promise.all(
+      ordered.map((s, idx) =>
+        s.shot_number === idx + 1
+          ? null
+          : roundRepo
+              .updateShot(s.id, { shot_number: idx + 1 })
+              .catch((err) => console.error('[summary] map renumber failed', err))
+      )
+    );
+    queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+  };
+
+  const moveShotOnMap = async (shot: HolesTabShot, dir: -1 | 1) => {
+    const idx = allShotsForHole.findIndex((s) => s.id === shot.id);
+    const to = idx + dir;
+    if (idx < 0 || to < 0 || to >= allShotsForHole.length) return;
+    const next = [...allShotsForHole];
+    const [moved] = next.splice(idx, 1);
+    next.splice(to, 0, moved);
+    await persistMapOrder(next);
+  };
+
+  const deleteShotOnMap = async (shot: HolesTabShot) => {
+    try {
+      await roundRepo.deleteShot(shot.id);
+      await persistMapOrder(allShotsForHole.filter((s) => s.id !== shot.id));
+    } catch (err) {
+      console.error('[summary] map shot delete failed', err);
+    }
+  };
 
   return (
     <Dialog
@@ -1785,6 +2123,98 @@ function HoleMapDialog({
               </>
             )}
           </Typography>
+        </Box>
+      )}
+      {/* Edit-mode shot list — reorder (up/down, left of the number) and delete
+          right on the map. Add is via the header button (append); reorder moves
+          a shot into position. Height-capped so the map stays visible. */}
+      {editMode && allShotsForHole.length > 0 && (
+        <Box sx={{ px: 2, pb: 1, maxHeight: '30vh', overflowY: 'auto' }}>
+          <Stack spacing={0.5}>
+            {allShotsForHole.map((s, i, arr) => {
+              const club = s.club_id ? bag.find((c) => c.clubId === s.club_id) : null;
+              const clubLabel = club ? club.customName || club.name : 'No club';
+              const distLabel =
+                s.distance != null
+                  ? `${s.distance}${s.distance_unit === 'feet' ? 'ft' : 'y'}`
+                  : '';
+              const up = i > 0;
+              const down = i < arr.length - 1;
+              return (
+                <Box
+                  key={s.id}
+                  sx={{
+                    display: 'grid',
+                    gridTemplateColumns: '22px 26px 1fr 24px',
+                    alignItems: 'center',
+                    columnGap: 0.75,
+                    py: 0.25,
+                    px: 0.5,
+                    borderRadius: '5px',
+                    bgcolor: 'action.hover'
+                  }}
+                >
+                  <Box sx={{ display: 'flex', flexDirection: 'column' }}>
+                    <Box
+                      role="button"
+                      aria-label={`Move shot ${s.shot_number} earlier`}
+                      onClick={() => {
+                        if (up) void moveShotOnMap(s, -1);
+                      }}
+                      sx={{
+                        display: 'flex',
+                        justifyContent: 'center',
+                        cursor: up ? 'pointer' : 'default',
+                        opacity: up ? 0.7 : 0.2
+                      }}
+                    >
+                      <KeyboardArrowUpRoundedIcon sx={{ fontSize: 16 }} />
+                    </Box>
+                    <Box
+                      role="button"
+                      aria-label={`Move shot ${s.shot_number} later`}
+                      onClick={() => {
+                        if (down) void moveShotOnMap(s, 1);
+                      }}
+                      sx={{
+                        display: 'flex',
+                        justifyContent: 'center',
+                        cursor: down ? 'pointer' : 'default',
+                        opacity: down ? 0.7 : 0.2
+                      }}
+                    >
+                      <KeyboardArrowDownRoundedIcon sx={{ fontSize: 16 }} />
+                    </Box>
+                  </Box>
+                  <Typography
+                    variant="caption"
+                    sx={{ fontWeight: 800, color: 'text.secondary' }}
+                  >
+                    #{s.shot_number}
+                  </Typography>
+                  <Typography variant="caption" noWrap sx={{ fontWeight: 600 }}>
+                    {clubLabel}
+                    {distLabel ? ` · ${distLabel}` : ''}
+                  </Typography>
+                  <Box
+                    role="button"
+                    aria-label={`Delete shot ${s.shot_number}`}
+                    onClick={() => void deleteShotOnMap(s)}
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      color: 'error.main',
+                      opacity: 0.8
+                    }}
+                  >
+                    <DeleteOutlineRoundedIcon sx={{ fontSize: 18 }} />
+                  </Box>
+                </Box>
+              );
+            })}
+          </Stack>
         </Box>
       )}
       <Box sx={{ flex: 1, minHeight: 0, px: 1, pb: 1 }}>
