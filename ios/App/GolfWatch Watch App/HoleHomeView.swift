@@ -29,6 +29,15 @@ struct HoleHomeView: View {
     /// without waiting on the phone (whose JS is suspended while backgrounded).
     /// Cleared once the phone's snapshot catches up to this hole.
     @State private var localHoleNumber: Int?
+    /// True for a short window right after a putt tap — disables Missed/Made so a
+    /// rapid double-tap can't send two putts (the phone save isn't idempotent and
+    /// the confirming snapshot can lag when the phone is backgrounded). Reset by a
+    /// timer in `recordPutt`.
+    @State private var puttSending = false
+    /// The hole number a "Made" putt was recorded on. While the displayed hole
+    /// matches, the putt controls are LOCKED (show "Holed out") so no number of
+    /// extra taps can add another made putt — the reported multi-putt bug.
+    @State private var madePuttHole: Int?
 
     var body: some View {
         let s = session.state
@@ -251,11 +260,16 @@ struct HoleHomeView: View {
     /// phone's selectedClubId is for a different hole, so we skip it and use the
     /// previewed hole's suggestion.
     private func effectiveClubId(_ s: WatchRoundState) -> String? {
-        let suggested = displayedHole(s)?.suggestedClubId ?? s.suggestedClubId
+        // The watch's own live-distance recommendation is preferred over the
+        // phone's pushed selection/suggestion (which can be stale when the phone
+        // is backgrounded), so the club auto-follows as you walk up to the ball.
+        // A manual pick ON THE WATCH (localSelectedClubId) still wins.
+        let liveClub = liveSuggestedClubId(s)
+        let pushedSuggested = displayedHole(s)?.suggestedClubId ?? s.suggestedClubId
         if isPreviewing(s) {
-            return session.localSelectedClubId ?? suggested
+            return session.localSelectedClubId ?? liveClub ?? pushedSuggested
         }
-        return session.localSelectedClubId ?? s.selectedClubId ?? suggested
+        return session.localSelectedClubId ?? liveClub ?? s.selectedClubId ?? pushedSuggested
     }
 
     /// Bottom controls — a 2×2 grid:
@@ -273,12 +287,13 @@ struct HoleHomeView: View {
     /// hole arrows remain.
     @ViewBuilder
     private func bottomControls(_ s: WatchRoundState) -> some View {
-        if s.onGreen {
-            // Ball's on the green — swap Track / Add Shot for the putt
-            // recorder, mirroring the phone's putting panel. Checked BEFORE the
-            // at-course gate: being on the green means you're on the course, and
-            // it lets the putt view be exercised even when the at-course
-            // heuristic reads false (e.g. testing away from the course).
+        if isOnGreen(s) {
+            // Ball's on the green — swap Track / Add Shot for the putt recorder,
+            // mirroring the phone's putting panel. Uses the watch's OWN on-green
+            // test (phone result OR watch GPS-within-radius) so it arms even when
+            // the phone is backgrounded. Checked BEFORE the at-course gate: being
+            // on the green means you're on the course, and it lets the putt view
+            // be exercised even when the at-course heuristic reads false.
             puttControls(s)
         } else if s.atCourse == false {
             VStack(spacing: 6) {
@@ -333,42 +348,61 @@ struct HoleHomeView: View {
     /// mid-hole; they return once the putt is made (onGreen clears).
     @ViewBuilder
     private func puttControls(_ s: WatchRoundState) -> some View {
-        let displayed = puttFeetOverride ?? s.distanceFeet
-        VStack(spacing: 6) {
-            HStack(spacing: 8) {
-                stepButton(system: "minus") {
-                    puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) - 1)
+        // Once "Made" holes out this hole, lock the panel so no amount of extra
+        // taps can add another putt — regardless of whether the phone's
+        // hole-out snapshot has arrived yet.
+        if madePuttHole == displayedHoleNumber(s) {
+            VStack(spacing: 6) {
+                Image(systemName: "checkmark.circle.fill")
+                    .font(.system(size: 34, weight: .bold))
+                    .foregroundColor(.green)
+                Text("Holed out")
+                    .font(.system(size: 15, weight: .heavy))
+                    .foregroundColor(.white)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        } else {
+            let displayed = puttFeetOverride ?? s.distanceFeet
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    stepButton(system: "minus") {
+                        puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) - 1)
+                    }
+                    VStack(spacing: 0) {
+                        Text(displayed.map { "\($0) ft" } ?? "—")
+                            .font(.system(size: 34, weight: .heavy, design: .rounded))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                        Text("TO FLAG")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    stepButton(system: "plus") {
+                        puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) + 1)
+                    }
                 }
-                VStack(spacing: 0) {
-                    Text(displayed.map { "\($0) ft" } ?? "—")
-                        .font(.system(size: 38, weight: .heavy, design: .rounded))
-                        .foregroundColor(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.5)
-                    Text("TO FLAG")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.secondary)
-                }
-                .frame(maxWidth: .infinity)
-                stepButton(system: "plus") {
-                    puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) + 1)
+                // Bigger, well-separated targets so a fat-finger on "Missed"
+                // can't land on "Made" (which holes out).
+                HStack(spacing: 12) {
+                    puttButton(title: "Missed", system: "xmark.circle", tint: .gray) {
+                        recordPutt(made: false, s)
+                    }
+                    puttButton(title: "Made", system: "flag.fill", tint: .green) {
+                        recordPutt(made: true, s)
+                    }
                 }
             }
-            HStack(spacing: 6) {
-                puttButton(title: "Missed", system: "xmark.circle", tint: .gray) {
-                    recordPutt(made: false, s)
-                }
-                puttButton(title: "Made", system: "flag.fill", tint: .green) {
-                    recordPutt(made: true, s)
-                }
-            }
+            // Forget any ± correction when moving to a different hole.
+            .onChange(of: displayedHoleNumber(s)) { _, _ in puttFeetOverride = nil }
         }
-        // Forget any ± correction when moving to a different hole.
-        .onChange(of: displayedHoleNumber(s)) { _, _ in puttFeetOverride = nil }
     }
 
-    /// Compact Missed / Made button — shorter than the standard bigButton so the
-    /// feet-to-flag readout above it can dominate the screen.
+    /// Missed / Made button. Taller (44pt) for reliable taps on a small screen,
+    /// and disabled briefly after a tap (`puttSending`) so a rapid double-tap
+    /// can't fire two putts.
     @ViewBuilder
     private func puttButton(
         title: String,
@@ -377,19 +411,21 @@ struct HoleHomeView: View {
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 3) {
+            HStack(spacing: 4) {
                 Image(systemName: system)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 14, weight: .bold))
                 Text(title)
-                    .font(.system(size: 12, weight: .bold))
+                    .font(.system(size: 14, weight: .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
             .frame(maxWidth: .infinity)
-            .frame(height: 28)
+            .frame(height: 44)
         }
         .buttonStyle(.borderedProminent)
         .tint(tint)
+        .disabled(puttSending)
+        .opacity(puttSending ? 0.5 : 1)
     }
 
     /// Small circular ± button used to nudge the putt distance.
@@ -411,10 +447,23 @@ struct HoleHomeView: View {
     /// distance. `made` holes out, which clears onGreen on the next snapshot and
     /// restores the normal Track / Add Shot controls for the next hole.
     private func recordPutt(made: Bool, _ s: WatchRoundState) {
+        // Ignore taps while a putt is in flight, or after this hole was already
+        // holed out — this is what stops "tapped Made 4× → 4 putts".
+        guard !puttSending, madePuttHole != displayedHoleNumber(s) else { return }
         let putterId = s.bag.first(where: { $0.isPutter })?.id ?? effectiveClubId(s)
         let feet = puttFeetOverride ?? s.distanceFeet
         session.recordPutt(clubId: putterId, made: made, distanceFeet: feet)
         puttFeetOverride = nil
+        // A made putt locks the panel immediately (optimistic hole-out), so we
+        // don't depend on the phone's confirming snapshot to disable the button.
+        if made { madePuttHole = displayedHoleNumber(s) }
+        // Debounce both buttons briefly; enough for a normal roundtrip while
+        // blocking accidental repeats.
+        puttSending = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            puttSending = false
+        }
     }
 
     /// Prev / next hole arrows — the second row, under Track & Add Shot. These
@@ -567,16 +616,20 @@ struct HoleHomeView: View {
     /// physically at, GPS-to-that-pin is meaningless → static hole yardage.
     private func displayDistance(_ s: WatchRoundState) -> (value: Int, unit: String)? {
         if !isPreviewing(s) {
-            // On the green, the phone sends the precise putt distance (ball → pin)
-            // in feet — show that, matching the phone, instead of noisier live GPS.
-            if s.onGreen, let ft = s.distanceFeet {
-                return (ft, "ft")
-            }
+            let onGreen = isOnGreen(s)
+            // Prefer the watch's OWN live GPS distance for the feet-to-flag on the
+            // green. The phone's pushed distanceFeet was previously chosen here,
+            // but it FREEZES when the phone is backgrounded — the cause of the
+            // "238 ft while standing on the green" reading. Own GPS self-corrects;
+            // fall back to the phone value only when there's no usable fix.
             if let liveYards = liveDistanceToDisplayedPin(s) {
-                if s.onGreen || liveYards <= 12 {
+                if onGreen || liveYards <= 12 {
                     return (Int((liveYards * 3).rounded()), "ft")
                 }
                 return (Int(liveYards.rounded()), "yds")
+            }
+            if onGreen, let ft = s.distanceFeet {
+                return (ft, "ft")
             }
         }
         if let yd = displayedHole(s)?.yardage { return (yd, "yds") }
@@ -592,5 +645,40 @@ struct HoleHomeView: View {
             return session.liveDistanceToPin(lat: plat, lng: plng)
         }
         return session.liveDistanceToPinYards()
+    }
+
+    /// Within this many yards of the pin, the watch treats you as ON THE GREEN by
+    /// its OWN GPS — independent of the phone. The phone computes an exact
+    /// green-polygon test, but that value FREEZES when the phone is backgrounded
+    /// (pocketed during play), so the Putt view never armed. This radius is the
+    /// watch's self-sufficient fallback. Tunable: bigger catches long putts from
+    /// the fringe, smaller avoids arming on a chip from just off the green.
+    private let onGreenRadiusYards: Double = 15
+
+    /// Effective on-green for the DISPLAYED hole: the phone's exact result when
+    /// it's awake, OR the watch's own GPS-within-radius test so putting mode
+    /// still arms when the phone is asleep. Only for the hole you're physically
+    /// on (not a previewed hole).
+    private func isOnGreen(_ s: WatchRoundState) -> Bool {
+        if s.onGreen { return true }
+        if isPreviewing(s) { return false }
+        if let yards = liveDistanceToDisplayedPin(s) { return yards <= onGreenRadiusYards }
+        return false
+    }
+
+    /// Club recommendation computed ON THE WATCH from its own live distance to
+    /// the pin and the bag (both already in the snapshot) — so the suggested club
+    /// tracks you as you walk up to the ball, instead of freezing on the phone's
+    /// last push. Picks the non-putter club whose typical yardage is closest to
+    /// the live distance. Nil while previewing, on the green, or without a fix.
+    private func liveSuggestedClubId(_ s: WatchRoundState) -> String? {
+        guard !isPreviewing(s), !isOnGreen(s),
+              let yards = liveDistanceToDisplayedPin(s) else { return nil }
+        let target = Int(yards.rounded())
+        let candidates = s.bag.filter { !$0.isPutter && $0.typicalYards != nil }
+        guard !candidates.isEmpty else { return nil }
+        return candidates.min(by: {
+            abs(($0.typicalYards ?? 0) - target) < abs(($1.typicalYards ?? 0) - target)
+        })?.id
     }
 }

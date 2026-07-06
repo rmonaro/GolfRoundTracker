@@ -66,8 +66,18 @@ export interface UseAutoTrackOptions {
    * counts as a new strike; `impactId` is informational. Each strike closes
    * the in-flight shot (start = the PRIOR strike's spot, end = where you're
    * standing now) and opens a new one, but only while `impactPrimary` is true.
+   *
+   * `lat`/`lng` are the WATCH's GPS position at the strike. Preferred over the
+   * phone's own fix so shots still record when the phone is pocketed/backgrounded
+   * and its GPS has stopped — the watch is the source of truth for where the
+   * strike happened. Falls back to the phone's live fix when absent.
    */
-  lastImpact?: { impactId: number; capturedAt: number } | null;
+  lastImpact?: {
+    impactId: number;
+    capturedAt: number;
+    lat?: number;
+    lng?: number;
+  } | null;
   /**
    * Impact-primary mode. When true, watch strikes drive detection and emitted
    * shots carry source:'impact' so the consumer auto-commits them. When false,
@@ -177,13 +187,21 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   useEffect(() => {
     if (!lastImpact) return;
     if (!impactPrimaryRef.current) return;
-    const fix = latestFixRef.current;
-    if (!fix) return; // no GPS to place the strike — skip this one
+    // Prefer the WATCH's position carried on the strike (the striker's wrist,
+    // and available even when the phone's own GPS has stopped in a pocket).
+    // Fall back to the phone's live fix. Only skip when neither exists.
+    const fix: { lat: number; lng: number } | null =
+      lastImpact.lat != null && lastImpact.lng != null
+        ? { lat: lastImpact.lat, lng: lastImpact.lng }
+        : latestFixRef.current
+          ? { lat: latestFixRef.current.lat, lng: latestFixRef.current.lng }
+          : null;
+    if (!fix) return; // no GPS anywhere to place the strike — skip this one
     const prev = inFlightRef.current;
     if (prev) {
       const distM = haversineMeters(
         { lat: prev.lat, lng: prev.lng, accuracyM: 0, timestamp: 0 },
-        fix
+        { lat: fix.lat, lng: fix.lng, accuracyM: 0, timestamp: 0 }
       );
       // Strike landed essentially on top of the in-flight start — almost
       // certainly a waggle / practice swing / double-trigger, not a real shot.

@@ -263,6 +263,10 @@ export function HoleTrackingPage() {
   const [lastImpact, setLastImpact] = useState<{
     impactId: number;
     capturedAt: number;
+    // Watch GPS at the strike — used to place the shot even when the phone's
+    // own GPS is asleep in a pocket.
+    lat?: number;
+    lng?: number;
   } | null>(null);
   // True while the watch strike stream is "live" — flipped on each roundImpact
   // and cleared by a staleness timeout. Gates impact-primary mode: only when
@@ -280,6 +284,11 @@ export function HoleTrackingPage() {
   // Tracks which hole we've already auto-prompted for verification so closing
   // the dialog doesn't immediately reopen it on the next render.
   const promptedHoleRef = useRef<number | null>(null);
+  // Backstop against duplicate watch putts: if the watch sends the same putt
+  // result again within a few seconds (rapid re-taps because it hadn't seen a
+  // confirming snapshot), drop it. The watch now guards this locally too, but a
+  // non-idempotent INSERT is worth defending on the phone as well.
+  const lastPuttRef = useRef<{ result: string; at: number } | null>(null);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -1723,11 +1732,19 @@ export function HoleTrackingPage() {
           return;
         }
         if (msg.type === 'roundImpact') {
-          // A confirmed ball-strike from the watch. Drives both the Phase 1
-          // gate (lastImpact) and Phase 2 impact-primary activation
-          // (strikeStreamLive). New object identity each message so the hook
-          // treats it as a fresh strike.
-          setLastImpact({ impactId: msg.impactId, capturedAt: msg.capturedAt });
+          // A confirmed ball-strike from the watch. Drives both the strike gate
+          // (lastImpact) and impact-primary activation (strikeStreamLive). New
+          // object identity each message so the hook treats it as a fresh strike.
+          // Carry the watch's GPS at impact so the shot is placed from the
+          // WATCH's position — the source of truth — even when the phone's own
+          // GPS has stopped in a pocket. This is what lets shot 1, 2, 3… record
+          // without the phone being awake and located.
+          setLastImpact({
+            impactId: msg.impactId,
+            capturedAt: msg.capturedAt,
+            lat: msg.startLat ?? undefined,
+            lng: msg.startLng ?? undefined
+          });
           // Mark the stream live and (re)arm a staleness timeout — if strikes
           // stop arriving (watch off / out of range), impact-primary relaxes
           // back to Phase 1 GPS tracking after the window.
@@ -1753,6 +1770,17 @@ export function HoleTrackingPage() {
           return;
         }
         if (msg.type === 'recordShot') {
+          // Drop duplicate putts: the same result arriving within 3s is a rapid
+          // re-tap (the watch user didn't see confirmation), not two real putts.
+          // Real consecutive putts are always seconds apart (walk + line up).
+          if (msg.targetType === 'putt') {
+            const now = Date.now();
+            const prev = lastPuttRef.current;
+            if (prev && prev.result === msg.targetResult && now - prev.at < 3000) {
+              return;
+            }
+            lastPuttRef.current = { result: msg.targetResult, at: now };
+          }
           // The watch finished a shot — if a tracking session was open,
           // it's done now. Clear the indicator before processing the
           // shot save below.
