@@ -266,7 +266,7 @@ enum WatchOutboundMessage {
     /// arrival time, not this, for recency. `location` is the watch's best
     /// recent fix at impact, if any.
     case swingImpact(impactId: Int, capturedAt: Double, swingType: String,
-                     handSpeed: Int, location: CLLocation?)
+                     handSpeed: Int, location: CLLocation?, clubId: String?)
 
     var payload: [String: Any] {
         switch self {
@@ -378,13 +378,14 @@ enum WatchOutboundMessage {
                 d["durationSeconds"] = h.durationSeconds
             }
             return d
-        case .swingImpact(let impactId, let capturedAt, let swingType, let handSpeed, let location):
+        case .swingImpact(let impactId, let capturedAt, let swingType, let handSpeed, let location, let clubId):
             var d: [String: Any] = [
                 "type": "roundImpact",
                 "impactId": impactId,
                 "capturedAt": capturedAt,
                 "swingType": swingType,
-                "handSpeed": handSpeed
+                "handSpeed": handSpeed,
+                "clubId": clubId ?? NSNull()
             ]
             if let l = location {
                 d["startLat"] = l.coordinate.latitude
@@ -427,6 +428,20 @@ final class WatchSession: NSObject, ObservableObject {
     /// Pending auto-clear for `localAutoTracking` so a refused/lost toggle falls
     /// back to the phone's real state instead of sticking optimistically.
     private var autoTrackOverrideTask: Task<Void, Never>?
+
+    /// Optimistic per-hole shot counts for shots the watch recorded or detected
+    /// but the phone hasn't yet confirmed via a fresh snapshot — the phone is
+    /// usually pocketed/backgrounded mid-round, so its snapshot (and every count
+    /// it computes) freezes. Keyed by hole number; the Shots readout shows
+    /// max(snapshot count, this) so a swing shows up immediately. Reconciled away
+    /// in `didReceiveApplicationContext` once the phone catches up or moves on.
+    @Published private(set) var pendingShotCounts: [Int: Int] = [:]
+
+    /// The last non-nil club the home view resolved for display. Two jobs: the
+    /// club pill never blanks to "Club" when the phone momentarily supplies no
+    /// selection (it nulls `selectedClubId` after each shot), and an
+    /// auto-detected strike can report which club was in hand to the phone.
+    @Published private(set) var lastResolvedClubId: String?
 
     private let locationManager = CLLocationManager()
     /// Latched start-position for the current "in-progress" shot. Captured
@@ -642,6 +657,30 @@ final class WatchSession: NSObject, ObservableObject {
         localSelectedClubId = clubId
     }
 
+    /// Bump the optimistic shot count for `hole` up to at least `newCount`.
+    func bumpPendingShotCount(hole: Int, to newCount: Int) {
+        if newCount > (pendingShotCounts[hole] ?? 0) {
+            pendingShotCounts[hole] = newCount
+        }
+    }
+
+    /// The watch's motion detector confirmed a ball strike during a round —
+    /// count it against the current hole so the Shots readout reflects the swing
+    /// immediately (the backgrounded phone's snapshot won't). Skipped on the
+    /// green so a putt stroke doesn't inflate the through-the-green shot count.
+    func registerDetectedStrikeShotCount() {
+        guard let hole = state.holeNumber, !state.onGreen else { return }
+        let base = max(state.shotsThisHole ?? 0, pendingShotCounts[hole] ?? 0)
+        bumpPendingShotCount(hole: hole, to: base + 1)
+    }
+
+    /// Remember the last real resolved club (see `lastResolvedClubId`).
+    func noteResolvedClub(_ clubId: String?) {
+        if let clubId, clubId != lastResolvedClubId {
+            lastResolvedClubId = clubId
+        }
+    }
+
     /// Mark a shot-tracking session as active. While active, each new
     /// accepted GPS fix gets forwarded to the phone (rate-limited) so
     /// the phone map can render a live "you are here" dot for the
@@ -737,6 +776,25 @@ extension WatchSession: WCSessionDelegate {
                snapshot.autoTracking == localTrack {
                 self.localAutoTracking = nil
                 self.autoTrackOverrideTask?.cancel()
+            }
+            // Drop optimistic shot counts the phone has now caught up to — or
+            // passed. Once the snapshot's count for a hole meets our optimistic
+            // value, or the phone has advanced to a later hole (so this hole's
+            // count is final), trust the phone's number.
+            if !self.pendingShotCounts.isEmpty {
+                var resolvedHoles: [Int] = []
+                for (hole, pending) in self.pendingShotCounts {
+                    let snapCount = snapshot.holes.first(where: { $0.holeNumber == hole })?.shots
+                        ?? (snapshot.holeNumber == hole ? snapshot.shotsThisHole : nil)
+                    if let sc = snapCount, sc >= pending {
+                        resolvedHoles.append(hole)
+                    } else if let current = snapshot.holeNumber, current > hole {
+                        resolvedHoles.append(hole)
+                    }
+                }
+                for hole in resolvedHoles {
+                    self.pendingShotCounts.removeValue(forKey: hole)
+                }
             }
         }
     }
@@ -899,7 +957,12 @@ final class RoundShotController: ObservableObject {
             capturedAt: now.timeIntervalSince1970 * 1000,
             swingType: m.swingType,
             handSpeed: m.estimatedHandSpeed,
-            location: WatchSession.shared.lastLocation
+            location: WatchSession.shared.lastLocation,
+            // Tell the phone which club the watch had in hand so the shot latches
+            // the right club even though the phone never saw a watch-side change.
+            clubId: WatchSession.shared.lastResolvedClubId
         ))
+        // Reflect the swing in the watch's own Shots count right away.
+        WatchSession.shared.registerDetectedStrikeShotCount()
     }
 }

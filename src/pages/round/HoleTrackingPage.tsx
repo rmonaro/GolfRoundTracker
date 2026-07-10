@@ -268,6 +268,12 @@ export function HoleTrackingPage() {
     lat?: number;
     lng?: number;
   } | null>(null);
+  // The club the watch reported in-hand on its most recent strike. Latched onto
+  // the impact-opened shot (see captureShotMeta) so the recorded club matches
+  // what the player saw on the watch — the phone's own selectedClubId resets to
+  // null after each shot and its live suggestion freezes while backgrounded, so
+  // neither is a reliable source for a watch-detected shot.
+  const watchStrikeClubIdRef = useRef<string | null>(null);
   // True while the watch strike stream is "live" — flipped on each roundImpact
   // and cleared by a staleness timeout. Gates impact-primary mode: only when
   // strikes are actually arriving do we hand detection to the watch. When no
@@ -836,7 +842,12 @@ export function HoleTrackingPage() {
     // following strike commits this one. Evaluated at strike time, so the
     // suggestedClub const declared lower in this component is already resolved.
     captureShotMeta: () => ({
-      clubId: selectedClubId ?? suggestedClub?.clubId ?? null
+      // Prefer the phone's own selection when the user set one (it's null again
+      // after each committed shot), then the club the watch reported at the
+      // strike, then the live suggestion. This is what makes a watch-side club
+      // change actually stick to the shot the player just hit.
+      clubId:
+        selectedClubId ?? watchStrikeClubIdRef.current ?? suggestedClub?.clubId ?? null
     }),
     onShotDetected: (shot) => {
       // Auto-recording is WATCH-driven only. A watch strike (source:'impact')
@@ -1739,6 +1750,10 @@ export function HoleTrackingPage() {
           // WATCH's position — the source of truth — even when the phone's own
           // GPS has stopped in a pocket. This is what lets shot 1, 2, 3… record
           // without the phone being awake and located.
+          // Latch the club the watch had in hand BEFORE setLastImpact so it's in
+          // place when the strike-open effect reads captureShotMeta this render.
+          // Only overwrite when the watch actually sent one (older builds don't).
+          if (msg.clubId != null) watchStrikeClubIdRef.current = msg.clubId;
           setLastImpact({
             impactId: msg.impactId,
             capturedAt: msg.capturedAt,

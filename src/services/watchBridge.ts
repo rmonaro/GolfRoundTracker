@@ -184,6 +184,12 @@ export type WatchInboundMessage =
       capturedAt: number;
       swingType?: string;
       handSpeed?: number;
+      /** The club the watch had in hand at the strike (its displayed / selected
+       *  club — which may be a live GPS suggestion or a watch-side manual pick
+       *  the phone never saw). The phone latches THIS on the impact-opened shot
+       *  so the recorded club matches what the player saw on the watch, instead
+       *  of the phone's own selection (which it resets to null after each shot). */
+      clubId?: string | null;
       startLat?: number | null;
       startLng?: number | null;
     }
