@@ -73,6 +73,9 @@ struct WatchRoundState: Equatable {
     let shotDetection: Bool
     /// On/around the green (current hole) → show live distance in feet, not yards.
     let onGreen: Bool
+    /// Hole holed out (last shot a made putt). The prev/next hole arrows show
+    /// ONLY when this is true — hidden during active play.
+    let holeComplete: Bool
     /// Whether the user is within range of the course (phone's 2km gate).
     /// nil → unknown; the watch treats nil as at-course so a missing fix
     /// never blocks play. false → watch hides Track / Add Shot.
@@ -96,6 +99,7 @@ struct WatchRoundState: Equatable {
         shotsThisHole: nil, puttsThisHole: nil,
         suggestedClubId: nil, selectedClubId: nil,
         recordingShot: false, shotDetection: true, onGreen: false,
+        holeComplete: false,
         atCourse: nil, autoTracking: false, lastShotSummary: nil,
         holes: [], pinLat: nil, pinLng: nil, bag: []
     )
@@ -116,6 +120,7 @@ struct WatchRoundState: Equatable {
         recordingShot: Bool = false,
         shotDetection: Bool = true,
         onGreen: Bool = false,
+        holeComplete: Bool = false,
         atCourse: Bool? = nil,
         autoTracking: Bool = false,
         lastShotSummary: WatchShotSummary? = nil,
@@ -139,6 +144,7 @@ struct WatchRoundState: Equatable {
         self.recordingShot = recordingShot
         self.shotDetection = shotDetection
         self.onGreen = onGreen
+        self.holeComplete = holeComplete
         self.atCourse = atCourse
         self.autoTracking = autoTracking
         self.lastShotSummary = lastShotSummary
@@ -166,6 +172,7 @@ struct WatchRoundState: Equatable {
         self.recordingShot = (dict["recordingShot"] as? Bool) ?? false
         self.shotDetection = (dict["shotDetection"] as? Bool) ?? true
         self.onGreen = (dict["onGreen"] as? Bool) ?? false
+        self.holeComplete = (dict["holeComplete"] as? Bool) ?? false
         self.atCourse = dict["atCourse"] as? Bool
         self.autoTracking = (dict["autoTracking"] as? Bool) ?? false
         if let rawSummary = dict["lastShotSummary"] as? [String: Any] {
@@ -265,8 +272,12 @@ enum WatchOutboundMessage {
     /// detection. `capturedAt` is the watch clock (epoch ms); the phone trusts
     /// arrival time, not this, for recency. `location` is the watch's best
     /// recent fix at impact, if any.
-    case swingImpact(impactId: Int, capturedAt: Double, swingType: String,
-                     handSpeed: Int, location: CLLocation?, clubId: String?)
+    /// Carries the FULL motion metrics (same bundle as `.swingDetected`) so the
+    /// phone can store swing tempo/quality on the recorded round shot and use
+    /// `swingType` to classify it (migration 031). `handSpeed` on the wire is
+    /// `metrics.estimatedHandSpeed`.
+    case swingImpact(impactId: Int, capturedAt: Double, metrics: SwingMetrics,
+                     location: CLLocation?, clubId: String?)
 
     var payload: [String: Any] {
         switch self {
@@ -378,13 +389,27 @@ enum WatchOutboundMessage {
                 d["durationSeconds"] = h.durationSeconds
             }
             return d
-        case .swingImpact(let impactId, let capturedAt, let swingType, let handSpeed, let location, let clubId):
+        case .swingImpact(let impactId, let capturedAt, let m, let location, let clubId):
             var d: [String: Any] = [
                 "type": "roundImpact",
                 "impactId": impactId,
                 "capturedAt": capturedAt,
-                "swingType": swingType,
-                "handSpeed": handSpeed,
+                "swingType": m.swingType,
+                "handSpeed": m.estimatedHandSpeed,
+                // Full motion bundle (migration 031) — mirrors swingDetected so
+                // the round shot carries practice-grade swing tempo/quality.
+                "backswingTimeMs": m.backswingTimeMs,
+                "downswingTimeMs": m.downswingTimeMs,
+                "tempoRatio": m.tempoRatio,
+                "transitionScore": m.transitionScore,
+                "wristRotationScore": m.wristRotationScore,
+                "finishStabilityScore": m.finishStabilityScore,
+                "planeAxis": m.planeAxis,
+                "backswingRotation": m.backswingRotation,
+                "releaseTimingScore": m.releaseTimingScore,
+                "decelerationScore": m.decelerationScore,
+                "transitionDirectionScore": m.transitionDirectionScore,
+                "addressGravity": m.addressGravity,
                 "clubId": clubId ?? NSNull()
             ]
             if let l = location {
@@ -657,6 +682,14 @@ final class WatchSession: NSObject, ObservableObject {
         localSelectedClubId = clubId
     }
 
+    /// Clear the optimistic local club override — called on hole change so a
+    /// manual pick (e.g. the putter after holing out) doesn't leak into the next
+    /// hole, letting it re-derive the club from live distance / the pushed
+    /// per-hole suggestion.
+    func clearLocalSelectedClub() {
+        localSelectedClubId = nil
+    }
+
     /// Bump the optimistic shot count for `hole` up to at least `newCount`.
     func bumpPendingShotCount(hole: Int, to newCount: Int) {
         if newCount > (pendingShotCounts[hole] ?? 0) {
@@ -918,6 +951,13 @@ final class RoundShotController: ObservableObject {
     /// waggle / re-grip that crosses the impact threshold can't double-count.
     private var lastImpactAt: Date = .distantPast
     private static let refractoryS: TimeInterval = 1.5
+    /// Minimum peak impact (g) for a swing to count as a real shot in a ROUND.
+    /// A ball strike spikes hard; a practice swing that grazes the turf is much
+    /// softer. Just above the detector's own 2.5g impact floor so a soft brush is
+    /// filtered but real chips/drives pass. TUNABLE — lower if real shots are
+    /// missed, raise if practice swings still slip through. (Was 4.0, which
+    /// dropped real strikes on-course; lowered to 3.0 for balance.)
+    private static let roundMinImpactG = 3.0
 
     private init() {
         motion.onSwing = { [weak self] metrics in self?.handleStrike(metrics) }
@@ -947,6 +987,9 @@ final class RoundShotController: ObservableObject {
         // Air / practice swings (no impact spike) are exactly what we DON'T
         // want to gate on — drop them. Only real strikes pass.
         guard !m.isAirSwing else { return }
+        // Stricter than practice: require a firm strike so a practice swing that
+        // brushes the turf (a soft spike) doesn't record a phantom shot.
+        guard m.peakImpactG >= Self.roundMinImpactG else { return }
         let now = Date()
         guard now.timeIntervalSince(lastImpactAt) >= Self.refractoryS else { return }
         lastImpactAt = now
@@ -955,8 +998,9 @@ final class RoundShotController: ObservableObject {
         WatchSession.shared.send(.swingImpact(
             impactId: id,
             capturedAt: now.timeIntervalSince1970 * 1000,
-            swingType: m.swingType,
-            handSpeed: m.estimatedHandSpeed,
+            // Forward the FULL motion metrics (migration 031) so the round shot
+            // carries the same swing tempo/quality data practice records.
+            metrics: m,
             location: WatchSession.shared.lastLocation,
             // Tell the phone which club the watch had in hand so the shot latches
             // the right club even though the phone never saw a watch-side change.

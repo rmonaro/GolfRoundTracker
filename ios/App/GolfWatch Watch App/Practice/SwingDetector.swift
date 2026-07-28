@@ -29,6 +29,10 @@ final class SwingDetector {
     /// air swing. The calculator labels these and the phone keeps them out of
     /// the real-swing stats.
     private(set) var isAirSwing = false
+    /// Peak linear-accel magnitude (g) seen from the downswing through impact.
+    /// A real ball strike spikes far harder than a turf brush / rehearsal, so
+    /// round-mode uses this to reject practice swings that graze the ground.
+    private(set) var peakImpactG = 0.0
 
     // --- tunable thresholds ---
     /// Below this angular speed (rad/s) the wrist is considered quiet.
@@ -85,6 +89,7 @@ final class SwingDetector {
                 peakOmega = s.angularSpeed
                 peakOmegaTime = s.t
             }
+            if s.linearAccelMag > peakImpactG { peakImpactG = s.linearAccelMag }
             if s.linearAccelMag >= impactAccel {
                 // Real strike.
                 phase = .impact
@@ -101,6 +106,7 @@ final class SwingDetector {
             }
 
         case .impact:
+            if s.linearAccelMag > peakImpactG { peakImpactG = s.linearAccelMag }
             if s.angularSpeed < quietOmega {
                 if let since = quietSince {
                     if s.t - since > finishSettleS {
@@ -128,7 +134,7 @@ final class SwingDetector {
         guard samples.count > 3 else { return nil }
         return SwingWindow(
             samples: samples, tStart: a, tTop: top, tImpact: imp, tFinish: f,
-            isAirSwing: isAirSwing
+            isAirSwing: isAirSwing, peakImpactG: peakImpactG
         )
     }
 
@@ -136,6 +142,7 @@ final class SwingDetector {
         phase = .idle
         tStart = nil; tTop = nil; tImpact = nil; tFinish = nil
         isAirSwing = false
+        peakImpactG = 0
         quietSince = nil
         dominantAxis = 0
         lastSignAtDominant = 0

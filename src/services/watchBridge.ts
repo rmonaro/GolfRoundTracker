@@ -51,6 +51,12 @@ export interface WatchRoundState {
    */
   onGreen?: boolean;
   /**
+   * True once the hole is holed out (last shot a made putt). The watch shows the
+   * prev/next hole navigation arrows ONLY when this is true — they're hidden
+   * during active play so the player can't skip a hole mid-round.
+   */
+  holeComplete?: boolean;
+  /**
    * Whether the user is within range of the course (mirrors the phone's 2 km
    * at-course gate). Absent → treat as at-course (don't block). False → the
    * watch hides its Track / Add Shot controls and shows a "not in range" note,
@@ -184,6 +190,22 @@ export type WatchInboundMessage =
       capturedAt: number;
       swingType?: string;
       handSpeed?: number;
+      // Full motion-metric bundle (migration 031). Round mode now forwards the
+      // same rich SwingMetrics the watch computes in practice, latched onto the
+      // shot this strike opens. All optional — older watch builds omit them.
+      backswingTimeMs?: number;
+      downswingTimeMs?: number;
+      tempoRatio?: number;
+      transitionScore?: number;
+      wristRotationScore?: number;
+      finishStabilityScore?: number;
+      planeAxis?: number[];
+      backswingRotation?: number;
+      releaseTimingScore?: number;
+      decelerationScore?: number;
+      transitionDirectionScore?: number;
+      addressGravity?: number[];
+      heartRate?: number;
       /** The club the watch had in hand at the strike (its displayed / selected
        *  club — which may be a live GPS suggestion or a watch-side manual pick
        *  the phone never saw). The phone latches THIS on the impact-opened shot

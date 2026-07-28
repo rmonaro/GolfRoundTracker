@@ -23,6 +23,8 @@ struct SwingWindow {
     let tImpact: TimeInterval
     let tFinish: TimeInterval
     let isAirSwing: Bool
+    /// Peak linear-accel (g) through impact — how hard the strike was.
+    let peakImpactG: Double
 }
 
 /// Reduced, compact per-swing output. Every field is a MOTION-BASED ESTIMATE
@@ -46,4 +48,7 @@ struct SwingMetrics {
     let decelerationScore: Int      // 0-100 accelerating-through-impact vs quitting
     let transitionDirectionScore: Int // 0-100 axis consistency (over-the-top proxy)
     let addressGravity: [Double]    // gravity dir [x,y,z] at takeaway (setup compare)
+    /// Peak linear-accel (g) through impact. Round-mode gates on this to reject
+    /// practice swings / turf brushes that spike far softer than a ball strike.
+    let peakImpactG: Double
 }

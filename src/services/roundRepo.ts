@@ -167,6 +167,10 @@ export const roundRepo = {
     calculated_distance?: number | null;
     /** Auto-detected shots pass false (awaiting review); omit/true for manual. */
     verified?: boolean;
+    // Motion swing data from the watch (migration 031).
+    swing_type?: import('@/models').SwingTypeValue | null;
+    swing_metrics?: import('@/models').RoundSwingMetrics | null;
+    watch_impact_id?: number | null;
   }): Promise<Shot> {
     const { data, error } = await supabase.from('shots').insert(payload).select('*').single();
     if (error) throw toAppError(error, 'Could not add shot');
@@ -210,6 +214,21 @@ export const roundRepo = {
   async deleteShot(shotId: string): Promise<void> {
     const { error } = await supabase.from('shots').delete().eq('id', shotId);
     if (error) throw toAppError(error, 'Could not delete shot');
+  },
+
+  /**
+   * Idempotency check for watch-detected shots (migration 031): true if a shot
+   * for this round already carries the given watch impact id. Guards against the
+   * same strike being committed twice (auto-track + a racing manual add).
+   */
+  async shotExistsForImpact(roundId: string, watchImpactId: number): Promise<boolean> {
+    const { count, error } = await supabase
+      .from('shots')
+      .select('id', { count: 'exact', head: true })
+      .eq('round_id', roundId)
+      .eq('watch_impact_id', watchImpactId);
+    if (error) throw toAppError(error, 'Could not check shot');
+    return (count ?? 0) > 0;
   }
 };
 

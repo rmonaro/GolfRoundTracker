@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   Box,
   Button,
@@ -20,12 +20,12 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { ToggleGroup } from '@/components/ui/ToggleGroup';
-import { useCourses, useStartRound } from '@/features/round/useStartRound';
+import { useCourses, useCourseTees, useStartRound } from '@/features/round/useStartRound';
 import { useSearchCourses, useImportCourse } from '@/admin/hooks/useCoursesApi';
 import { useAuthStore } from '@/stores/authStore';
 import { toAppError } from '@/services/errors';
 import { watchBridge } from '@/services/watchBridge';
-import type { Course } from '@/models';
+import type { Course, CourseTee } from '@/models';
 
 type HoleChoice = '9' | '18' | 'custom';
 
@@ -36,6 +36,7 @@ export function StartRoundPage() {
 
   const [mode, setMode] = useState<'existing' | 'manual'>('existing');
   const [selectedCourseId, setSelectedCourseId] = useState<string>('');
+  const [selectedTeeId, setSelectedTeeId] = useState<string>('');
   const [courseSearch, setCourseSearch] = useState<string>('');
   const [courseName, setCourseName] = useState('');
   const [teeBox, setTeeBox] = useState('White');
@@ -57,6 +58,25 @@ export function StartRoundPage() {
   const [roundDate, setRoundDate] = useState<string>(() => toLocalDateInput(new Date()));
   const [error, setError] = useState<string | null>(null);
 
+  // Named tee sets for the selected existing course (Blue/White/Red…). Empty for
+  // manual entry or courses with no imported tee data.
+  const teesQuery = useCourseTees(mode === 'existing' ? selectedCourseId : null);
+  const tees = teesQuery.data ?? [];
+  const selectedTee = tees.find((t) => t.id === selectedTeeId) ?? null;
+
+  // Reset the tee choice whenever the course changes.
+  useEffect(() => {
+    setSelectedTeeId('');
+  }, [selectedCourseId]);
+
+  // Auto-pick a sensible default tee once tees load (a "White"/"Regular"-ish
+  // middle tee, else the middle of the yardage-sorted list) so the picker isn't
+  // left blank. Only fires while nothing is chosen yet.
+  useEffect(() => {
+    if (selectedTeeId || tees.length === 0) return;
+    setSelectedTeeId(defaultTee(tees).id);
+  }, [tees, selectedTeeId]);
+
   const onStart = async () => {
     setError(null);
     try {
@@ -68,11 +88,16 @@ export function StartRoundPage() {
           ? {
               id: selected.id,
               name: selected.name,
-              teeBox: selected.tee_box,
-              courseRating: selected.course_rating,
-              slopeRating: selected.slope_rating,
+              // A chosen tee set overrides the course-level tee/rating/yardage
+              // and seeds per-hole yardages for the round.
+              teeBox: selectedTee?.tee_name ?? selected.tee_box,
+              courseRating: selectedTee?.course_rating ?? selected.course_rating,
+              slopeRating: selectedTee?.slope_rating ?? selected.slope_rating,
               totalPar: selected.total_par ?? (Number(totalPar) || 72),
-              totalYardage: selected.total_yardage
+              totalYardage: selectedTee?.total_yards ?? selected.total_yardage,
+              teeId: selectedTee?.id ?? null,
+              teeName: selectedTee?.tee_name ?? null,
+              teeHoleYardages: selectedTee ? teeHoleYardages(selectedTee) : null
             }
           : {
               name: courseName.trim(),
@@ -219,6 +244,21 @@ export function StartRoundPage() {
             )}
           </CardContent>
         </Card>
+
+        {mode === 'existing' && selectedCourseId && tees.length > 0 && (
+          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
+            <CardContent>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
+              >
+                Tee Box
+              </Typography>
+              <TeePicker tees={tees} value={selectedTeeId} onSelect={setSelectedTeeId} />
+            </CardContent>
+          </Card>
+        )}
 
         {mode === 'manual' && (
           <>
@@ -450,7 +490,7 @@ function CoursePicker({
           >
             <Stack spacing={1}>
               {filtered.map((c) => {
-                const isApi = c.source === 'api';
+                const isVerified = !!c.verified;
                 const isSelected = c.id === value;
                 const subtitle = [c.club_name, [c.city, c.state].filter(Boolean).join(', ')]
                   .filter(Boolean)
@@ -472,7 +512,7 @@ function CoursePicker({
                         <Typography variant="body1" sx={{ fontWeight: 500 }} noWrap>
                           {c.name}
                         </Typography>
-                        {isApi && (
+                        {isVerified && (
                           <Chip
                             size="small"
                             color="primary"
@@ -669,4 +709,86 @@ function integerOrNull(s: string): number | null {
   if (s.trim() === '') return null;
   const n = Number(s);
   return Number.isFinite(n) ? Math.round(n) : null;
+}
+
+// ---------------------------------------------------------------------------
+// Tee picker
+// ---------------------------------------------------------------------------
+
+interface TeePickerProps {
+  tees: CourseTee[];
+  value: string;
+  onSelect: (id: string) => void;
+}
+
+function TeePicker({ tees, value, onSelect }: TeePickerProps) {
+  return (
+    <Stack spacing={1} mt={2}>
+      {tees.map((t) => {
+        const isSelected = t.id === value;
+        const meta = [
+          t.total_yards ? `${t.total_yards.toLocaleString()} yds` : null,
+          t.course_rating != null && t.slope_rating != null
+            ? `${t.course_rating.toFixed(1)} / ${t.slope_rating}`
+            : null
+        ]
+          .filter(Boolean)
+          .join('  ·  ');
+        return (
+          <Card
+            key={t.id}
+            elevation={0}
+            sx={{
+              bgcolor: 'background.default',
+              border: 1,
+              borderColor: isSelected ? 'primary.main' : 'divider'
+            }}
+          >
+            <CardActionArea onClick={() => onSelect(t.id)} sx={{ minHeight: 52 }}>
+              <CardContent sx={{ py: 1.25 }}>
+                <Stack direction="row" alignItems="center" spacing={0.75}>
+                  <Typography variant="body1" sx={{ fontWeight: 500 }} noWrap>
+                    {t.tee_name}
+                  </Typography>
+                  {t.gender && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={t.gender === 'female' ? "Women's" : "Men's"}
+                      sx={{ height: 20, '.MuiChip-label': { px: 0.75, fontSize: '0.7rem' } }}
+                    />
+                  )}
+                </Stack>
+                {meta && (
+                  <Typography variant="caption" color="text.secondary" display="block">
+                    {meta}
+                  </Typography>
+                )}
+              </CardContent>
+            </CardActionArea>
+          </Card>
+        );
+      })}
+    </Stack>
+  );
+}
+
+/**
+ * Pick a sensible default tee: a "White"/"Regular"-named men's tee if present,
+ * otherwise the middle of the (yardage-desc) list — i.e. a mid-length tee rather
+ * than the championship or forward extreme.
+ */
+function defaultTee(tees: CourseTee[]): CourseTee {
+  const named = tees.find((t) => /white|regular/i.test(t.tee_name) && t.gender !== 'female');
+  if (named) return named;
+  return tees[Math.floor(tees.length / 2)] ?? tees[0];
+}
+
+/** Map a tee's per-hole detail to { [holeNumber]: yardage } (index 0 = hole 1). */
+function teeHoleYardages(tee: CourseTee): Record<number, number> {
+  const out: Record<number, number> = {};
+  (tee.holes ?? []).forEach((h, i) => {
+    if (h?.yardage != null) out[i + 1] = h.yardage;
+  });
+  return out;
 }

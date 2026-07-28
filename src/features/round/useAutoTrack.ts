@@ -40,6 +40,12 @@ const MIN_SHOT_M = 5;
  */
 export interface ShotMeta {
   clubId: string | null;
+  /** Motion swing data latched from the watch strike that opened this shot
+   *  (migration 031). Null when the strike carried no metrics (older builds /
+   *  phone-side shots). */
+  swingType?: import('@/models').SwingTypeValue | null;
+  swingMetrics?: import('@/models').RoundSwingMetrics | null;
+  watchImpactId?: number | null;
 }
 
 export interface ShotDetected {
@@ -126,6 +132,12 @@ export interface UseAutoTrackResult {
   clearPendingShot: () => void;
   /** True while a strike has opened a shot that hasn't been closed yet. */
   hasPendingShot: () => boolean;
+  /**
+   * Reactive launch point of the in-flight (not-yet-committed) shot, or null.
+   * Unlike `hasPendingShot()` (a ref read), this is React state so the UI can
+   * render a provisional "shot in progress" marker live as it's tracked.
+   */
+  pendingStart: { lat: number; lng: number } | null;
 }
 
 export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
@@ -163,6 +175,11 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
     t: number;
     meta: ShotMeta | null;
   } | null>(null);
+  // Reactive mirror of inFlightRef's launch point so the UI can show a
+  // provisional "shot in progress" marker (the ref alone doesn't re-render).
+  const [pendingStart, setPendingStart] = useState<{ lat: number; lng: number } | null>(
+    null
+  );
 
   useEffect(() => {
     impactPrimaryRef.current = impactPrimary;
@@ -228,6 +245,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
       t: Date.now(),
       meta: captureShotMetaRef.current?.() ?? null
     };
+    setPendingStart({ lat: fix.lat, lng: fix.lng });
   }, [lastImpact]);
 
   // Resolve the in-flight shot immediately (hole-out, or right before a manual
@@ -238,6 +256,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
       const prev = inFlightRef.current;
       if (!prev) return null;
       inFlightRef.current = null;
+      setPendingStart(null);
       const endPos =
         end ??
         (latestFixRef.current
@@ -264,6 +283,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
 
   const clearPendingShot = useCallback(() => {
     inFlightRef.current = null;
+    setPendingStart(null);
   }, []);
 
   const hasPendingShot = useCallback(() => inFlightRef.current != null, []);
@@ -341,6 +361,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
     setBallPos,
     resolvePendingShot,
     clearPendingShot,
-    hasPendingShot
+    hasPendingShot,
+    pendingStart
   };
 }

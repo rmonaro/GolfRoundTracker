@@ -145,6 +145,11 @@ struct HoleHomeView: View {
             if let local = localHoleNumber, newHole == local {
                 localHoleNumber = nil
             }
+            // New hole from the phone → drop the watch-side manual club pick so
+            // the next hole re-derives its club from live distance / the pushed
+            // per-hole suggestion instead of staying stuck on the previous hole's
+            // club (e.g. the putter after holing out).
+            session.clearLocalSelectedClub()
         }
         // Remember the last real club we resolved so effectiveClubId never has to
         // blank out when the phone momentarily provides no selection.
@@ -187,6 +192,10 @@ struct HoleHomeView: View {
         guard next != current else { return }
         // No override needed once we're back on the phone's own hole.
         localHoleNumber = next == s.holeNumber ? nil : next
+        // Advancing holes on the watch clears the manual club pick too, so the
+        // new hole starts from its own distance-based suggestion (not the putter
+        // carried over from holing out on the previous hole).
+        session.clearLocalSelectedClub()
         session.send(.navigateHole(direction: delta > 0 ? "next" : "prev"))
     }
 
@@ -286,12 +295,27 @@ struct HoleHomeView: View {
     /// backgrounded), so the club auto-follows as you walk up to the ball. A
     /// manual pick ON THE WATCH (localSelectedClubId) still wins.
     private func rawEffectiveClubId(_ s: WatchRoundState) -> String? {
+        // On the green, default to the putter (mirrors the phone's auto-select)
+        // UNLESS the player has manually picked another club on the watch to chip
+        // from the fringe. This keeps the club consistent with the putt view gate.
+        if isOnGreen(s), session.localSelectedClubId == nil,
+           let putter = s.bag.first(where: { $0.isPutter })?.id {
+            return putter
+        }
         let liveClub = liveSuggestedClubId(s)
         let pushedSuggested = displayedHole(s)?.suggestedClubId ?? s.suggestedClubId
         if isPreviewing(s) {
             return session.localSelectedClubId ?? liveClub ?? pushedSuggested
         }
         return session.localSelectedClubId ?? liveClub ?? s.selectedClubId ?? pushedSuggested
+    }
+
+    /// True when the club the watch is set to is the putter — gates the putt view
+    /// so picking a wedge/iron on the green (to chip) hides putting, mirroring the
+    /// phone. Re-arms when the putter is picked again or the green auto-default
+    /// above kicks in.
+    private func clubIsPutter(_ s: WatchRoundState) -> Bool {
+        s.bag.first(where: { $0.id == effectiveClubId(s) })?.isPutter ?? false
     }
 
     /// Bottom controls — a 2×2 grid:
@@ -307,16 +331,29 @@ struct HoleHomeView: View {
     /// Off-course the action buttons are hidden (mirroring the phone, which
     /// won't start tracking out of range); only a "not in range" note + the
     /// hole arrows remain.
+    /// Hole is holed out — from the phone snapshot (last shot a made putt) or the
+    /// watch's own optimistic "Made" tap. Gates the prev/next hole arrows, which
+    /// are hidden during active play so a hole can't be skipped mid-round.
+    private func holeCompleted(_ s: WatchRoundState) -> Bool {
+        s.holeComplete || madePuttHole == displayedHoleNumber(s)
+    }
+
     @ViewBuilder
     private func bottomControls(_ s: WatchRoundState) -> some View {
-        if isOnGreen(s) {
-            // Ball's on the green — swap Track / Add Shot for the putt recorder,
-            // mirroring the phone's putting panel. Uses the watch's OWN on-green
-            // test (phone result OR watch GPS-within-radius) so it arms even when
-            // the phone is backgrounded. Checked BEFORE the at-course gate: being
-            // on the green means you're on the course, and it lets the putt view
-            // be exercised even when the at-course heuristic reads false.
+        if isOnGreen(s) && clubIsPutter(s) {
+            // Ball's on the green AND the putter is the active club — swap Track /
+            // Add Shot for the putt recorder, mirroring the phone's putting panel.
+            // Picking a non-putter (to chip from the fringe) falls through to the
+            // normal controls. Uses the watch's OWN on-green test (phone result OR
+            // watch GPS-within-radius) so it arms even when the phone is
+            // backgrounded. Checked BEFORE the at-course gate: being on the green
+            // means you're on the course.
             puttControls(s)
+        } else if holeCompleted(s) {
+            // Hole is done but not in the putt view (e.g. walked off the green) —
+            // NOW show the prev/next arrows so the player can move on. Arrows are
+            // intentionally absent during active play.
+            navRow(s)
         } else if s.atCourse == false {
             VStack(spacing: 6) {
                 HStack(spacing: 4) {
@@ -330,7 +367,6 @@ struct HoleHomeView: View {
                         .lineLimit(2)
                         .minimumScaleFactor(0.7)
                 }
-                navRow(s)
             }
         } else {
             // Optimistic local override wins so the button flips the instant
@@ -358,7 +394,6 @@ struct HoleHomeView: View {
                         recordManualShot(s)
                     }
                 }
-                navRow(s)
             }
         }
     }
@@ -624,17 +659,17 @@ struct HoleHomeView: View {
             _ = club
             showingShotFlow = true
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 3) {
                 Image(systemName: (club?.isPutter ?? false) ? "circle.dotted" : "figure.golf")
-                    .font(.system(size: 11))
+                    .font(.system(size: 9))
                     .foregroundColor(.yellow)
                 Text(club?.name ?? "Club")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
             .background(Color.green.opacity(0.55))
             .clipShape(Capsule())
         }
@@ -710,7 +745,7 @@ struct HoleHomeView: View {
     /// (pocketed during play), so the Putt view never armed. This radius is the
     /// watch's self-sufficient fallback. Tunable: bigger catches long putts from
     /// the fringe, smaller avoids arming on a chip from just off the green.
-    private let onGreenRadiusYards: Double = 15
+    private let onGreenRadiusYards: Double = 8
 
     /// Effective on-green for the DISPLAYED hole: the phone's exact result when
     /// it's awake, OR the watch's own GPS-within-radius test so putting mode

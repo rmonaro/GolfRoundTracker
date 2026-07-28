@@ -86,6 +86,9 @@ interface HolesTabShot {
   end_lng: number | null;
   calculated_distance: number | null;
   verified: boolean;
+  // Motion swing data captured by the watch on auto-detected shots (migration 031).
+  swing_type: string | null;
+  swing_metrics: import('@/models').RoundSwingMetrics | null;
 }
 
 export function RoundSummaryPage() {
@@ -127,12 +130,20 @@ export function RoundSummaryPage() {
       let totalPar = 0;
       for (const h of holes) {
         const holeShots = shots.filter((sh) => sh.hole_id === h.id);
-        const livePenalty = holeShots.filter(
-          (sh) =>
-            sh.penalty_type != null &&
-            (STROKE_PENALTY_TYPES as readonly string[]).includes(sh.penalty_type)
-        ).length;
-        const holeScore = holeShots.length + livePenalty;
+        // Same shots-first / cached-column fallback as the scorecard below, so a
+        // hole whose shots didn't map still contributes its recorded strokes to
+        // the headline total instead of counting as unplayed.
+        let holeScore: number;
+        if (holeShots.length > 0) {
+          const livePenalty = holeShots.filter(
+            (sh) =>
+              sh.penalty_type != null &&
+              (STROKE_PENALTY_TYPES as readonly string[]).includes(sh.penalty_type)
+          ).length;
+          holeScore = holeShots.length + livePenalty;
+        } else {
+          holeScore = (h.strokes ?? 0) + (h.penalty_strokes ?? 0);
+        }
         totalScore += holeScore;
         if (holeScore > 0) totalPar += h.par;
       }
@@ -235,17 +246,27 @@ export function RoundSummaryPage() {
   // source of truth — every shot row is durable.
   const holes = rawHoles.map((h) => {
     const holeShots = shots.filter((s) => s.hole_id === h.id);
-    const liveStrokes = holeShots.length;
-    const livePutts = holeShots.filter((s) => {
-      if (!s.club_id) return false;
-      const c = bag.find((b) => b.clubId === s.club_id);
-      return c?.category === 'putter';
-    }).length;
-    const livePenalty = holeShots.filter(
-      (s) =>
-        s.penalty_type != null &&
-        (STROKE_PENALTY_TYPES as readonly string[]).includes(s.penalty_type)
-    ).length;
+    // Shots are the source of truth WHEN they mapped to this hole. But a hole can
+    // end up with zero attached shots even though it was played — e.g. watch
+    // shots that landed with a mismatched/stale hole_id — which used to blank the
+    // whole scorecard ("—" on every hole). Fall back to the cached round_holes
+    // columns (written during live play) so the score still shows.
+    const hasShots = holeShots.length > 0;
+    const liveStrokes = hasShots ? holeShots.length : h.strokes ?? 0;
+    const livePutts = hasShots
+      ? holeShots.filter((s) => {
+          if (!s.club_id) return false;
+          const c = bag.find((b) => b.clubId === s.club_id);
+          return c?.category === 'putter';
+        }).length
+      : h.putts ?? 0;
+    const livePenalty = hasShots
+      ? holeShots.filter(
+          (s) =>
+            s.penalty_type != null &&
+            (STROKE_PENALTY_TYPES as readonly string[]).includes(s.penalty_type)
+        ).length
+      : h.penalty_strokes ?? 0;
     return {
       ...h,
       strokes: liveStrokes,
@@ -1494,6 +1515,7 @@ function HolesTab({
                   const dist = formatShotDistance(s.distance, s.distance_unit);
                   const outcome = formatShotOutcome(s.target_type, s.target_result, s.lie);
                   const penalty = formatPenalty(s.penalty_type);
+                  const swingSummary = formatSwingSummary(s.swing_type, s.swing_metrics);
                   const canMoveUp = sIdx > 0;
                   const canMoveDown = sIdx < sArr.length - 1;
                   return (
@@ -1591,6 +1613,20 @@ function HolesTab({
                           {[outcome, penalty].filter(Boolean).join(' · ') || '—'}
                           {s.notes ? ` · ${s.notes}` : ''}
                         </Typography>
+                        {swingSummary && (
+                          <Typography
+                            variant="caption"
+                            noWrap
+                            sx={{
+                              display: 'block',
+                              color: 'primary.light',
+                              fontWeight: 600,
+                              fontSize: '0.66rem'
+                            }}
+                          >
+                            {swingSummary}
+                          </Typography>
+                        )}
                         {!s.verified && (
                           <Typography
                             variant="caption"
@@ -2311,6 +2347,23 @@ function formatPenalty(penalty: string | null): string {
 
 function capitalize(s: string): string {
   return s.length > 0 ? s[0].toUpperCase() + s.slice(1) : s;
+}
+
+/**
+ * Compact swing-metrics line for a shot the watch auto-detected (migration 031).
+ * Returns '' when there's no motion data (manual/historical shots). RELATIVE
+ * motion estimates — not launch-monitor numbers.
+ */
+function formatSwingSummary(
+  swingType: string | null,
+  metrics: import('@/models').RoundSwingMetrics | null
+): string {
+  if (!metrics) return '';
+  const parts: string[] = [];
+  if (swingType && swingType !== 'air') parts.push(capitalize(swingType));
+  if (metrics.tempoRatio != null) parts.push(`Tempo ${metrics.tempoRatio.toFixed(1)}`);
+  if (metrics.estimatedHandSpeed != null) parts.push(`Speed ${metrics.estimatedHandSpeed}`);
+  return parts.join(' · ');
 }
 
 function fairwayDisplay(par: number, result: string | null): string {

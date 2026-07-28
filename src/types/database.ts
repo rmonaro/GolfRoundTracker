@@ -97,6 +97,43 @@ export interface CourseRow {
   osm_error: string | null;
   source: CourseSource | null;
   created_by_user: string | null;
+  // Admin verification (migration 030). `verified` courses are visible to every
+  // user (like source='api' library courses). Backfilled true for source='api'.
+  verified: boolean | null;
+  verified_by: string | null;
+  verified_at: string | null;
+}
+
+export type TeeGender = 'male' | 'female';
+export type CourseTeeSource = 'api' | 'osm' | 'manual';
+
+/** Per-hole detail within a tee set: index 0 = hole 1. */
+export interface TeeHoleDetail {
+  par: number | null;
+  yardage: number | null;
+  handicap: number | null;
+}
+
+/**
+ * A named tee set for a course (migration 029) — "Blue", "White", "Red"…
+ * Sourced from GolfCourseAPI scorecard (`source='api'`) or named OSM tee boxes
+ * (`source='osm'`). Each carries its own ratings + per-hole yardage list.
+ */
+export interface CourseTeeRow {
+  id: string;
+  course_id: string;
+  gender: TeeGender | null;
+  tee_name: string;
+  course_rating: number | null;
+  slope_rating: number | null;
+  bogey_rating: number | null;
+  total_yards: number | null;
+  total_meters: number | null;
+  par_total: number | null;
+  number_of_holes: number | null;
+  holes: TeeHoleDetail[] | null;
+  source: CourseTeeSource;
+  created_at: string;
 }
 
 export type OrientationConfidence = 'confirmed' | 'reversed' | 'assumed' | 'manual';
@@ -160,6 +197,9 @@ export interface RoundRow {
   tm_registration_id: string | null;
   tm_round_number: number | null;
   tm_tournament_slug: string | null;
+  // Selected tee set (migration 029). Null for manual/free-text tee rounds.
+  tee_id: string | null;
+  tee_name: string | null;
 }
 
 export interface RoundHoleRow {
@@ -202,7 +242,39 @@ export interface ShotRow {
   /** False for auto-detected (watch impact) shots awaiting golfer review;
    *  true for manual/historical shots. DB default true (migration 020). */
   verified: boolean;
+  // Motion swing data from the watch on auto-detected shots (migration 031).
+  /** full | pitch | chip | putt | air — motion classification of the swing. */
+  swing_type: SwingTypeValue | null;
+  /** Full motion-metric bundle (camelCase keys) — see RoundSwingMetrics. */
+  swing_metrics: RoundSwingMetrics | null;
+  /** Watch's monotonic per-round impact id; used for shot dedup/idempotency. */
+  watch_impact_id: number | null;
   created_at: string;
+}
+
+// SwingTypeValue ('full' | 'pitch' | 'chip' | 'putt' | 'air') is declared in the
+// practice-swing section below and reused here for round shots.
+
+/**
+ * Motion-derived swing metrics forwarded by the watch on a round strike
+ * (`roundImpact`) and stored on the shot. RELATIVE/estimated signals only — not
+ * launch-monitor measurements. Keys mirror the watch `swingDetected` payload.
+ */
+export interface RoundSwingMetrics {
+  backswingTimeMs?: number;
+  downswingTimeMs?: number;
+  tempoRatio?: number;
+  transitionScore?: number;
+  estimatedHandSpeed?: number;
+  wristRotationScore?: number;
+  finishStabilityScore?: number;
+  planeAxis?: number[];
+  backswingRotation?: number;
+  releaseTimingScore?: number;
+  decelerationScore?: number;
+  transitionDirectionScore?: number;
+  addressGravity?: number[];
+  heartRate?: number;
 }
 
 // --- Apple Watch motion-based swing feedback (migration 017) ---------------

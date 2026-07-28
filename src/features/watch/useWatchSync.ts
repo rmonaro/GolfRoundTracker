@@ -344,6 +344,9 @@ function buildSnapshot({
     recordingShot,
     shotDetection,
     onGreen,
+    // Hole holed-out (last shot a made putt). The watch shows the prev/next
+    // hole arrows only when this is true — hidden during active play.
+    holeComplete,
     atCourse: atCourse ?? undefined,
     autoTracking,
     lastShotSummary: lastShotSummary ?? undefined,

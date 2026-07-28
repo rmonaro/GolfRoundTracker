@@ -3,6 +3,7 @@ import { Box, Button, IconButton, Stack, Typography } from '@mui/material';
 import RemoveRoundedIcon from '@mui/icons-material/RemoveRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import FlagCircleRoundedIcon from '@mui/icons-material/FlagCircleRounded';
+import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 
 interface PuttModePanelProps {
   holeNumber: number;
@@ -15,6 +16,13 @@ interface PuttModePanelProps {
    * distance to the flag captured at the stroke. Null when no GPS/pin is known.
    */
   onPutt: (made: boolean, distanceFeet: number | null) => void;
+  /**
+   * Dismiss the panel without recording a putt — e.g. the player is on the
+   * fringe and wants to chip. Reveals the normal club picker so they can select
+   * a non-putter. Putting re-arms when they pick the putter again. Optional so
+   * existing callers that always want the panel up can omit it.
+   */
+  onClose?: () => void;
 }
 
 /**
@@ -28,7 +36,8 @@ export function PuttModePanel({
   holeNumber,
   liveFeetToPin,
   puttsThisHole,
-  onPutt
+  onPutt,
+  onClose
 }: PuttModePanelProps) {
   // Manual override of the captured distance. Null → track the live reading.
   const [override, setOverride] = useState<number | null>(null);
@@ -76,9 +85,21 @@ export function PuttModePanel({
         >
           {`Putting · Hole ${holeNumber}`}
         </Typography>
-        <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.7)', fontWeight: 700 }}>
-          {`Putts: ${puttsThisHole}`}
-        </Typography>
+        <Stack direction="row" alignItems="center" spacing={0.5}>
+          <Typography variant="caption" sx={{ color: 'rgba(255,255,255,0.7)', fontWeight: 700 }}>
+            {`Putts: ${puttsThisHole}`}
+          </Typography>
+          {onClose && (
+            <IconButton
+              aria-label="close putting panel"
+              size="small"
+              onClick={onClose}
+              sx={{ color: 'rgba(255,255,255,0.7)', ml: 0.5, p: 0.25 }}
+            >
+              <CloseRoundedIcon sx={{ fontSize: 18 }} />
+            </IconButton>
+          )}
+        </Stack>
       </Stack>
 
       {/* To-flag distance with quick − / + correction. */}
