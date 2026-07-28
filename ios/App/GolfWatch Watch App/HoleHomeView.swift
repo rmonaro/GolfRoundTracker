@@ -38,6 +38,8 @@ struct HoleHomeView: View {
     /// matches, the putt controls are LOCKED (show "Holed out") so no number of
     /// extra taps can add another made putt — the reported multi-putt bug.
     @State private var madePuttHole: Int?
+    /// Brief confirmation flash after tapping "Set flag here" (pin sent to phone).
+    @State private var flagJustSet = false
 
     var body: some View {
         let s = session.state
@@ -111,6 +113,7 @@ struct HoleHomeView: View {
                 Text("Hole \(displayedHoleNumber(s).map(String.init) ?? "—")")
                     .font(.headline)
                 Spacer()
+                setFlagButton
                 if let par = displayedHole(s)?.par ?? s.par {
                     Text("Par \(par)")
                         .font(.caption2)
@@ -158,6 +161,26 @@ struct HoleHomeView: View {
         }
         .onAppear {
             if let id = rawEffectiveClubId(s) { session.noteResolvedClub(id) }
+        }
+    }
+
+    /// "Set flag here" — sends the watch's current GPS as the hole's pin. Handy
+    /// on the green (walk to the flag, tap) and still available after hole-out.
+    /// Flashes a check for ~1.5s on a successful send.
+    @ViewBuilder
+    private var setFlagButton: some View {
+        Button {
+            if session.setPinHere() { flagJustSet = true }
+        } label: {
+            Image(systemName: flagJustSet ? "checkmark.circle.fill" : "flag.fill")
+                .font(.system(size: 13))
+                .foregroundColor(flagJustSet ? .green : .yellow)
+        }
+        .buttonStyle(.plain)
+        .task(id: flagJustSet) {
+            guard flagJustSet else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            flagJustSet = false
         }
     }
 

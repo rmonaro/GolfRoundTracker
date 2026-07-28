@@ -133,6 +133,14 @@ export type WatchInboundMessage =
     }
   | { type: 'navigateHole'; direction: 'prev' | 'next' }
   | {
+      /** Watch user tapped "Set flag here" while standing at the flag. Carries
+       *  the watch's current GPS; the phone moves the current hole's pin to it
+       *  (same shared-course pin the phone's Move Pin button updates). */
+      type: 'setPin';
+      lat: number;
+      lng: number;
+    }
+  | {
       /** Watch toggled round-wide auto-tracking. The phone enables/disables its
        *  own auto-track (respecting the 2 km at-course gate) and echoes the
        *  resulting state back via the snapshot's `autoTracking`. */

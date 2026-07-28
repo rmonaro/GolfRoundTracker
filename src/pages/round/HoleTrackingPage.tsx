@@ -1779,6 +1779,13 @@ export function HoleTrackingPage() {
   const bagClubsRef = useRef(bagClubs);
   const applyAutoTrackRef = useRef(applyAutoTrack);
   const recordWatchAutoShotRef = useRef(recordWatchAutoShot);
+  // Current pin/layout context, kept fresh for the pinned watch-message handler
+  // (which can't close over the latest layoutQuery/hole). Used by `setPin`.
+  const pinCtxRef = useRef<{
+    holeId: string | null;
+    courseId: string | null;
+    holeNumber: number;
+  }>({ holeId: null, courseId: null, holeNumber: hole.holeNumber });
   useEffect(() => {
     goPrevRef.current = goPrev;
     goNextRef.current = goNext;
@@ -1786,6 +1793,11 @@ export function HoleTrackingPage() {
     bagClubsRef.current = bagClubs;
     applyAutoTrackRef.current = applyAutoTrack;
     recordWatchAutoShotRef.current = recordWatchAutoShot;
+    pinCtxRef.current = {
+      holeId: layoutQuery.data?.hole?.id ?? null,
+      courseId: active?.courseId ?? null,
+      holeNumber: hole.holeNumber
+    };
   });
   useEffect(() => {
     let handle: { remove: () => Promise<void> } | null = null;
@@ -1794,6 +1806,25 @@ export function HoleTrackingPage() {
         if (msg.type === 'navigateHole') {
           if (msg.direction === 'prev') goPrevRef.current();
           else if (msg.direction === 'next') goNextRef.current();
+          return;
+        }
+        if (msg.type === 'setPin') {
+          // Watch tapped "Set flag here" at the flag — move the current hole's
+          // pin to the watch's GPS. Same shared-course pin the phone's Move Pin
+          // updates. Best-effort; ignore if the layout hole isn't loaded.
+          const { holeId, courseId, holeNumber } = pinCtxRef.current;
+          if (holeId) {
+            void (async () => {
+              try {
+                await holesRepo.setPin(holeId, msg.lng, msg.lat);
+                queryClient.invalidateQueries({
+                  queryKey: ['hole-layout', courseId, holeNumber]
+                });
+              } catch (err) {
+                console.error('[watch] setPin failed', err);
+              }
+            })();
+          }
           return;
         }
         if (msg.type === 'setAutoTrack') {
@@ -2411,12 +2442,13 @@ export function HoleTrackingPage() {
         </Stack>
 
         {/* Move Pin — small icon button on the top-center. Available throughout
-            the hole (not only on the green) so the flag can be repositioned per
-            hole any time. Tap to enter pin-edit mode; the next tap on the map
-            saves the new pin position to the shared course library so every
-            other player inherits it. While active, shows a banner + Reset
-            to clear the override and revert to the course coord. */}
-        {!holeComplete && (
+            the hole AND after hole-out, so the flag can be repositioned per hole
+            any time. Tap to enter pin-edit mode; the next tap on the map saves
+            the new pin to the shared course library so every player inherits it.
+            (When the hole is complete, map taps stage a shot UNLESS pin-edit is
+            active — the pin-edit branch is checked first — so the two don't
+            conflict.) While active, shows a banner + Reset to revert. */}
+        {(
           <IconButton
             aria-label={pinEditMode ? 'cancel pin move' : 'move pin position'}
             onClick={() => setPinEditMode((v) => !v)}

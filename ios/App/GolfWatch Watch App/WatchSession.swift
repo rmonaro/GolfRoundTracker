@@ -252,6 +252,9 @@ enum WatchOutboundMessage {
     /// the hole's prior ball position, infers fairway/left/right from `end`,
     /// auto-saves, and returns a summary via the snapshot. No pickers involved.
     case autoShot(clubId: String?, start: CLLocation?, end: CLLocation?)
+    /// Watch user tapped "Set flag here" while standing at the flag. Carries the
+    /// watch's current GPS; the phone moves the current hole's pin to it.
+    case setPin(lat: Double, lng: Double)
 
     // --- Practice-mode swing feedback (motion-based) ---
     /// Practice session started on the watch. Carries the watch-minted
@@ -337,6 +340,8 @@ enum WatchOutboundMessage {
                 d["endLng"] = e.coordinate.longitude
             }
             return d
+        case .setPin(let lat, let lng):
+            return ["type": "setPin", "lat": lat, "lng": lng]
         case .practiceStarted(let sessionId, let clubId):
             return [
                 "type": "practiceStarted",
@@ -754,6 +759,16 @@ final class WatchSession: NSObject, ObservableObject {
     func recordAutoShot(clubId: String?) {
         let end = bestRecentFix()
         send(.autoShot(clubId: clubId, start: nil, end: end))
+    }
+
+    /// "Set flag here" — move the current hole's pin to the watch's current GPS.
+    /// Returns true if a fix was available and the command was sent. Uses the
+    /// best recent fix (lowest accuracy) since the player is standing at the flag.
+    @discardableResult
+    func setPinHere() -> Bool {
+        guard let loc = bestRecentFix() else { return false }
+        send(.setPin(lat: loc.coordinate.latitude, lng: loc.coordinate.longitude))
+        return true
     }
 }
 
