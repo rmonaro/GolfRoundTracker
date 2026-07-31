@@ -5,6 +5,7 @@ import {
   Card,
   CardContent,
   CircularProgress,
+  Collapse,
   LinearProgress,
   Stack,
   Tab,
@@ -52,6 +53,7 @@ import { toAppError } from '@/services/errors';
 import { pct, scoreVsPar, durationLabel, fullName } from '@/utils/format';
 import { Scorecard } from '@/components/Scorecard';
 import { AddShotSheet, type ShotEditDraft } from '@/features/round/AddShotSheet';
+import { RoundSwingDetail, hasSwingDetail } from '@/features/round/RoundSwingDetail';
 import {
   STROKE_PENALTY_TYPES,
   type Round,
@@ -1021,6 +1023,16 @@ function HolesTab({
   } | null>(null);
   /** Currently-open map dialog (which hole's map to show). null = closed. */
   const [mapHoleNumber, setMapHoleNumber] = useState<number | null>(null);
+  /** Shot ids whose watch swing detail is expanded. Collapsed by default so the
+   *  hole reads as a scorecard first; the detail is opt-in per shot. */
+  const [expandedSwings, setExpandedSwings] = useState<Set<string>>(new Set());
+  const toggleSwingDetail = (shotId: string) =>
+    setExpandedSwings((prev) => {
+      const next = new Set(prev);
+      if (next.has(shotId)) next.delete(shotId);
+      else next.add(shotId);
+      return next;
+    });
 
   // Persist shot_number = idx+1 for a hole's shots in the given order. Only the
   // rows whose number actually changed are written. Backs insert / reorder /
@@ -1516,6 +1528,10 @@ function HolesTab({
                   const outcome = formatShotOutcome(s.target_type, s.target_result, s.lie);
                   const penalty = formatPenalty(s.penalty_type);
                   const swingSummary = formatSwingSummary(s.swing_type, s.swing_metrics);
+                  // Only offer the expander when there's actually detail behind
+                  // it — manual shots carry no watch metrics.
+                  const swingDetail = hasSwingDetail(s.swing_metrics);
+                  const swingOpen = expandedSwings.has(s.id);
                   const canMoveUp = sIdx > 0;
                   const canMoveDown = sIdx < sArr.length - 1;
                   return (
@@ -1613,20 +1629,74 @@ function HolesTab({
                           {[outcome, penalty].filter(Boolean).join(' · ') || '—'}
                           {s.notes ? ` · ${s.notes}` : ''}
                         </Typography>
-                        {swingSummary && (
-                          <Typography
-                            variant="caption"
-                            noWrap
-                            sx={{
-                              display: 'block',
-                              color: 'primary.light',
-                              fontWeight: 600,
-                              fontSize: '0.66rem'
-                            }}
-                          >
-                            {swingSummary}
-                          </Typography>
-                        )}
+                        {swingSummary &&
+                          (swingDetail ? (
+                            // Tap the swing line to open the full watch detail.
+                            // stopPropagation so it doesn't bubble to the row's
+                            // edit-on-tap.
+                            <Typography
+                              component="div"
+                              role="button"
+                              tabIndex={0}
+                              aria-expanded={swingOpen}
+                              aria-label={`${swingOpen ? 'Hide' : 'Show'} swing detail for shot ${s.shot_number}`}
+                              variant="caption"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                toggleSwingDetail(s.id);
+                              }}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' || e.key === ' ') {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  toggleSwingDetail(s.id);
+                                }
+                              }}
+                              sx={{
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: 0.25,
+                                color: 'primary.light',
+                                fontWeight: 600,
+                                fontSize: '0.66rem',
+                                cursor: 'pointer',
+                                '&:hover': { textDecoration: 'underline' }
+                              }}
+                            >
+                              {/* Ellipsis lives on the text span — the parent is
+                                  flex (for the caret), where noWrap can't work. */}
+                              <Box
+                                component="span"
+                                sx={{
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  whiteSpace: 'nowrap'
+                                }}
+                              >
+                                {swingSummary}
+                              </Box>
+                              {swingOpen ? (
+                                <KeyboardArrowUpRoundedIcon sx={{ fontSize: 14, flexShrink: 0 }} />
+                              ) : (
+                                <KeyboardArrowDownRoundedIcon
+                                  sx={{ fontSize: 14, flexShrink: 0 }}
+                                />
+                              )}
+                            </Typography>
+                          ) : (
+                            <Typography
+                              variant="caption"
+                              noWrap
+                              sx={{
+                                display: 'block',
+                                color: 'primary.light',
+                                fontWeight: 600,
+                                fontSize: '0.66rem'
+                              }}
+                            >
+                              {swingSummary}
+                            </Typography>
+                          ))}
                         {!s.verified && (
                           <Typography
                             variant="caption"
@@ -1711,6 +1781,23 @@ function HolesTab({
                           sx={{ fontSize: 18, color: 'error.light' }}
                         />
                       </Box>
+                      {/* Watch swing detail — spans the whole row beneath it.
+                          Click is swallowed so interacting with the panel (e.g.
+                          tapping a feedback chip) doesn't open the edit sheet. */}
+                      {swingDetail && s.swing_metrics && (
+                        <Box
+                          sx={{ gridColumn: '1 / -1' }}
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        >
+                          <Collapse in={swingOpen} unmountOnExit>
+                            <RoundSwingDetail
+                              swingType={s.swing_type}
+                              metrics={s.swing_metrics}
+                            />
+                          </Collapse>
+                        </Box>
+                      )}
                     </Box>
                   );
                 })}

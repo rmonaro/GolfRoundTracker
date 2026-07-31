@@ -279,8 +279,11 @@ enum WatchOutboundMessage {
     /// phone can store swing tempo/quality on the recorded round shot and use
     /// `swingType` to classify it (migration 031). `handSpeed` on the wire is
     /// `metrics.estimatedHandSpeed`.
+    /// `heartRate` is the live bpm at strike time from the round's HealthKit
+    /// workout session (0 when HealthKit isn't available / authorized), matching
+    /// `.swingDetected` — it is omitted from the wire payload when 0.
     case swingImpact(impactId: Int, capturedAt: Double, metrics: SwingMetrics,
-                     location: CLLocation?, clubId: String?)
+                     location: CLLocation?, clubId: String?, heartRate: Int)
 
     var payload: [String: Any] {
         switch self {
@@ -394,7 +397,7 @@ enum WatchOutboundMessage {
                 d["durationSeconds"] = h.durationSeconds
             }
             return d
-        case .swingImpact(let impactId, let capturedAt, let m, let location, let clubId):
+        case .swingImpact(let impactId, let capturedAt, let m, let location, let clubId, let heartRate):
             var d: [String: Any] = [
                 "type": "roundImpact",
                 "impactId": impactId,
@@ -417,6 +420,10 @@ enum WatchOutboundMessage {
                 "addressGravity": m.addressGravity,
                 "clubId": clubId ?? NSNull()
             ]
+            // Real sensor reading (unlike the motion estimates above). Omitted
+            // when HealthKit gave us nothing, so the phone stores null rather
+            // than a bogus 0 bpm.
+            if heartRate > 0 { d["heartRate"] = heartRate }
             if let l = location {
                 d["startLat"] = l.coordinate.latitude
                 d["startLng"] = l.coordinate.longitude
@@ -960,6 +967,10 @@ final class RoundShotController: ObservableObject {
     private let motion = SwingMotionService()
     private let workout = WorkoutManager()
 
+    /// Live heart rate (bpm) while the round workout is running; 0 if
+    /// unavailable. Mirrors `PracticeController.currentHeartRate`.
+    var currentHeartRate: Int { Int(workout.currentHeartRate.rounded()) }
+
     /// Monotonic within a round session so the phone can order / de-dupe.
     private var nextImpactId = 1
     /// Refractory window — ignore a second strike within this of the last so a
@@ -1019,7 +1030,10 @@ final class RoundShotController: ObservableObject {
             location: WatchSession.shared.lastLocation,
             // Tell the phone which club the watch had in hand so the shot latches
             // the right club even though the phone never saw a watch-side change.
-            clubId: WatchSession.shared.lastResolvedClubId
+            clubId: WatchSession.shared.lastResolvedClubId,
+            // Apple Health: the round already runs an HKWorkoutSession to keep
+            // motion alive wrist-down, so the live bpm is there for the taking.
+            heartRate: currentHeartRate
         ))
         // Reflect the swing in the watch's own Shots count right away.
         WatchSession.shared.registerDetectedStrikeShotCount()

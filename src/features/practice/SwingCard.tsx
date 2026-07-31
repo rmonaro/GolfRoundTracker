@@ -10,7 +10,7 @@ import {
   Typography
 } from '@mui/material';
 import type { SwingFeedback, SwingMetric } from '@/types/swing';
-import { fmtHandSpeed } from '@/utils/swingLabels';
+import { SwingScoreGrid, SwingVitalsRow } from '@/components/swing/SwingMetricDisplay';
 import { ShotResultPicker } from './ShotResultPicker';
 import { FeedbackChips } from './FeedbackChips';
 import { practiceController } from './practiceController';
@@ -23,26 +23,6 @@ const SWING_TYPE_LABEL: Record<string, string> = {
   putt: 'Putt',
   air: 'Rehearsal'
 };
-
-/** Wrist rotation amount (radians) → relative length category. */
-function backswingLengthLabel(rotationRad: number): string {
-  if (rotationRad < 1.6) return 'Short';
-  if (rotationRad > 2.6) return 'Long';
-  return 'Normal';
-}
-
-function ScorePill({ label, value }: { label: string; value: number }) {
-  return (
-    <Stack alignItems="center" sx={{ minWidth: 64 }}>
-      <Typography fontWeight={700} sx={{ fontSize: '1.25rem', lineHeight: 1.1 }}>
-        {Math.round(value)}
-      </Typography>
-      <Typography variant="caption" color="text.secondary" align="center">
-        {label}
-      </Typography>
-    </Stack>
-  );
-}
 
 export function SwingCard({
   swing,
@@ -109,45 +89,12 @@ export function SwingCard({
 
       <Collapse in={open} unmountOnExit>
         <Divider sx={{ my: 1 }} />
-        <Box
-          sx={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(4, 1fr)',
-            gap: 1,
-            mb: 1.5
-          }}
-        >
-          <ScorePill label="Transition" value={swing.transitionScore} />
-          <ScorePill label="Finish" value={swing.finishStabilityScore} />
-          <ScorePill label="Wrist" value={swing.wristRotationScore} />
-          {swing.swingConsistencyScore != null && (
-            <ScorePill label="Consistency" value={swing.swingConsistencyScore} />
-          )}
-          {swing.releaseTimingScore != null && (
-            <ScorePill label="Release" value={swing.releaseTimingScore} />
-          )}
-          {swing.decelerationScore != null && (
-            <ScorePill label="Thru impact" value={swing.decelerationScore} />
-          )}
-          {swing.transitionDirectionScore != null && (
-            <ScorePill label="Direction" value={swing.transitionDirectionScore} />
-          )}
-        </Box>
-        <Stack direction="row" spacing={2} sx={{ mb: 1 }} flexWrap="wrap" useFlexGap>
-          <Typography variant="caption" color="text.secondary">
-            {fmtHandSpeed(swing.estimatedHandSpeed)}
-          </Typography>
-          {swing.backswingRotation != null && (
-            <Typography variant="caption" color="text.secondary">
-              Backswing length: {backswingLengthLabel(swing.backswingRotation)}
-            </Typography>
-          )}
-          {swing.heartRate != null && (
-            <Typography variant="caption" color="error">
-              ♥ {swing.heartRate} bpm
-            </Typography>
-          )}
-        </Stack>
+        <SwingScoreGrid scores={swing} />
+        <SwingVitalsRow
+          estimatedHandSpeed={swing.estimatedHandSpeed}
+          backswingRotation={swing.backswingRotation}
+          heartRate={swing.heartRate}
+        />
         {editable ? (
           <ShotResultPicker
             value={swing.shotResult}

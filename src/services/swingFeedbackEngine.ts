@@ -57,33 +57,63 @@ export function feedbackExplanation(code: string): string {
 
 // --- per-swing -------------------------------------------------------------
 
-export function evaluateSwing(s: SwingMetric): SwingFeedback[] {
+/**
+ * The subset of motion metrics the per-swing rules actually read. Every field is
+ * optional so this works for a ROUND shot's `swing_metrics` bundle (jsonb, all
+ * fields optional — older watch builds omit some) as well as a full practice
+ * `SwingMetric` row. Rules whose input is missing simply don't fire.
+ */
+export interface PerSwingRuleInputs {
+  tempoRatio?: number | null;
+  transitionScore?: number | null;
+  finishStabilityScore?: number | null;
+}
+
+/**
+ * Per-swing feedback from a partial metric bundle. Shared by practice (full
+ * `SwingMetric` rows) and round shots (`shots.swing_metrics`), so a rushed
+ * backswing reads the same on the course as it does on the range.
+ */
+export function evaluateSwingMetrics(
+  m: PerSwingRuleInputs,
+  swingId: string | null = null
+): SwingFeedback[] {
   const out: SwingFeedback[] = [];
 
   // Tempo ratio.
-  if (Math.abs(s.tempoRatio - TEMPO_IDEAL) <= 0.5) {
-    out.push(fb('positive', 'TEMPO_GOOD', 'Great tempo', s.id));
-  } else if (s.tempoRatio > 0 && s.tempoRatio < 2.2) {
-    out.push(fb('attention', 'BACKSWING_RUSHED', 'Backswing was rushed', s.id));
-  } else if (s.tempoRatio > 4.0) {
-    out.push(fb('neutral', 'BACKSWING_SLOW', 'Backswing was slow relative to downswing', s.id));
+  if (m.tempoRatio != null) {
+    if (Math.abs(m.tempoRatio - TEMPO_IDEAL) <= 0.5) {
+      out.push(fb('positive', 'TEMPO_GOOD', 'Great tempo', swingId));
+    } else if (m.tempoRatio > 0 && m.tempoRatio < 2.2) {
+      out.push(fb('attention', 'BACKSWING_RUSHED', 'Backswing was rushed', swingId));
+    } else if (m.tempoRatio > 4.0) {
+      out.push(fb('neutral', 'BACKSWING_SLOW', 'Backswing was slow relative to downswing', swingId));
+    }
   }
 
   // Transition smoothness.
-  if (s.transitionScore < 40) {
-    out.push(fb('attention', 'TRANSITION_AGGRESSIVE', 'Transition was too aggressive', s.id));
-  } else if (s.transitionScore >= 75) {
-    out.push(fb('positive', 'TRANSITION_SMOOTH', 'Smooth transition', s.id));
+  if (m.transitionScore != null) {
+    if (m.transitionScore < 40) {
+      out.push(fb('attention', 'TRANSITION_AGGRESSIVE', 'Transition was too aggressive', swingId));
+    } else if (m.transitionScore >= 75) {
+      out.push(fb('positive', 'TRANSITION_SMOOTH', 'Smooth transition', swingId));
+    }
   }
 
   // Finish stability.
-  if (s.finishStabilityScore < 40) {
-    out.push(fb('attention', 'FINISH_UNSTABLE', 'Finish was unstable', s.id));
-  } else if (s.finishStabilityScore >= 80) {
-    out.push(fb('positive', 'FINISH_BALANCED', 'Balanced finish', s.id));
+  if (m.finishStabilityScore != null) {
+    if (m.finishStabilityScore < 40) {
+      out.push(fb('attention', 'FINISH_UNSTABLE', 'Finish was unstable', swingId));
+    } else if (m.finishStabilityScore >= 80) {
+      out.push(fb('positive', 'FINISH_BALANCED', 'Balanced finish', swingId));
+    }
   }
 
   return out;
+}
+
+export function evaluateSwing(s: SwingMetric): SwingFeedback[] {
+  return evaluateSwingMetrics(s, s.id);
 }
 
 // --- session-level ---------------------------------------------------------
