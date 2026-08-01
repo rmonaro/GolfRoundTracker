@@ -97,7 +97,7 @@ export function StatsPage() {
   if (isLoading) {
     return (
       <Box>
-        <PageHeader title="Stats" />
+        <PageHeader title="Stats" back="/" />
         <Box sx={{ display: 'grid', placeItems: 'center', py: 6 }}>
           <CircularProgress />
         </Box>
@@ -108,7 +108,7 @@ export function StatsPage() {
   if (!rounds || rounds.length === 0) {
     return (
       <Box>
-        <PageHeader title="Stats" />
+        <PageHeader title="Stats" back="/" />
         <EmptyState
           icon={<InsightsRoundedIcon fontSize="inherit" />}
           title="No stats yet"
@@ -230,6 +230,7 @@ export function StatsPage() {
       <PageHeader
         title="Stats"
         subtitle={`Estimated handicap based on ${stats.handicap.roundsUsed} rounds`}
+        back="/"
       />
       <Stack spacing={2} px={2} pb={4}>
         <Card

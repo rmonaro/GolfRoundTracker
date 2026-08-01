@@ -23,15 +23,22 @@ export function computeTotalPar(holes: LocalHole[]): number {
 }
 
 /**
- * A hole is "complete" if either:
+ * A hole is "complete" if it was actually *played* — at least one stroke or
+ * penalty stroke on it — AND either:
  *   • The user has navigated past it (its index < currentHoleIndex), or
  *   • Any shot on the hole was holed out (`targetResult === 'made'`).
  *
- * The second branch matters for the moment between holing out on the
+ * The played check comes first: skipping ahead without logging a shot leaves a
+ * 0-stroke hole, and counting that as complete would subtract its full par from
+ * the round total (arrowing past a par 3 read as −3).
+ *
+ * The holed-out branch matters for the moment between holing out on the
  * current hole and tapping "next" — the user expects the hole's score
  * to show up immediately, not after the navigation gesture.
  */
 function isHoleComplete(hole: LocalHole, holeIdx: number, currentHoleIndex: number): boolean {
+  const played = holeTotalScore(hole) > 0 || hole.shots.length > 0;
+  if (!played) return false;
   if (holeIdx < currentHoleIndex) return true;
   return hole.shots.some((s) => s.targetResult === 'made');
 }

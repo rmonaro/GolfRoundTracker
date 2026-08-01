@@ -59,6 +59,20 @@ export const adminCoursesRepo = {
     return data as Course;
   },
 
+  /**
+   * Mark a course verified (visible to every user) or clear it. Routes through
+   * the `admin_set_course_verified` SECURITY DEFINER RPC (migration 030) so the
+   * is_admin() gate is enforced in the DB and verified_by/at are server-stamped.
+   */
+  async setVerified(id: string, verified: boolean): Promise<Course> {
+    const { data, error } = await supabase.rpc('admin_set_course_verified', {
+      course_id: id,
+      make_verified: verified
+    });
+    if (error) throw toAppError(error, 'Could not update verification');
+    return data as Course;
+  },
+
   async stats(): Promise<{
     apiCount: number;
     byStatus: Record<string, number>;

@@ -2,10 +2,11 @@ import SwiftUI
 
 /// Main read view shown when a round is active. Two modes:
 ///   • Idle (default): two-column layout — yards-to-pin + suggested club on
-///     the left, score / shots / putts on the right, small chevron arrows
-///     bottom for hole navigation. Tap the suggested club to open the
-///     full club picker; tap the "+" between chevrons to open the record-
-///     shot flow locally on the watch.
+///     the left, score / shots / putts on the right, and a 2×2 control grid
+///     (Track + Add Shot over prev/next arrows). Track toggles round-wide
+///     auto-tracking (synced with the phone); Add Shot logs a shot at the
+///     current GPS. Both auto-record — the club picker only opens from the
+///     club pill. Off-course the action buttons are hidden.
 ///   • Recording (phone has its record-shot sheet or pending-landing bar
 ///     up): the watch swaps to a focused view showing just the phone's
 ///     selected club. Tap to change.
@@ -13,74 +14,90 @@ struct HoleHomeView: View {
     @EnvironmentObject var session: WatchSession
     @State private var showingShotFlow = false
     @State private var shotFlowStartingClubId: String?
-    /// True while the user has tapped Track but not yet ended the shot.
-    /// Drives the bottom-controls swap to "tracking" UI + the next-tap
-    /// behavior (end → open shot record flow with start preserved).
-    @State private var isTrackingShot = false
     /// True while the modal is open in "club picker only" mode (user
     /// tapped the suggested-club pill specifically to swap clubs, not
     /// to record a shot). Resets via onDisappear.
     @State private var isClubPickerOnly = false
+    /// Id of the last shot summary we've shown the overview for, so each
+    /// GPS auto-recorded shot flashes its overview exactly once.
+    @State private var shownSummaryId = 0
+    /// Manual ± correction of the on-green putt distance (feet). Null tracks the
+    /// phone's reading; cleared after each putt and when the hole changes.
+    @State private var puttFeetOverride: Int?
+    /// Locally-navigated hole (prev/next on the watch). Lets the watch show the
+    /// next hole's yardage + club IMMEDIATELY from the per-hole snapshot data,
+    /// without waiting on the phone (whose JS is suspended while backgrounded).
+    /// Cleared once the phone's snapshot catches up to this hole.
+    @State private var localHoleNumber: Int?
+    /// True for a short window right after a putt tap — disables Missed/Made so a
+    /// rapid double-tap can't send two putts (the phone save isn't idempotent and
+    /// the confirming snapshot can lag when the phone is backgrounded). Reset by a
+    /// timer in `recordPutt`.
+    @State private var puttSending = false
+    /// The hole number a "Made" putt was recorded on. While the displayed hole
+    /// matches, the putt controls are LOCKED (show "Holed out") so no number of
+    /// extra taps can add another made putt — the reported multi-putt bug.
+    @State private var madePuttHole: Int?
+    /// Brief confirmation flash after tapping "Set flag here" (pin sent to phone).
+    @State private var flagJustSet = false
 
     var body: some View {
         let s = session.state
 
-        if s.recordingShot {
-            recordingView(s)
-                .sheet(isPresented: $showingShotFlow) {
-                    ShotRecordFlow(
-                        isPresented: $showingShotFlow,
-                        initialClubId: shotFlowStartingClubId,
-                        startAlreadyCaptured: isTrackingShot,
-                        clubPickerOnly: isClubPickerOnly
-                    )
-                        .environmentObject(session)
-                        .onDisappear {
-                            // Notify the phone that the watch is no
-                            // longer tracking. After a successful submit
-                            // the phone already got a recordShot — this
-                            // is then redundant-but-harmless. After a
-                            // cancel it's the only end signal.
-                            if isTrackingShot {
-                                session.send(.trackingShot(
-                                    active: false,
-                                    start: nil,
-                                    current: nil
-                                ))
-                                session.endShotTrackingSession()
-                            }
-                            isTrackingShot = false
-                            isClubPickerOnly = false
+        Group {
+            if s.recordingShot {
+                recordingView(s)
+            } else {
+                idleView(s)
+                    .overlay {
+                        // Brief, auto-dismissing overview after a GPS auto-record
+                        // (Track-off / Add Shot). The phone inferred the result.
+                        if let summary = s.lastShotSummary, summary.id != shownSummaryId {
+                            shotOverview(summary)
                         }
-                }
-        } else {
-            idleView(s)
-                .sheet(isPresented: $showingShotFlow) {
-                    ShotRecordFlow(
-                        isPresented: $showingShotFlow,
-                        initialClubId: shotFlowStartingClubId,
-                        startAlreadyCaptured: isTrackingShot,
-                        clubPickerOnly: isClubPickerOnly
-                    )
-                        .environmentObject(session)
-                        .onDisappear {
-                            // Notify the phone that the watch is no
-                            // longer tracking. After a successful submit
-                            // the phone already got a recordShot — this
-                            // is then redundant-but-harmless. After a
-                            // cancel it's the only end signal.
-                            if isTrackingShot {
-                                session.send(.trackingShot(
-                                    active: false,
-                                    start: nil,
-                                    current: nil
-                                ))
-                                session.endShotTrackingSession()
-                            }
-                            isTrackingShot = false
-                            isClubPickerOnly = false
-                        }
-                }
+                    }
+            }
+        }
+        // The shot flow is now ONLY the club picker, reached from the club pill.
+        // Track / Add Shot never open it — they auto-record via GPS.
+        .sheet(isPresented: $showingShotFlow) {
+            ShotRecordFlow(
+                isPresented: $showingShotFlow,
+                initialClubId: shotFlowStartingClubId,
+                startAlreadyCaptured: false,
+                clubPickerOnly: isClubPickerOnly
+            )
+                .environmentObject(session)
+                .onDisappear { isClubPickerOnly = false }
+        }
+    }
+
+    /// Full-screen-ish overview card shown for a couple seconds after a shot is
+    /// auto-recorded from GPS. Read-only — no buttons, auto-dismisses.
+    @ViewBuilder
+    private func shotOverview(_ summary: WatchShotSummary) -> some View {
+        VStack(spacing: 6) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 26))
+                .foregroundColor(.green)
+            Text(summary.clubName)
+                .font(.system(size: 20, weight: .heavy, design: .rounded))
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+            Text(summary.result)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundColor(.yellow)
+            Text(summary.distanceText)
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.85))
+        .onTapGesture { shownSummaryId = summary.id }
+        .task(id: summary.id) {
+            // Show for ~2.5s, then mark this id shown so the overlay hides.
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            shownSummaryId = summary.id
         }
     }
 
@@ -93,10 +110,11 @@ struct HoleHomeView: View {
             // Header — hole # left, par badge right. Compact so the columns
             // get most of the screen real estate.
             HStack(spacing: 6) {
-                Text("Hole \(s.holeNumber.map(String.init) ?? "—")")
+                Text("Hole \(displayedHoleNumber(s).map(String.init) ?? "—")")
                     .font(.headline)
                 Spacer()
-                if let par = s.par {
+                setFlagButton
+                if let par = displayedHole(s)?.par ?? s.par {
                     Text("Par \(par)")
                         .font(.caption2)
                         .fontWeight(.bold)
@@ -123,6 +141,85 @@ struct HoleHomeView: View {
             }
         }
         .padding(.horizontal, 6)
+        // When the phone finally processes our hole-nav (it foregrounds and
+        // drains the queued navigateHole messages), its snapshot hole catches
+        // up — drop the local override so we're back in lock-step.
+        .onChange(of: session.state.holeNumber) { _, newHole in
+            if let local = localHoleNumber, newHole == local {
+                localHoleNumber = nil
+            }
+            // New hole from the phone → drop the watch-side manual club pick so
+            // the next hole re-derives its club from live distance / the pushed
+            // per-hole suggestion instead of staying stuck on the previous hole's
+            // club (e.g. the putter after holing out).
+            session.clearLocalSelectedClub()
+        }
+        // Remember the last real club we resolved so effectiveClubId never has to
+        // blank out when the phone momentarily provides no selection.
+        .onChange(of: rawEffectiveClubId(s)) { _, newId in
+            if let newId { session.noteResolvedClub(newId) }
+        }
+        .onAppear {
+            if let id = rawEffectiveClubId(s) { session.noteResolvedClub(id) }
+        }
+    }
+
+    /// "Set flag here" — sends the watch's current GPS as the hole's pin. Handy
+    /// on the green (walk to the flag, tap) and still available after hole-out.
+    /// Flashes a check for ~1.5s on a successful send.
+    @ViewBuilder
+    private var setFlagButton: some View {
+        Button {
+            if session.setPinHere() { flagJustSet = true }
+        } label: {
+            Image(systemName: flagJustSet ? "checkmark.circle.fill" : "flag.fill")
+                .font(.system(size: 13))
+                .foregroundColor(flagJustSet ? .green : .yellow)
+        }
+        .buttonStyle(.plain)
+        .task(id: flagJustSet) {
+            guard flagJustSet else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            flagJustSet = false
+        }
+    }
+
+    // MARK: - Local hole navigation
+
+    /// The hole the watch is currently SHOWING — the local override if the user
+    /// navigated ahead/back on the watch, else the phone's current hole.
+    private func displayedHoleNumber(_ s: WatchRoundState) -> Int? {
+        localHoleNumber ?? s.holeNumber
+    }
+
+    /// The per-hole snapshot entry for the displayed hole.
+    private func displayedHole(_ s: WatchRoundState) -> WatchHole? {
+        guard let n = displayedHoleNumber(s) else { return nil }
+        return s.holes.first(where: { $0.holeNumber == n })
+    }
+
+    /// True when the watch is showing a hole the phone hasn't moved to yet.
+    private func isPreviewing(_ s: WatchRoundState) -> Bool {
+        guard let local = localHoleNumber else { return false }
+        return local != s.holeNumber
+    }
+
+    /// Advance the displayed hole locally AND tell the phone (so it catches up
+    /// when it next runs). Clamped to the round's hole range.
+    private func navigateHoleLocally(_ delta: Int, _ s: WatchRoundState) {
+        let current = displayedHoleNumber(s) ?? 1
+        let numbers = s.holes.map { $0.holeNumber }
+        let lo = numbers.min() ?? 1
+        let hi = numbers.max() ?? (s.holesPlayed ?? 18)
+        let next = min(hi, max(lo, current + delta))
+        guard next != current else { return }
+        // No override needed once we're back on the phone's own hole.
+        localHoleNumber = next == s.holeNumber ? nil : next
+        // Advancing holes on the watch clears the manual club pick too, so the
+        // new hole starts from its own distance-based suggestion (not the putter
+        // carried over from holing out on the previous hole).
+        session.clearLocalSelectedClub()
+        session.send(.navigateHole(direction: delta > 0 ? "next" : "prev"))
     }
 
     // MARK: - Recording layout
@@ -197,113 +294,321 @@ struct HoleHomeView: View {
     // MARK: - Pieces
 
     /// The club id currently shown to the user. An optimistic local pick (made
-    /// on the watch, not yet confirmed by the phone) wins, then the phone's
-    /// selected club, then the suggested club. The add-shot buttons act on this
-    /// so they always use exactly the club that's displayed.
+    /// on the watch, not yet confirmed by the phone) wins, then — for the hole
+    /// being shown — the phone's selected club, then the displayed hole's
+    /// suggested club. When previewing a hole the phone hasn't moved to yet, the
+    /// phone's selectedClubId is for a different hole, so we skip it and use the
+    /// previewed hole's suggestion.
     private func effectiveClubId(_ s: WatchRoundState) -> String? {
-        session.localSelectedClubId ?? s.selectedClubId ?? s.suggestedClubId
+        // Never blank out the club. When the raw resolution is nil — no GPS fix
+        // for a live suggestion, the phone reset selectedClubId to null after the
+        // last shot, and no suggestion is pushed — fall back to the last club we
+        // actually showed, then to the first non-putter in the bag. This is what
+        // stops the pill / recording view flashing "Club" / "Select club".
+        rawEffectiveClubId(s)
+            ?? session.lastResolvedClubId
+            ?? s.bag.first(where: { !$0.isPutter })?.id
     }
 
-    /// Bottom controls row. Two modes:
-    ///   • Idle      — prev / Track / Record (+) / next
-    ///   • Tracking  — "Walking…" indicator + End Shot button
+    /// Raw club resolution WITHOUT the never-blank fallback — may be nil. Split
+    /// out so `.onChange` in idleView can remember the last real value.
     ///
-    /// "Track" captures GPS start immediately and flips the local
-    /// isTrackingShot flag. The user walks to the ball and taps "End
-    /// Shot," which opens the shot record flow with the start
-    /// preserved (so the modal's club picker doesn't overwrite it).
-    /// "Record (+)" remains for the legacy at-ball workflow where the
-    /// user captures start when they pick a club.
+    /// The watch's own live-distance recommendation is preferred over the phone's
+    /// pushed selection/suggestion (which can be stale when the phone is
+    /// backgrounded), so the club auto-follows as you walk up to the ball. A
+    /// manual pick ON THE WATCH (localSelectedClubId) still wins.
+    private func rawEffectiveClubId(_ s: WatchRoundState) -> String? {
+        // On the green, default to the putter (mirrors the phone's auto-select)
+        // UNLESS the player has manually picked another club on the watch to chip
+        // from the fringe. This keeps the club consistent with the putt view gate.
+        if isOnGreen(s), session.localSelectedClubId == nil,
+           let putter = s.bag.first(where: { $0.isPutter })?.id {
+            return putter
+        }
+        let liveClub = liveSuggestedClubId(s)
+        let pushedSuggested = displayedHole(s)?.suggestedClubId ?? s.suggestedClubId
+        if isPreviewing(s) {
+            return session.localSelectedClubId ?? liveClub ?? pushedSuggested
+        }
+        return session.localSelectedClubId ?? liveClub ?? s.selectedClubId ?? pushedSuggested
+    }
+
+    /// True when the club the watch is set to is the putter — gates the putt view
+    /// so picking a wedge/iron on the green (to chip) hides putting, mirroring the
+    /// phone. Re-arms when the putter is picked again or the green auto-default
+    /// above kicks in.
+    private func clubIsPutter(_ s: WatchRoundState) -> Bool {
+        s.bag.first(where: { $0.id == effectiveClubId(s) })?.isPutter ?? false
+    }
+
+    /// Bottom controls — a 2×2 grid:
+    ///   Row 1:  Track (auto-track toggle)  |  Add Shot (GPS auto-record)
+    ///   Row 2:  ◀ prev hole                |  next hole ▶
+    ///
+    /// "Track" toggles round-wide auto-tracking, kept in sync with the phone.
+    /// Turning it OFF at the ball records the shot there (then resumes on the
+    /// next tap). "Add Shot" logs a shot at the current GPS without changing the
+    /// auto-track state. Both auto-record via GPS — the phone infers the result
+    /// and a brief overview flashes; neither opens the club picker.
+    ///
+    /// Off-course the action buttons are hidden (mirroring the phone, which
+    /// won't start tracking out of range); only a "not in range" note + the
+    /// hole arrows remain.
+    /// Hole is holed out — from the phone snapshot (last shot a made putt) or the
+    /// watch's own optimistic "Made" tap. Gates the prev/next hole arrows, which
+    /// are hidden during active play so a hole can't be skipped mid-round.
+    private func holeCompleted(_ s: WatchRoundState) -> Bool {
+        s.holeComplete || madePuttHole == displayedHoleNumber(s)
+    }
+
     @ViewBuilder
     private func bottomControls(_ s: WatchRoundState) -> some View {
-        if isTrackingShot {
-            HStack(spacing: 6) {
+        if isOnGreen(s) && clubIsPutter(s) {
+            // Ball's on the green AND the putter is the active club — swap Track /
+            // Add Shot for the putt recorder, mirroring the phone's putting panel.
+            // Picking a non-putter (to chip from the fringe) falls through to the
+            // normal controls. Uses the watch's OWN on-green test (phone result OR
+            // watch GPS-within-radius) so it arms even when the phone is
+            // backgrounded. Checked BEFORE the at-course gate: being on the green
+            // means you're on the course.
+            puttControls(s)
+        } else if holeCompleted(s) {
+            // Hole is done but not in the putt view (e.g. walked off the green) —
+            // NOW show the prev/next arrows so the player can move on. Arrows are
+            // intentionally absent during active play.
+            navRow(s)
+        } else if s.atCourse == false {
+            VStack(spacing: 6) {
                 HStack(spacing: 4) {
-                    Image(systemName: "figure.walk")
-                        .font(.system(size: 11))
-                        .foregroundColor(.yellow)
-                    Text("Walking…")
+                    Image(systemName: "location.slash")
+                        .font(.system(size: 12))
+                        .foregroundColor(.orange)
+                    Text("Not in range of \(s.courseName ?? "the course")")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.7)
                 }
-                Spacer()
-                Button {
-                    // Use the SAME club that's displayed (local override wins,
-                    // then the phone's selected, then suggested). Passing a
-                    // non-nil club id makes ShotRecordFlow open straight on the
-                    // result picker — so if the user is happy with the shown
-                    // club, adding a shot skips club selection entirely.
-                    shotFlowStartingClubId = effectiveClubId(s)
-                    showingShotFlow = true
-                } label: {
-                    Text("End Shot")
-                        .font(.system(size: 11, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.mini)
-                .tint(.red)
             }
         } else {
-            HStack(spacing: 4) {
-                Button {
-                    session.send(.navigateHole(direction: "prev"))
-                } label: {
-                    Image(systemName: "chevron.left")
-                        .font(.system(size: 12, weight: .semibold))
+            // Optimistic local override wins so the button flips the instant
+            // it's tapped, before the phone roundtrip confirms.
+            let tracking = session.localAutoTracking ?? s.autoTracking
+            VStack(spacing: 6) {
+                HStack(spacing: 6) {
+                    bigButton(
+                        title: tracking ? "Stop" : "Track",
+                        system: tracking ? "stop.fill" : "location.fill",
+                        tint: tracking ? .red : .yellow
+                    ) {
+                        if tracking {
+                            // At the ball: record the shot here, then pause
+                            // auto-tracking until the next tap re-arms it.
+                            recordManualShot(s)
+                            session.setAutoTrack(false)
+                        } else {
+                            session.setAutoTrack(true)
+                        }
+                    }
+                    bigButton(title: "Add Shot", system: "plus", tint: .green) {
+                        // Log a shot at the current GPS now. Auto-track (if on)
+                        // keeps running — this is an extra manual log.
+                        recordManualShot(s)
+                    }
                 }
-                .controlSize(.mini)
-                .buttonStyle(.bordered)
-
-                Button {
-                    // Start GPS shot tracking. The user will walk to the
-                    // ball; "End Shot" then opens the record flow.
-                    session.captureShotStart()
-                    isTrackingShot = true
-                    // Tell the phone the watch is now tracking so it can
-                    // show a banner + stage the start position on the map.
-                    session.send(.trackingShot(
-                        active: true,
-                        start: session.pendingShotStart,
-                        current: nil
-                    ))
-                    // Activate live-position forwarding so the phone
-                    // can render a "you are here" dot at the watch
-                    // user's location as they walk.
-                    session.beginShotTrackingSession()
-                } label: {
-                    Image(systemName: "location.fill")
-                        .font(.system(size: 12, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.mini)
-                .tint(.yellow)
-
-                Button {
-                    // Use the SAME club that's displayed (local override wins,
-                    // then the phone's selected, then suggested). Passing a
-                    // non-nil club id makes ShotRecordFlow open straight on the
-                    // result picker — so if the user is happy with the shown
-                    // club, adding a shot skips club selection entirely.
-                    shotFlowStartingClubId = effectiveClubId(s)
-                    showingShotFlow = true
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 14, weight: .bold))
-                        .frame(maxWidth: .infinity)
-                }
-                .controlSize(.mini)
-                .tint(.green)
-
-                Button {
-                    session.send(.navigateHole(direction: "next"))
-                } label: {
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                }
-                .controlSize(.mini)
-                .buttonStyle(.bordered)
             }
         }
+    }
+
+    /// Record a shot at the current GPS (Track-off "at the ball" or Add Shot),
+    /// then optimistically bump the hole's Shots count. The bump is skipped when
+    /// the watch is auto-detecting strikes: there the strike itself already
+    /// counted the shot and this tap merely closes it, so bumping would
+    /// double-count. When strike detection is off, this tap IS the new shot.
+    private func recordManualShot(_ s: WatchRoundState) {
+        session.recordAutoShot(clubId: effectiveClubId(s))
+        if !RoundShotController.shared.isRunning, let hole = displayedHoleNumber(s) {
+            session.bumpPendingShotCount(hole: hole, to: shownShots(s) + 1)
+        }
+    }
+
+    /// On-green putt controls — replaces Track / Add Shot once the ball is on
+    /// the green, mirroring the phone's putting panel: the feet-to-flag with a
+    /// ± nudge on top, then "Missed" / "Made". "Made" holes out. The prev/next
+    /// arrows are intentionally hidden here so the player can't skip ahead
+    /// mid-hole; once the putt is made the locked panel shows a single "Next
+    /// Hole" button so the player can advance without pulling out the phone.
+    @ViewBuilder
+    private func puttControls(_ s: WatchRoundState) -> some View {
+        // Once "Made" holes out this hole, lock the panel so no amount of extra
+        // taps can add another putt — regardless of whether the phone's
+        // hole-out snapshot has arrived yet.
+        if madePuttHole == displayedHoleNumber(s) {
+            VStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundColor(.green)
+                    Text("Holed out")
+                        .font(.system(size: 15, weight: .heavy))
+                        .foregroundColor(.white)
+                }
+                // Advance to the next hole right from the watch. Previously the
+                // player had to open the phone: the hole arrows are hidden on the
+                // green, so after holing out there was no way forward. Navigates
+                // locally (instant, reads the next hole from the snapshot) and
+                // tells the phone; moving off this hole drops the "holed out"
+                // lock so the next hole shows normal controls.
+                bigButton(title: "Next Hole", system: "arrow.right", tint: .blue) {
+                    navigateHoleLocally(1, s)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 8)
+        } else {
+            let displayed = puttFeetOverride ?? s.distanceFeet
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    stepButton(system: "minus") {
+                        puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) - 1)
+                    }
+                    VStack(spacing: 0) {
+                        Text(displayed.map { "\($0) ft" } ?? "—")
+                            .font(.system(size: 34, weight: .heavy, design: .rounded))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.5)
+                        Text("TO FLAG")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.secondary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    stepButton(system: "plus") {
+                        puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) + 1)
+                    }
+                }
+                // Bigger, well-separated targets so a fat-finger on "Missed"
+                // can't land on "Made" (which holes out).
+                HStack(spacing: 12) {
+                    puttButton(title: "Missed", system: "xmark.circle", tint: .gray) {
+                        recordPutt(made: false, s)
+                    }
+                    puttButton(title: "Made", system: "flag.fill", tint: .green) {
+                        recordPutt(made: true, s)
+                    }
+                }
+            }
+            // Forget any ± correction when moving to a different hole.
+            .onChange(of: displayedHoleNumber(s)) { _, _ in puttFeetOverride = nil }
+        }
+    }
+
+    /// Missed / Made button. Taller (44pt) for reliable taps on a small screen,
+    /// and disabled briefly after a tap (`puttSending`) so a rapid double-tap
+    /// can't fire two putts.
+    @ViewBuilder
+    private func puttButton(
+        title: String,
+        system: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: system)
+                    .font(.system(size: 14, weight: .bold))
+                Text(title)
+                    .font(.system(size: 14, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 44)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(tint)
+        .disabled(puttSending)
+        .opacity(puttSending ? 0.5 : 1)
+    }
+
+    /// Small circular ± button used to nudge the putt distance.
+    @ViewBuilder
+    private func stepButton(system: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: system)
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.yellow)
+                .frame(width: 34, height: 34)
+                .background(Color.yellow.opacity(0.15))
+                .clipShape(Circle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Record a putt from the watch. Uses the bag's putter (falling back to the
+    /// shown club) and sends the shown feet-to-flag (± corrected) as the putt
+    /// distance. `made` holes out, which clears onGreen on the next snapshot and
+    /// restores the normal Track / Add Shot controls for the next hole.
+    private func recordPutt(made: Bool, _ s: WatchRoundState) {
+        // Ignore taps while a putt is in flight, or after this hole was already
+        // holed out — this is what stops "tapped Made 4× → 4 putts".
+        guard !puttSending, madePuttHole != displayedHoleNumber(s) else { return }
+        let putterId = s.bag.first(where: { $0.isPutter })?.id ?? effectiveClubId(s)
+        let feet = puttFeetOverride ?? s.distanceFeet
+        session.recordPutt(clubId: putterId, made: made, distanceFeet: feet)
+        puttFeetOverride = nil
+        // A made putt locks the panel immediately (optimistic hole-out), so we
+        // don't depend on the phone's confirming snapshot to disable the button.
+        if made { madePuttHole = displayedHoleNumber(s) }
+        // Debounce both buttons briefly; enough for a normal roundtrip while
+        // blocking accidental repeats.
+        puttSending = true
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            puttSending = false
+        }
+    }
+
+    /// Prev / next hole arrows — the second row, under Track & Add Shot. These
+    /// advance the watch's displayed hole LOCALLY (instant) and notify the phone.
+    @ViewBuilder
+    private func navRow(_ s: WatchRoundState) -> some View {
+        HStack(spacing: 6) {
+            bigButton(title: nil, system: "chevron.left", tint: .gray) {
+                navigateHoleLocally(-1, s)
+            }
+            bigButton(title: nil, system: "chevron.right", tint: .gray) {
+                navigateHoleLocally(1, s)
+            }
+        }
+    }
+
+    /// A large tappable control used in the 2×2 grid — icon + optional title,
+    /// full-width within its column.
+    @ViewBuilder
+    private func bigButton(
+        title: String?,
+        system: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: system)
+                    .font(.system(size: 16, weight: .bold))
+                if let title = title {
+                    Text(title)
+                        .font(.system(size: 13, weight: .bold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 36)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(tint)
     }
 
     /// LEFT column: big yards-to-pin readout above a small suggested-club button.
@@ -337,9 +642,22 @@ struct HoleHomeView: View {
                     .clipShape(Capsule())
                     .lineLimit(1)
             }
-            rightRow(label: "Shots", value: s.shotsThisHole ?? 0)
-            rightRow(label: "Putts", value: s.puttsThisHole ?? 0)
+            // Per-hole counts come from the displayed hole's snapshot entry so a
+            // previewed hole shows ITS shots/putts, not the phone's current hole.
+            // Shots also fold in the watch's optimistic count (see shownShots) so
+            // a just-hit shot appears before the backgrounded phone confirms it.
+            rightRow(label: "Shots", value: shownShots(s))
+            rightRow(label: "Putts", value: displayedHole(s)?.putts ?? s.puttsThisHole ?? 0)
         }
+    }
+
+    /// Shots to show for the displayed hole: the phone's snapshot count OR the
+    /// watch's optimistic count (shots recorded/detected on the watch that the
+    /// backgrounded phone hasn't confirmed yet), whichever is higher.
+    private func shownShots(_ s: WatchRoundState) -> Int {
+        let snap = displayedHole(s)?.shots ?? s.shotsThisHole ?? 0
+        guard let hole = displayedHoleNumber(s) else { return snap }
+        return max(snap, session.pendingShotCounts[hole] ?? 0)
     }
 
     /// Highlighted button showing the suggested club. Tapping opens the
@@ -364,17 +682,17 @@ struct HoleHomeView: View {
             _ = club
             showingShotFlow = true
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: 3) {
                 Image(systemName: (club?.isPutter ?? false) ? "circle.dotted" : "figure.golf")
-                    .font(.system(size: 11))
+                    .font(.system(size: 9))
                     .foregroundColor(.yellow)
                 Text(club?.name ?? "Club")
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 10, weight: .bold))
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 3)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
             .background(Color.green.opacity(0.55))
             .clipShape(Capsule())
         }
@@ -399,24 +717,83 @@ struct HoleHomeView: View {
         return .green
     }
 
-    /// Live GPS-derived yards-to-pin when available (watch has its own
-    /// fix + the snapshot includes pin coords), otherwise the static
-    /// distanceYards/distanceFeet pushed by the phone. Live wins so the
-    /// number updates as the user walks.
     private func distanceText(_ s: WatchRoundState) -> String {
-        if let live = session.liveDistanceToPinYards() {
-            return "\(Int(live.rounded()))"
-        }
-        if let ft = s.distanceFeet { return "\(ft)" }
-        if let yd = s.distanceYards { return "\(yd)" }
-        return "—"
+        displayDistance(s).map { "\($0.value)" } ?? "—"
     }
 
     private func distanceUnit(_ s: WatchRoundState) -> String {
-        // Live distance is always reported in yards. Only use 'ft' when
-        // the phone explicitly pushed a feet reading (on the green).
-        if session.liveDistanceToPinYards() != nil { return "yds" }
-        if s.distanceFeet != nil { return "ft" }
-        return "yds"
+        displayDistance(s)?.unit ?? "yds"
+    }
+
+    /// Resolved distance-to-pin number + unit. On the displayed hole we use the
+    /// live GPS distance; near the pin (on the green, or within ~12 yds) it's
+    /// shown in FEET, otherwise yards. When previewing a hole the user isn't
+    /// physically at, GPS-to-that-pin is meaningless → static hole yardage.
+    private func displayDistance(_ s: WatchRoundState) -> (value: Int, unit: String)? {
+        if !isPreviewing(s) {
+            let onGreen = isOnGreen(s)
+            // Prefer the watch's OWN live GPS distance for the feet-to-flag on the
+            // green. The phone's pushed distanceFeet was previously chosen here,
+            // but it FREEZES when the phone is backgrounded — the cause of the
+            // "238 ft while standing on the green" reading. Own GPS self-corrects;
+            // fall back to the phone value only when there's no usable fix.
+            if let liveYards = liveDistanceToDisplayedPin(s) {
+                if onGreen || liveYards <= 12 {
+                    return (Int((liveYards * 3).rounded()), "ft")
+                }
+                return (Int(liveYards.rounded()), "yds")
+            }
+            if onGreen, let ft = s.distanceFeet {
+                return (ft, "ft")
+            }
+        }
+        if let yd = displayedHole(s)?.yardage { return (yd, "yds") }
+        if let ft = s.distanceFeet { return (ft, "ft") }
+        if let yd = s.distanceYards { return (yd, "yds") }
+        return nil
+    }
+
+    /// Live yards to the displayed hole's pin (uses that hole's pin coords; falls
+    /// back to the snapshot's current-hole pin when the per-hole array is empty).
+    private func liveDistanceToDisplayedPin(_ s: WatchRoundState) -> Double? {
+        if let hole = displayedHole(s), let plat = hole.pinLat, let plng = hole.pinLng {
+            return session.liveDistanceToPin(lat: plat, lng: plng)
+        }
+        return session.liveDistanceToPinYards()
+    }
+
+    /// Within this many yards of the pin, the watch treats you as ON THE GREEN by
+    /// its OWN GPS — independent of the phone. The phone computes an exact
+    /// green-polygon test, but that value FREEZES when the phone is backgrounded
+    /// (pocketed during play), so the Putt view never armed. This radius is the
+    /// watch's self-sufficient fallback. Tunable: bigger catches long putts from
+    /// the fringe, smaller avoids arming on a chip from just off the green.
+    private let onGreenRadiusYards: Double = 8
+
+    /// Effective on-green for the DISPLAYED hole: the phone's exact result when
+    /// it's awake, OR the watch's own GPS-within-radius test so putting mode
+    /// still arms when the phone is asleep. Only for the hole you're physically
+    /// on (not a previewed hole).
+    private func isOnGreen(_ s: WatchRoundState) -> Bool {
+        if s.onGreen { return true }
+        if isPreviewing(s) { return false }
+        if let yards = liveDistanceToDisplayedPin(s) { return yards <= onGreenRadiusYards }
+        return false
+    }
+
+    /// Club recommendation computed ON THE WATCH from its own live distance to
+    /// the pin and the bag (both already in the snapshot) — so the suggested club
+    /// tracks you as you walk up to the ball, instead of freezing on the phone's
+    /// last push. Picks the non-putter club whose typical yardage is closest to
+    /// the live distance. Nil while previewing, on the green, or without a fix.
+    private func liveSuggestedClubId(_ s: WatchRoundState) -> String? {
+        guard !isPreviewing(s), !isOnGreen(s),
+              let yards = liveDistanceToDisplayedPin(s) else { return nil }
+        let target = Int(yards.rounded())
+        let candidates = s.bag.filter { !$0.isPutter && $0.typicalYards != nil }
+        guard !candidates.isEmpty else { return nil }
+        return candidates.min(by: {
+            abs(($0.typicalYards ?? 0) - target) < abs(($1.typicalYards ?? 0) - target)
+        })?.id
     }
 }

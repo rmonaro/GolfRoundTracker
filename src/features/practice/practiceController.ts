@@ -34,14 +34,31 @@ function currentUserId(): string | null {
 let creating: Promise<string | null> | null = null;
 
 /**
+ * After an explicit end, briefly refuse to AUTO-create a session from stray
+ * watch messages (a trailing swing or a re-broadcast `practiceStarted` arriving
+ * as the watch winds down). Without this, ending a Range/Drill session would
+ * spawn a phantom Swing/Net session and show "Resume live session". An explicit
+ * `start()` always bypasses this.
+ */
+let suppressAutoCreateUntil = 0;
+const SUPPRESS_MS = 10000;
+
+/**
  * Return the active practice session id, creating one if none exists. This is
  * what makes watch-initiated practice work and guarantees swings are never
  * dropped — whoever arrives first (a `practiceStarted` message or the first
- * `swingDetected`) lazily opens the session.
+ * `swingDetected`) lazily opens the session. `explicit` (a phone-initiated
+ * `start()`) bypasses the post-end suppression window.
  */
-async function ensureSession(clubId: string | null, source?: string): Promise<string | null> {
+async function ensureSession(
+  clubId: string | null,
+  source?: string,
+  explicit = false
+): Promise<string | null> {
   const existing = store.getState().session;
   if (existing) return existing.sessionId;
+  // Don't let a late watch message resurrect a session right after an end.
+  if (!explicit && Date.now() < suppressAutoCreateUntil) return null;
   if (creating) return creating;
 
   const userId = currentUserId();
@@ -57,7 +74,8 @@ async function ensureSession(clubId: string | null, source?: string): Promise<st
           watchSessionId: null,
           userId,
           startedAt: remote.startedAt,
-          clubId
+          clubId,
+          source: source ?? 'practice'
         });
       }
       creating = null;
@@ -75,7 +93,9 @@ export const practiceController = {
   /** Start a practice session (phone-initiated). Reuses one if already open.
    *  `source` tags the origin ('range' hides it from the Swing/Net history). */
   async start(clubId: string | null, source?: string): Promise<string | null> {
-    return ensureSession(clubId, source);
+    // Phone-initiated: always allowed, and clears any post-end suppression.
+    suppressAutoCreateUntil = 0;
+    return ensureSession(clubId, source, true);
   },
 
   /** Watch started practice: open/correlate the phone session. */
@@ -269,6 +289,8 @@ export const practiceController = {
 
     const id = session.sessionId;
     store.getState().endSession(); // clears active session, keeps swings for summary
+    // Block stray watch messages from re-opening a phantom session post-end.
+    suppressAutoCreateUntil = Date.now() + SUPPRESS_MS;
     return id;
   }
 };

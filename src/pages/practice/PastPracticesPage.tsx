@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -13,24 +13,25 @@ import {
   DialogTitle,
   IconButton,
   Stack,
-  Typography
-} from '@mui/material';
-import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
-import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded';
-import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
-import { useNavigate } from 'react-router-dom';
-import dayjs from 'dayjs';
-import { useAuthStore } from '@/stores/authStore';
-import { swingRepo } from '@/services/swingRepo';
-import { rangeRepo } from '@/services/rangeRepo';
-import { practicePageSx } from './practicePageSx';
-import type { SwingSession } from '@/types/swing';
-import type { RangeSession } from '@/types/range';
+  Typography,
+} from "@mui/material";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
+import ArrowBackRoundedIcon from "@mui/icons-material/ArrowBackRounded";
+import ChevronRightRoundedIcon from "@mui/icons-material/ChevronRightRounded";
+import { useNavigate } from "react-router-dom";
+import dayjs from "dayjs";
+import { useAuthStore } from "@/stores/authStore";
+import { swingRepo } from "@/services/swingRepo";
+import { rangeRepo } from "@/services/rangeRepo";
+import { getDrill } from "@/features/range/drills/registry";
+import { practicePageSx } from "./practicePageSx";
+import type { SwingSession } from "@/types/swing";
+import type { RangeSession } from "@/types/range";
 
 interface PendingDelete {
   id: string;
   startedAt: string;
-  kind: 'swing' | 'range';
+  kind: "swing" | "range";
 }
 
 type RangeSessionWithCount = RangeSession & { shotCount: number };
@@ -59,18 +60,39 @@ const iconBoxSx = {
   width: 40,
   height: 40,
   flexShrink: 0,
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'center',
-  borderRadius: '5px',
-  bgcolor: 'action.hover'
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  borderRadius: "5px",
+  bgcolor: "action.hover",
 } as const;
+
+// One of the four card stats: bold number on top, label below.
+function StatCell({ value, label }: { value: string; label: string }) {
+  return (
+    <Box sx={{ flex: 1, textAlign: "center", minWidth: 0 }}>
+      <Typography sx={{ fontWeight: 800, fontSize: "1rem", lineHeight: 1.15 }} noWrap>
+        {value}
+      </Typography>
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        noWrap
+        sx={{ display: "block" }}
+      >
+        {label}
+      </Typography>
+    </Box>
+  );
+}
 
 export function PastPracticesPage() {
   const navigate = useNavigate();
   const userId = useAuthStore((s) => s.session?.user.id);
   const [sessions, setSessions] = useState<SwingSession[]>([]);
-  const [rangeSessions, setRangeSessions] = useState<RangeSessionWithCount[]>([]);
+  const [rangeSessions, setRangeSessions] = useState<RangeSessionWithCount[]>(
+    [],
+  );
   const [loading, setLoading] = useState(true);
   const [pending, setPending] = useState<PendingDelete | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -82,13 +104,13 @@ export function PastPracticesPage() {
     setLoading(true);
     Promise.all([
       swingRepo.listSessions(userId).catch((err) => {
-        console.warn('[practice-history] swing load failed', err);
+        console.warn("[practice-history] swing load failed", err);
         return [] as SwingSession[];
       }),
       rangeRepo.listSessions(userId).catch((err) => {
-        console.warn('[practice-history] range load failed', err);
+        console.warn("[practice-history] range load failed", err);
         return [] as RangeSessionWithCount[];
-      })
+      }),
     ])
       .then(([sw, rg]) => {
         if (cancelled) return;
@@ -105,9 +127,19 @@ export function PastPracticesPage() {
 
   // Merge both session types, newest first.
   const items = useMemo(() => {
-    const swingItems = sessions.map((s) => ({ kind: 'swing' as const, startedAt: s.startedAt, swing: s }));
-    const rangeItems = rangeSessions.map((r) => ({ kind: 'range' as const, startedAt: r.startedAt, range: r }));
-    return [...swingItems, ...rangeItems].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+    const swingItems = sessions.map((s) => ({
+      kind: "swing" as const,
+      startedAt: s.startedAt,
+      swing: s,
+    }));
+    const rangeItems = rangeSessions.map((r) => ({
+      kind: "range" as const,
+      startedAt: r.startedAt,
+      range: r,
+    }));
+    return [...swingItems, ...rangeItems].sort((a, b) =>
+      a.startedAt < b.startedAt ? 1 : -1,
+    );
   }, [sessions, rangeSessions]);
 
   const onConfirmDelete = async () => {
@@ -115,7 +147,7 @@ export function PastPracticesPage() {
     setDeleting(true);
     setDeleteError(null);
     try {
-      if (pending.kind === 'range') {
+      if (pending.kind === "range") {
         await rangeRepo.deleteSession(pending.id);
         setRangeSessions((prev) => prev.filter((s) => s.id !== pending.id));
       } else {
@@ -124,7 +156,9 @@ export function PastPracticesPage() {
       }
       setPending(null);
     } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : 'Could not delete session');
+      setDeleteError(
+        err instanceof Error ? err.message : "Could not delete session",
+      );
     } finally {
       setDeleting(false);
     }
@@ -132,10 +166,17 @@ export function PastPracticesPage() {
 
   return (
     <Box sx={practicePageSx()}>
-      <IconButton aria-label="Back" onClick={() => navigate('/practice')} sx={{ ml: -1, mb: 1 }}>
+      <IconButton
+        aria-label="Back"
+        onClick={() => navigate("/practice")}
+        sx={{ ml: -1, mb: 1 }}
+      >
         <ArrowBackRoundedIcon />
       </IconButton>
-      <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px', lineHeight: 1.1 }}>
+      <Typography
+        variant="h5"
+        sx={{ fontWeight: 900, fontSize: "32px", lineHeight: 1.1 }}
+      >
         Past
         <br />
         Practices
@@ -158,27 +199,38 @@ export function PastPracticesPage() {
 
       <Stack spacing={1.5} sx={{ mt: 2 }}>
         {items.map((item) => {
-          const isSwing = item.kind === 'swing';
+          const isSwing = item.kind === "swing";
           const startedAt = item.startedAt;
-          const title = isSwing ? 'Swing/Net' : 'Range';
+          const drill = !isSwing ? getDrill(item.range.drillId) : null;
+          const title = isSwing ? "Swing/Net" : drill ? drill.name : "Range";
           const icon = isSwing ? SWING_ICON : RANGE_ICON;
-          const inProgress = isSwing ? item.swing.endedAt == null : item.range.endedAt == null;
+          const inProgress = isSwing
+            ? item.swing.endedAt == null
+            : item.range.endedAt == null;
           const subtitle = isSwing
-            ? `${item.swing.swingCount} swing${item.swing.swingCount === 1 ? '' : 's'}${
-                item.swing.avgTempoRatio != null ? ` · ${item.swing.avgTempoRatio.toFixed(1)} : 1 tempo` : ''
+            ? `${item.swing.swingCount} swing${item.swing.swingCount === 1 ? "" : "s"}${
+                item.swing.avgTempoRatio != null
+                  ? ` · ${item.swing.avgTempoRatio.toFixed(1)} : 1 tempo`
+                  : ""
               }`
-            : `${item.range.shotCount} shot${item.range.shotCount === 1 ? '' : 's'}`;
+            : `${drill ? "Drill · " : ""}${item.range.shotCount} shot${item.range.shotCount === 1 ? "" : "s"}`;
           const onOpen = () =>
-            navigate(isSwing ? `/practice/history/${item.swing.id}` : `/range/summary/${item.range.id}`);
+            navigate(
+              isSwing
+                ? `/practice/history/${item.swing.id}`
+                : drill
+                  ? `/drills/report/${item.range.id}`
+                  : `/range/summary/${item.range.id}`,
+            );
 
           return (
             <Card
               key={`${item.kind}-${isSwing ? item.swing.id : item.range.id}`}
               variant="outlined"
-              sx={{ borderRadius: '3px', position: 'relative' }}
+              sx={{ borderRadius: "3px", position: "relative" }}
             >
               <IconButton
-                aria-label={`Delete ${title} session from ${dayjs(startedAt).format('MMM D, YYYY')}`}
+                aria-label={`Delete ${title} session from ${dayjs(startedAt).format("MMM D, YYYY")}`}
                 size="small"
                 onClick={(e) => {
                   e.stopPropagation();
@@ -186,10 +238,16 @@ export function PastPracticesPage() {
                   setPending({
                     id: isSwing ? item.swing.id : item.range.id,
                     startedAt,
-                    kind: item.kind
+                    kind: item.kind,
                   });
                 }}
-                sx={{ position: 'absolute', top: 6, right: 6, zIndex: 2, color: 'text.secondary' }}
+                sx={{
+                  position: "absolute",
+                  top: 6,
+                  right: 6,
+                  zIndex: 2,
+                  color: "text.secondary",
+                }}
               >
                 <DeleteOutlineRoundedIcon fontSize="small" />
               </IconButton>
@@ -198,35 +256,81 @@ export function PastPracticesPage() {
                   <Stack direction="row" spacing={1.5} alignItems="center">
                     <Box sx={iconBoxSx}>{icon}</Box>
                     <Box sx={{ flex: 1, minWidth: 0 }}>
-                      <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+                      <Stack
+                        direction="row"
+                        justifyContent="space-between"
+                        alignItems="flex-start"
+                      >
                         <Box sx={{ minWidth: 0 }}>
                           <Typography variant="subtitle1" fontWeight={700}>
                             {title}
                           </Typography>
-                          <Typography color="text.secondary" sx={{ fontSize: '12px' }}>
-                            {dayjs(startedAt).format('MMM D, YYYY · h:mm A')}
+                          <Typography
+                            color="text.secondary"
+                            sx={{ fontSize: "12px" }}
+                          >
+                            {dayjs(startedAt).format("MMM D, YYYY · h:mm A")}
                           </Typography>
                         </Box>
                         <Stack direction="row" spacing={0.5}>
-                          {isSwing && item.swing.fatigueTrend && item.swing.fatigueTrend !== 'none' && (
-                            <Chip size="small" color="warning" label="Fatigue" />
+                          {isSwing &&
+                            item.swing.fatigueTrend &&
+                            item.swing.fatigueTrend !== "none" && (
+                              <Chip
+                                size="small"
+                                color="warning"
+                                label="Fatigue"
+                              />
+                            )}
+                          {inProgress && (
+                            <Chip size="small" label="In progress" />
                           )}
-                          {inProgress && <Chip size="small" label="In progress" />}
                         </Stack>
                       </Stack>
-                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                        {subtitle}
-                      </Typography>
-                      {isSwing && item.swing.tempoConsistencyScore != null && (
-                        <Typography variant="caption" color="text.secondary">
-                          Tempo consistency {item.swing.tempoConsistencyScore}/100
-                          {item.swing.planeConsistencyScore != null
-                            ? ` · pattern ${item.swing.planeConsistencyScore}/100`
-                            : ''}
+                      {isSwing ? (
+                        <Stack direction="row" sx={{ mt: 1 }}>
+                          <StatCell
+                            value={`${item.swing.swingCount}`}
+                            label="Swings"
+                          />
+                          <StatCell
+                            value={
+                              item.swing.avgTempoRatio != null
+                                ? `${item.swing.avgTempoRatio.toFixed(1)}:1`
+                                : "—"
+                            }
+                            label="Tempo"
+                          />
+                          <StatCell
+                            value={
+                              item.swing.tempoConsistencyScore != null
+                                ? `${item.swing.tempoConsistencyScore}`
+                                : "—"
+                            }
+                            label="Consistency"
+                          />
+                          <StatCell
+                            value={
+                              item.swing.planeConsistencyScore != null
+                                ? `${item.swing.planeConsistencyScore}`
+                                : "—"
+                            }
+                            label="Pattern"
+                          />
+                        </Stack>
+                      ) : (
+                        <Typography
+                          variant="body2"
+                          color="text.secondary"
+                          sx={{ mt: 0.5 }}
+                        >
+                          {subtitle}
                         </Typography>
                       )}
                     </Box>
-                    <ChevronRightRoundedIcon sx={{ color: 'text.disabled', flexShrink: 0 }} />
+                    <ChevronRightRoundedIcon
+                      sx={{ color: "text.disabled", flexShrink: 0 }}
+                    />
                   </Stack>
                 </CardContent>
               </CardActionArea>
@@ -245,9 +349,10 @@ export function PastPracticesPage() {
         <DialogTitle>Delete practice session?</DialogTitle>
         <DialogContent>
           <Typography variant="body2" color="text.secondary">
-            This permanently removes the session from{' '}
-            {pending ? dayjs(pending.startedAt).format('MMM D, YYYY') : ''} and all of its{' '}
-            {pending?.kind === 'range' ? 'shots' : 'swings'}. This can't be undone.
+            This permanently removes the session from{" "}
+            {pending ? dayjs(pending.startedAt).format("MMM D, YYYY") : ""} and
+            all of its {pending?.kind === "range" ? "shots" : "swings"}. This
+            can't be undone.
           </Typography>
           {deleteError && (
             <Alert severity="error" sx={{ mt: 2 }}>
@@ -259,8 +364,13 @@ export function PastPracticesPage() {
           <Button onClick={() => setPending(null)} disabled={deleting}>
             Cancel
           </Button>
-          <Button color="error" variant="contained" onClick={onConfirmDelete} disabled={deleting}>
-            {deleting ? 'Deleting…' : 'Delete'}
+          <Button
+            color="error"
+            variant="contained"
+            onClick={onConfirmDelete}
+            disabled={deleting}
+          >
+            {deleting ? "Deleting…" : "Delete"}
           </Button>
         </DialogActions>
       </Dialog>

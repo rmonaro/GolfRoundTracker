@@ -6,6 +6,53 @@ import Combine
 /// Round-state snapshot received from the phone. Mirrors the JS-side
 /// `WatchRoundState` interface in `src/services/watchBridge.ts` — keep the
 /// two in sync.
+/// Brief summary of the most-recent GPS auto-recorded shot, shown as the
+/// watch's post-save overview. Mirrors the JS `lastShotSummary` field.
+struct WatchShotSummary: Equatable {
+    let id: Int
+    let clubName: String
+    let result: String
+    let distanceText: String
+
+    init?(dict: [String: Any]) {
+        guard let id = dict["id"] as? Int,
+              let clubName = dict["clubName"] as? String,
+              let result = dict["result"] as? String,
+              let distanceText = dict["distanceText"] as? String else { return nil }
+        self.id = id
+        self.clubName = clubName
+        self.result = result
+        self.distanceText = distanceText
+    }
+}
+
+/// One hole's headline data, so the watch can navigate holes locally and show
+/// the tee yardage + suggested club without a phone roundtrip. Mirrors an entry
+/// of the JS `holes` array.
+struct WatchHole: Equatable, Identifiable {
+    let holeNumber: Int
+    let par: Int?
+    let yardage: Int?
+    let suggestedClubId: String?
+    let shots: Int?
+    let putts: Int?
+    let pinLat: Double?
+    let pinLng: Double?
+    var id: Int { holeNumber }
+
+    init?(dict: [String: Any]) {
+        guard let holeNumber = dict["holeNumber"] as? Int else { return nil }
+        self.holeNumber = holeNumber
+        self.par = dict["par"] as? Int
+        self.yardage = dict["yardage"] as? Int
+        self.suggestedClubId = dict["suggestedClubId"] as? String
+        self.shots = dict["shots"] as? Int
+        self.putts = dict["putts"] as? Int
+        self.pinLat = dict["pinLat"] as? Double
+        self.pinLng = dict["pinLng"] as? Double
+    }
+}
+
 struct WatchRoundState: Equatable {
     let active: Bool
     let courseName: String?
@@ -24,6 +71,23 @@ struct WatchRoundState: Equatable {
     /// Gates whether `RoundShotController` runs during a round. Defaults true
     /// when the phone doesn't send it (older build / missing key).
     let shotDetection: Bool
+    /// On/around the green (current hole) → show live distance in feet, not yards.
+    let onGreen: Bool
+    /// Hole holed out (last shot a made putt). The prev/next hole arrows show
+    /// ONLY when this is true — hidden during active play.
+    let holeComplete: Bool
+    /// Whether the user is within range of the course (phone's 2km gate).
+    /// nil → unknown; the watch treats nil as at-course so a missing fix
+    /// never blocks play. false → watch hides Track / Add Shot.
+    let atCourse: Bool?
+    /// Current phone auto-track state, so the watch Track button is a synced
+    /// toggle that reflects reality even if the at-course gate refused to start.
+    let autoTracking: Bool
+    /// Transient summary of the most-recent GPS auto-recorded shot (id bumps
+    /// per shot so the overview shows once).
+    let lastShotSummary: WatchShotSummary?
+    /// Every hole's headline data, for local hole navigation on the watch.
+    let holes: [WatchHole]
     let pinLat: Double?
     let pinLng: Double?
     let bag: [WatchClub]
@@ -34,7 +98,10 @@ struct WatchRoundState: Equatable {
         distanceYards: nil, distanceFeet: nil, scoreVsPar: nil,
         shotsThisHole: nil, puttsThisHole: nil,
         suggestedClubId: nil, selectedClubId: nil,
-        recordingShot: false, shotDetection: true, pinLat: nil, pinLng: nil, bag: []
+        recordingShot: false, shotDetection: true, onGreen: false,
+        holeComplete: false,
+        atCourse: nil, autoTracking: false, lastShotSummary: nil,
+        holes: [], pinLat: nil, pinLng: nil, bag: []
     )
 
     init(
@@ -52,6 +119,12 @@ struct WatchRoundState: Equatable {
         selectedClubId: String? = nil,
         recordingShot: Bool = false,
         shotDetection: Bool = true,
+        onGreen: Bool = false,
+        holeComplete: Bool = false,
+        atCourse: Bool? = nil,
+        autoTracking: Bool = false,
+        lastShotSummary: WatchShotSummary? = nil,
+        holes: [WatchHole] = [],
         pinLat: Double? = nil,
         pinLng: Double? = nil,
         bag: [WatchClub] = []
@@ -70,6 +143,12 @@ struct WatchRoundState: Equatable {
         self.selectedClubId = selectedClubId
         self.recordingShot = recordingShot
         self.shotDetection = shotDetection
+        self.onGreen = onGreen
+        self.holeComplete = holeComplete
+        self.atCourse = atCourse
+        self.autoTracking = autoTracking
+        self.lastShotSummary = lastShotSummary
+        self.holes = holes
         self.pinLat = pinLat
         self.pinLng = pinLng
         self.bag = bag
@@ -92,6 +171,20 @@ struct WatchRoundState: Equatable {
         self.selectedClubId = dict["selectedClubId"] as? String
         self.recordingShot = (dict["recordingShot"] as? Bool) ?? false
         self.shotDetection = (dict["shotDetection"] as? Bool) ?? true
+        self.onGreen = (dict["onGreen"] as? Bool) ?? false
+        self.holeComplete = (dict["holeComplete"] as? Bool) ?? false
+        self.atCourse = dict["atCourse"] as? Bool
+        self.autoTracking = (dict["autoTracking"] as? Bool) ?? false
+        if let rawSummary = dict["lastShotSummary"] as? [String: Any] {
+            self.lastShotSummary = WatchShotSummary(dict: rawSummary)
+        } else {
+            self.lastShotSummary = nil
+        }
+        if let rawHoles = dict["holes"] as? [[String: Any]] {
+            self.holes = rawHoles.compactMap { WatchHole(dict: $0) }
+        } else {
+            self.holes = []
+        }
         self.pinLat = dict["pinLat"] as? Double
         self.pinLng = dict["pinLng"] as? Double
         if let rawBag = dict["bag"] as? [[String: Any]] {
@@ -137,7 +230,7 @@ struct WatchClub: Equatable, Identifiable {
 /// `src/services/watchBridge.ts`.
 enum WatchOutboundMessage {
     case recordShot(clubId: String?, targetType: String, targetResult: String,
-                    start: CLLocation?, end: CLLocation?)
+                    start: CLLocation?, end: CLLocation?, distanceFeet: Int? = nil)
     case navigateHole(direction: String) // "prev" | "next"
     /// Watch user toggled the Track-shot button. `active=true` when the
     /// user starts tracking (after captureShotStart), false when they
@@ -150,6 +243,18 @@ enum WatchOutboundMessage {
     /// part of a shot record). Phone should update its `selectedClubId`
     /// so the next suggestion / shot default reflects the change.
     case selectClub(clubId: String)
+    /// Watch toggled round-wide auto-tracking. The phone enables/disables its
+    /// own auto-track (respecting the at-course gate) and echoes the result
+    /// back via the snapshot's `autoTracking`.
+    case setAutoTrack(active: Bool)
+    /// Watch wants to log a shot at the user's current GPS position — Track-off
+    /// "I'm at my ball" or the Add Shot button. The phone fills the start from
+    /// the hole's prior ball position, infers fairway/left/right from `end`,
+    /// auto-saves, and returns a summary via the snapshot. No pickers involved.
+    case autoShot(clubId: String?, start: CLLocation?, end: CLLocation?)
+    /// Watch user tapped "Set flag here" while standing at the flag. Carries the
+    /// watch's current GPS; the phone moves the current hole's pin to it.
+    case setPin(lat: Double, lng: Double)
 
     // --- Practice-mode swing feedback (motion-based) ---
     /// Practice session started on the watch. Carries the watch-minted
@@ -170,12 +275,19 @@ enum WatchOutboundMessage {
     /// detection. `capturedAt` is the watch clock (epoch ms); the phone trusts
     /// arrival time, not this, for recency. `location` is the watch's best
     /// recent fix at impact, if any.
-    case swingImpact(impactId: Int, capturedAt: Double, swingType: String,
-                     handSpeed: Int, location: CLLocation?)
+    /// Carries the FULL motion metrics (same bundle as `.swingDetected`) so the
+    /// phone can store swing tempo/quality on the recorded round shot and use
+    /// `swingType` to classify it (migration 031). `handSpeed` on the wire is
+    /// `metrics.estimatedHandSpeed`.
+    /// `heartRate` is the live bpm at strike time from the round's HealthKit
+    /// workout session (0 when HealthKit isn't available / authorized), matching
+    /// `.swingDetected` — it is omitted from the wire payload when 0.
+    case swingImpact(impactId: Int, capturedAt: Double, metrics: SwingMetrics,
+                     location: CLLocation?, clubId: String?, heartRate: Int)
 
     var payload: [String: Any] {
         switch self {
-        case .recordShot(let clubId, let targetType, let targetResult, let start, let end):
+        case .recordShot(let clubId, let targetType, let targetResult, let start, let end, let distanceFeet):
             var d: [String: Any] = [
                 "type": "recordShot",
                 "clubId": clubId ?? NSNull(),
@@ -189,6 +301,12 @@ enum WatchOutboundMessage {
             if let e = end {
                 d["endLat"] = e.coordinate.latitude
                 d["endLng"] = e.coordinate.longitude
+            }
+            // For putts the watch sends the (player-adjusted) feet-to-flag
+            // directly — GPS can't measure a putt, so this is the source of
+            // truth the phone saves.
+            if let ft = distanceFeet {
+                d["distanceFeet"] = ft
             }
             return d
         case .navigateHole(let direction):
@@ -209,6 +327,24 @@ enum WatchOutboundMessage {
             return d
         case .selectClub(let clubId):
             return ["type": "selectClub", "clubId": clubId]
+        case .setAutoTrack(let active):
+            return ["type": "setAutoTrack", "active": active]
+        case .autoShot(let clubId, let start, let end):
+            var d: [String: Any] = [
+                "type": "autoShot",
+                "clubId": clubId ?? NSNull()
+            ]
+            if let s = start {
+                d["startLat"] = s.coordinate.latitude
+                d["startLng"] = s.coordinate.longitude
+            }
+            if let e = end {
+                d["endLat"] = e.coordinate.latitude
+                d["endLng"] = e.coordinate.longitude
+            }
+            return d
+        case .setPin(let lat, let lng):
+            return ["type": "setPin", "lat": lat, "lng": lng]
         case .practiceStarted(let sessionId, let clubId):
             return [
                 "type": "practiceStarted",
@@ -261,14 +397,33 @@ enum WatchOutboundMessage {
                 d["durationSeconds"] = h.durationSeconds
             }
             return d
-        case .swingImpact(let impactId, let capturedAt, let swingType, let handSpeed, let location):
+        case .swingImpact(let impactId, let capturedAt, let m, let location, let clubId, let heartRate):
             var d: [String: Any] = [
                 "type": "roundImpact",
                 "impactId": impactId,
                 "capturedAt": capturedAt,
-                "swingType": swingType,
-                "handSpeed": handSpeed
+                "swingType": m.swingType,
+                "handSpeed": m.estimatedHandSpeed,
+                // Full motion bundle (migration 031) — mirrors swingDetected so
+                // the round shot carries practice-grade swing tempo/quality.
+                "backswingTimeMs": m.backswingTimeMs,
+                "downswingTimeMs": m.downswingTimeMs,
+                "tempoRatio": m.tempoRatio,
+                "transitionScore": m.transitionScore,
+                "wristRotationScore": m.wristRotationScore,
+                "finishStabilityScore": m.finishStabilityScore,
+                "planeAxis": m.planeAxis,
+                "backswingRotation": m.backswingRotation,
+                "releaseTimingScore": m.releaseTimingScore,
+                "decelerationScore": m.decelerationScore,
+                "transitionDirectionScore": m.transitionDirectionScore,
+                "addressGravity": m.addressGravity,
+                "clubId": clubId ?? NSNull()
             ]
+            // Real sensor reading (unlike the motion estimates above). Omitted
+            // when HealthKit gave us nothing, so the phone stores null rather
+            // than a bogus 0 bpm.
+            if heartRate > 0 { d["heartRate"] = heartRate }
             if let l = location {
                 d["startLat"] = l.coordinate.latitude
                 d["startLng"] = l.coordinate.longitude
@@ -299,6 +454,31 @@ final class WatchSession: NSObject, ObservableObject {
     /// state update → snapshot back). Cleared on the next snapshot
     /// arrival, since by then the phone has confirmed the pick.
     @Published private(set) var localSelectedClubId: String?
+    /// Optimistic local override of the auto-track on/off state. Set the instant
+    /// the user taps Track so the button flips immediately instead of waiting on
+    /// the phone roundtrip (setAutoTrack → phone applyAutoTrack → snapshot back),
+    /// which can take seconds — or stall entirely when the phone is backgrounded
+    /// — and made the button feel like it needed several taps. Cleared when the
+    /// phone's snapshot confirms the new state, or by a safety timeout if the
+    /// phone never does (e.g. the at-course gate refused to start tracking).
+    @Published private(set) var localAutoTracking: Bool?
+    /// Pending auto-clear for `localAutoTracking` so a refused/lost toggle falls
+    /// back to the phone's real state instead of sticking optimistically.
+    private var autoTrackOverrideTask: Task<Void, Never>?
+
+    /// Optimistic per-hole shot counts for shots the watch recorded or detected
+    /// but the phone hasn't yet confirmed via a fresh snapshot — the phone is
+    /// usually pocketed/backgrounded mid-round, so its snapshot (and every count
+    /// it computes) freezes. Keyed by hole number; the Shots readout shows
+    /// max(snapshot count, this) so a swing shows up immediately. Reconciled away
+    /// in `didReceiveApplicationContext` once the phone catches up or moves on.
+    @Published private(set) var pendingShotCounts: [Int: Int] = [:]
+
+    /// The last non-nil club the home view resolved for display. Two jobs: the
+    /// club pill never blanks to "Club" when the phone momentarily supplies no
+    /// selection (it nulls `selectedClubId` after each shot), and an
+    /// auto-detected strike can report which club was in hand to the phone.
+    @Published private(set) var lastResolvedClubId: String?
 
     private let locationManager = CLLocationManager()
     /// Latched start-position for the current "in-progress" shot. Captured
@@ -406,15 +586,22 @@ final class WatchSession: NSObject, ObservableObject {
     /// yards. Returns nil when GPS or pin isn't available — caller
     /// falls back to the static distance from the phone snapshot.
     func liveDistanceToPinYards() -> Double? {
-        guard let loc = lastLocation else { return nil }
         guard let plat = state.pinLat, let plng = state.pinLng else { return nil }
+        return liveDistanceToPin(lat: plat, lng: plng)
+    }
+
+    /// Live yards from the watch's current GPS fix to an arbitrary pin. Returns
+    /// nil when GPS is missing/stale/inaccurate so the caller can fall back to a
+    /// static yardage.
+    func liveDistanceToPin(lat: Double, lng: Double) -> Double? {
+        guard let loc = lastLocation else { return nil }
         // Reject ancient fixes (>30s) — phone went out of sight, sat in
         // a bag, etc. A stale fix would lie about your distance.
         if loc.timestamp.timeIntervalSinceNow < -30 { return nil }
         // Reject very inaccurate fixes (>50m). At golf yardages this is
         // worse than just showing the phone-snapshot number.
         if loc.horizontalAccuracy < 0 || loc.horizontalAccuracy > 50 { return nil }
-        let pin = CLLocation(latitude: plat, longitude: plng)
+        let pin = CLLocation(latitude: lat, longitude: lng)
         let meters = loc.distance(from: pin)
         return meters * 1.0936133
     }
@@ -479,6 +666,20 @@ final class WatchSession: NSObject, ObservableObject {
         ))
     }
 
+    /// Record a putt from the watch's on-green panel. The distance is the
+    /// feet-to-flag the player sees (and may have nudged with ± ), sent as the
+    /// authoritative value since GPS can't measure a putt. `made` holes out.
+    func recordPutt(clubId: String?, made: Bool, distanceFeet: Int?) {
+        send(.recordShot(
+            clubId: clubId,
+            targetType: "putt",
+            targetResult: made ? "made" : "missed",
+            start: nil,
+            end: bestRecentFix(),
+            distanceFeet: distanceFeet
+        ))
+    }
+
     /// Cancel an in-progress shot capture without sending.
     func cancelShotCapture() {
         locationManager.stopUpdatingLocation()
@@ -491,6 +692,38 @@ final class WatchSession: NSObject, ObservableObject {
     /// phone clears the override.
     func setLocalSelectedClub(_ clubId: String) {
         localSelectedClubId = clubId
+    }
+
+    /// Clear the optimistic local club override — called on hole change so a
+    /// manual pick (e.g. the putter after holing out) doesn't leak into the next
+    /// hole, letting it re-derive the club from live distance / the pushed
+    /// per-hole suggestion.
+    func clearLocalSelectedClub() {
+        localSelectedClubId = nil
+    }
+
+    /// Bump the optimistic shot count for `hole` up to at least `newCount`.
+    func bumpPendingShotCount(hole: Int, to newCount: Int) {
+        if newCount > (pendingShotCounts[hole] ?? 0) {
+            pendingShotCounts[hole] = newCount
+        }
+    }
+
+    /// The watch's motion detector confirmed a ball strike during a round —
+    /// count it against the current hole so the Shots readout reflects the swing
+    /// immediately (the backgrounded phone's snapshot won't). Skipped on the
+    /// green so a putt stroke doesn't inflate the through-the-green shot count.
+    func registerDetectedStrikeShotCount() {
+        guard let hole = state.holeNumber, !state.onGreen else { return }
+        let base = max(state.shotsThisHole ?? 0, pendingShotCounts[hole] ?? 0)
+        bumpPendingShotCount(hole: hole, to: base + 1)
+    }
+
+    /// Remember the last real resolved club (see `lastResolvedClubId`).
+    func noteResolvedClub(_ clubId: String?) {
+        if let clubId, clubId != lastResolvedClubId {
+            lastResolvedClubId = clubId
+        }
     }
 
     /// Mark a shot-tracking session as active. While active, each new
@@ -506,6 +739,43 @@ final class WatchSession: NSObject, ObservableObject {
     /// End the tracking session. Stops the live position forwarding.
     func endShotTrackingSession() {
         trackingShotActive = false
+    }
+
+    /// Request the phone enable/disable round-wide auto-tracking. Flips the
+    /// optimistic local state immediately (so the button responds on the first
+    /// tap) and arms a safety timeout to drop the override if the phone never
+    /// confirms. The authoritative state still comes back via the snapshot's
+    /// `autoTracking`, which clears the override on match.
+    func setAutoTrack(_ active: Bool) {
+        localAutoTracking = active
+        autoTrackOverrideTask?.cancel()
+        autoTrackOverrideTask = Task { [weak self] in
+            // ~4s is long enough for a normal roundtrip to confirm (which clears
+            // the override sooner) but short enough that a refusal self-heals.
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            guard !Task.isCancelled else { return }
+            self?.localAutoTracking = nil
+        }
+        send(.setAutoTrack(active: active))
+    }
+
+    /// Log a shot at the user's CURRENT position. Captures the best recent GPS
+    /// fix as the end; the phone fills the start from the hole's prior ball
+    /// position and infers fairway/left/right. Used by the watch's Track-off
+    /// ("I'm at my ball") and Add Shot flows — no club/result picker.
+    func recordAutoShot(clubId: String?) {
+        let end = bestRecentFix()
+        send(.autoShot(clubId: clubId, start: nil, end: end))
+    }
+
+    /// "Set flag here" — move the current hole's pin to the watch's current GPS.
+    /// Returns true if a fix was available and the command was sent. Uses the
+    /// best recent fix (lowest accuracy) since the player is standing at the flag.
+    @discardableResult
+    func setPinHere() -> Bool {
+        guard let loc = bestRecentFix() else { return false }
+        send(.setPin(lat: loc.coordinate.latitude, lng: loc.coordinate.longitude))
+        return true
     }
 }
 
@@ -553,6 +823,33 @@ extension WatchSession: WCSessionDelegate {
             if let local = self.localSelectedClubId,
                snapshot.selectedClubId == local {
                 self.localSelectedClubId = nil
+            }
+            // Same for the optimistic Track toggle: once the phone's snapshot
+            // reflects the state we tapped, drop the override and cancel its
+            // safety timeout so the button is fully back in lock-step.
+            if let localTrack = self.localAutoTracking,
+               snapshot.autoTracking == localTrack {
+                self.localAutoTracking = nil
+                self.autoTrackOverrideTask?.cancel()
+            }
+            // Drop optimistic shot counts the phone has now caught up to — or
+            // passed. Once the snapshot's count for a hole meets our optimistic
+            // value, or the phone has advanced to a later hole (so this hole's
+            // count is final), trust the phone's number.
+            if !self.pendingShotCounts.isEmpty {
+                var resolvedHoles: [Int] = []
+                for (hole, pending) in self.pendingShotCounts {
+                    let snapCount = snapshot.holes.first(where: { $0.holeNumber == hole })?.shots
+                        ?? (snapshot.holeNumber == hole ? snapshot.shotsThisHole : nil)
+                    if let sc = snapCount, sc >= pending {
+                        resolvedHoles.append(hole)
+                    } else if let current = snapshot.holeNumber, current > hole {
+                        resolvedHoles.append(hole)
+                    }
+                }
+                for hole in resolvedHoles {
+                    self.pendingShotCounts.removeValue(forKey: hole)
+                }
             }
         }
     }
@@ -670,12 +967,23 @@ final class RoundShotController: ObservableObject {
     private let motion = SwingMotionService()
     private let workout = WorkoutManager()
 
+    /// Live heart rate (bpm) while the round workout is running; 0 if
+    /// unavailable. Mirrors `PracticeController.currentHeartRate`.
+    var currentHeartRate: Int { Int(workout.currentHeartRate.rounded()) }
+
     /// Monotonic within a round session so the phone can order / de-dupe.
     private var nextImpactId = 1
     /// Refractory window — ignore a second strike within this of the last so a
     /// waggle / re-grip that crosses the impact threshold can't double-count.
     private var lastImpactAt: Date = .distantPast
     private static let refractoryS: TimeInterval = 1.5
+    /// Minimum peak impact (g) for a swing to count as a real shot in a ROUND.
+    /// A ball strike spikes hard; a practice swing that grazes the turf is much
+    /// softer. Just above the detector's own 2.5g impact floor so a soft brush is
+    /// filtered but real chips/drives pass. TUNABLE — lower if real shots are
+    /// missed, raise if practice swings still slip through. (Was 4.0, which
+    /// dropped real strikes on-course; lowered to 3.0 for balance.)
+    private static let roundMinImpactG = 3.0
 
     private init() {
         motion.onSwing = { [weak self] metrics in self?.handleStrike(metrics) }
@@ -705,6 +1013,9 @@ final class RoundShotController: ObservableObject {
         // Air / practice swings (no impact spike) are exactly what we DON'T
         // want to gate on — drop them. Only real strikes pass.
         guard !m.isAirSwing else { return }
+        // Stricter than practice: require a firm strike so a practice swing that
+        // brushes the turf (a soft spike) doesn't record a phantom shot.
+        guard m.peakImpactG >= Self.roundMinImpactG else { return }
         let now = Date()
         guard now.timeIntervalSince(lastImpactAt) >= Self.refractoryS else { return }
         lastImpactAt = now
@@ -713,9 +1024,18 @@ final class RoundShotController: ObservableObject {
         WatchSession.shared.send(.swingImpact(
             impactId: id,
             capturedAt: now.timeIntervalSince1970 * 1000,
-            swingType: m.swingType,
-            handSpeed: m.estimatedHandSpeed,
-            location: WatchSession.shared.lastLocation
+            // Forward the FULL motion metrics (migration 031) so the round shot
+            // carries the same swing tempo/quality data practice records.
+            metrics: m,
+            location: WatchSession.shared.lastLocation,
+            // Tell the phone which club the watch had in hand so the shot latches
+            // the right club even though the phone never saw a watch-side change.
+            clubId: WatchSession.shared.lastResolvedClubId,
+            // Apple Health: the round already runs an HKWorkoutSession to keep
+            // motion alive wrist-down, so the live bpm is there for the taking.
+            heartRate: currentHeartRate
         ))
+        // Reflect the swing in the watch's own Shots count right away.
+        WatchSession.shared.registerDetectedStrikeShotCount()
     }
 }

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { courseRepo } from '@/services/courseRepo';
+import { courseTeesRepo } from '@/services/courseTeesRepo';
 import { roundRepo } from '@/services/roundRepo';
 import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/authStore';
@@ -16,6 +17,15 @@ export function useCourses() {
   });
 }
 
+/** Named tee sets for a course, for the round-start tee picker. */
+export function useCourseTees(courseId: string | null | undefined) {
+  return useQuery({
+    queryKey: ['course-tees', courseId],
+    enabled: !!courseId,
+    queryFn: () => courseTeesRepo.listForCourse(courseId as string)
+  });
+}
+
 interface StartRoundInput {
   course: {
     id?: string | null;
@@ -29,6 +39,11 @@ interface StartRoundInput {
     city?: string | null;
     state?: string | null;
     zip?: string | null;
+    /** Selected named tee set (migration 029). Null for free-text/manual tees. */
+    teeId?: string | null;
+    teeName?: string | null;
+    /** Per-hole yardage from the selected tee: { [holeNumber]: yards }. */
+    teeHoleYardages?: Record<number, number> | null;
   };
   holesPlayed: number;
   /**
@@ -115,7 +130,9 @@ export function useStartRound() {
         handicap_differential: null,
         tm_registration_id: tm?.registrationId ?? null,
         tm_round_number: tm?.roundNumber ?? null,
-        tm_tournament_slug: tm?.tournamentSlug ?? null
+        tm_tournament_slug: tm?.tournamentSlug ?? null,
+        tee_id: course.teeId ?? null,
+        tee_name: course.teeName ?? null
       });
 
       // Per-hole par. Prefer the OSM-sourced public.holes.par (authoritative
@@ -135,9 +152,14 @@ export function useStartRound() {
           if (h.par != null) osmPars[h.hole_number] = h.par;
         }
       }
+      // Per-hole yardage from the selected tee set (migration 029), keyed by
+      // hole number. Null when no tee was chosen (manual/free-text tee) — the
+      // hole keeps its blank yardage and the user can enter it during play.
+      const teeYardages = course.teeHoleYardages ?? {};
       const holes = emptyHoles(holesPlayed, defaultPar).map((h) => ({
         ...h,
-        par: osmPars[h.holeNumber] ?? h.par
+        par: osmPars[h.holeNumber] ?? h.par,
+        yardage: teeYardages[h.holeNumber] ?? h.yardage
       }));
 
       startActive({

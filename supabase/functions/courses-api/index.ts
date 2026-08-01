@@ -173,6 +173,72 @@ function mapDetailToCourseRow(detail: GolfCourseDetail, adminUserId: string) {
   };
 }
 
+// GolfCourseAPI per-tee shape (defensive — fields may be absent).
+interface ApiTee {
+  tee_name?: string;
+  course_rating?: number;
+  slope_rating?: number;
+  bogey_rating?: number;
+  total_yards?: number;
+  total_meters?: number;
+  number_of_holes?: number;
+  par_total?: number;
+  holes?: Array<{ par?: number; yardage?: number; handicap?: number }>;
+}
+
+/**
+ * Fan out `detail.tees.{male,female}[]` into `course_tees` rows (source='api').
+ * Idempotent: re-import upserts on (course_id, source, gender, tee_name) via the
+ * unique index from migration 029. Best-effort — a course with no scorecard
+ * tees simply gets none (the round-start picker falls back to a free-text tee).
+ */
+async function upsertApiTees(
+  // deno-lint-ignore no-explicit-any
+  supabase: any,
+  courseId: string,
+  detail: GolfCourseDetail
+): Promise<void> {
+  const tees = detail.tees as Record<string, unknown> | undefined;
+  if (!tees || typeof tees !== 'object') return;
+
+  const rows: Record<string, unknown>[] = [];
+  for (const gender of ['male', 'female'] as const) {
+    const list = tees[gender];
+    if (!Array.isArray(list)) continue;
+    for (const t of list as ApiTee[]) {
+      const name = (t?.tee_name ?? '').trim();
+      if (!name) continue;
+      rows.push({
+        course_id: courseId,
+        gender,
+        tee_name: name,
+        course_rating: t.course_rating ?? null,
+        slope_rating: t.slope_rating ?? null,
+        bogey_rating: t.bogey_rating ?? null,
+        total_yards: t.total_yards ?? null,
+        total_meters: t.total_meters ?? null,
+        par_total: t.par_total ?? null,
+        number_of_holes: t.number_of_holes ?? null,
+        holes: Array.isArray(t.holes)
+          ? t.holes.map((h) => ({
+              par: h?.par ?? null,
+              yardage: h?.yardage ?? null,
+              handicap: h?.handicap ?? null
+            }))
+          : null,
+        source: 'api'
+      });
+    }
+  }
+
+  if (rows.length === 0) return;
+  const { error } = await supabase
+    .from('course_tees')
+    .upsert(rows, { onConflict: 'course_id,source,gender,tee_name' });
+  // Non-fatal: tee data is a nice-to-have; don't fail the whole import over it.
+  if (error) console.error('[courses-api] tee upsert failed', error.message);
+}
+
 async function handleImport(courseApiId: string, adminUserId: string): Promise<Response> {
   if (!courseApiId) return errorResponse(400, 'courseApiId is required');
   const detail = await fetchCourseDetail(courseApiId);
@@ -184,6 +250,7 @@ async function handleImport(courseApiId: string, adminUserId: string): Promise<R
     .select('*')
     .single();
   if (error) return errorResponse(500, 'Upsert failed', error.message);
+  await upsertApiTees(supabase, data.id, detail);
   return jsonResponse({ course: data });
 }
 
@@ -207,10 +274,13 @@ async function handleBulkImport(ids: unknown, adminUserId: string): Promise<Resp
     try {
       const detail = await fetchCourseDetail(id);
       const row = mapDetailToCourseRow(detail, adminUserId);
-      const { error } = await supabase
+      const { data: upserted, error } = await supabase
         .from('courses')
-        .upsert(row, { onConflict: 'course_api_id' });
+        .upsert(row, { onConflict: 'course_api_id' })
+        .select('id')
+        .single();
       if (error) throw new Error(error.message);
+      await upsertApiTees(supabase, upserted.id, detail);
       imported++;
     } catch (err) {
       failed.push({ id, error: err instanceof Error ? err.message : 'Unknown' });

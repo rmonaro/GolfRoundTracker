@@ -28,7 +28,8 @@ struct SwingMetricsCalculator {
             releaseTimingScore: releaseTimingScore(w),
             decelerationScore: decelerationScore(w),
             transitionDirectionScore: transitionDirectionScore(w),
-            addressGravity: addressGravity(w)
+            addressGravity: addressGravity(w),
+            peakImpactG: w.peakImpactG
         )
     }
 

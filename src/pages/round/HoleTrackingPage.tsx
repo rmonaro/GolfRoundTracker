@@ -33,6 +33,9 @@ import CenterFocusStrongRoundedIcon from '@mui/icons-material/CenterFocusStrongR
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import EditRoundedIcon from '@mui/icons-material/EditRounded';
+import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
+import KeyboardArrowUpRoundedIcon from '@mui/icons-material/KeyboardArrowUpRounded';
+import KeyboardArrowDownRoundedIcon from '@mui/icons-material/KeyboardArrowDownRounded';
 import {
   ensureGpsPermission,
   getCurrentPosition,
@@ -42,6 +45,8 @@ import {
   type GpsPoint
 } from '@/services/gpsService';
 import { useAutoTrack, type ShotDetected } from '@/features/round/useAutoTrack';
+import { RoundTour, type TourStep } from '@/features/round/RoundTour';
+import { PuttModePanel } from '@/features/round/PuttModePanel';
 import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
@@ -66,8 +71,12 @@ import { metersToYards } from '@/features/course/distance';
 import {
   recommendClub,
   classifyTap,
+  classifyLie,
   teeToGreenBearing
 } from '@/features/course/HoleLayout';
+import { WindIndicator } from '@/components/ui/WindIndicator';
+import { useWind } from '@/hooks/useWind';
+import { bearingDeg } from '@/services/weatherService';
 import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeCompletedTotals, computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
@@ -80,14 +89,39 @@ import {
   STROKE_PENALTY_TYPES,
   type BagClub,
   type FairwayResult,
-  type PenaltyType
+  type PenaltyType,
+  type TargetType,
+  type TargetResult
 } from '@/models';
+
+/** Human label for the watch's post-save overview, e.g. "Fairway" / "Left". */
+function watchResultLabel(targetType: TargetType, r: TargetResult): string {
+  switch (r) {
+    case 'hit':
+      return targetType === 'fairway' ? 'Fairway' : targetType === 'green' ? 'Green' : 'Hit';
+    case 'left':
+      return 'Left';
+    case 'right':
+      return 'Right';
+    case 'long':
+      return 'Long';
+    case 'short':
+      return 'Short';
+    case 'made':
+      return 'Made';
+    case 'missed':
+      return 'Missed';
+    default:
+      return 'Shot';
+  }
+}
 
 export function HoleTrackingPage() {
   const active = useRoundStore((s) => s.active);
   const updateHole = useRoundStore((s) => s.updateHole);
   const setCurrentHole = useRoundStore((s) => s.setCurrentHole);
   const addShotLocal = useRoundStore((s) => s.addShot);
+  const moveShotLocal = useRoundStore((s) => s.moveShot);
   const updateShotLocal = useRoundStore((s) => s.updateShot);
   const removeShotLocal = useRoundStore((s) => s.removeShot);
   const markShotSynced = useRoundStore((s) => s.markShotSynced);
@@ -102,6 +136,34 @@ export function HoleTrackingPage() {
   useTournamentResumeReconcile();
   const [shotSheet, setShotSheet] = useState(false);
   const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
+  // Stable edit draft for AddShotSheet. MUST be memoized on `editingShot`: the
+  // sheet's init effect re-pre-fills its fields whenever this prop's identity
+  // changes, and this page re-renders ~once/sec from the live GPS watch. A fresh
+  // object literal each render would re-run that effect on every fix and snap
+  // the user's in-progress edits (club / yards / lie) back to the original
+  // values — making the shot look un-editable. Keyed on the shot identity so it
+  // only rebuilds when a different shot is opened for editing.
+  const editingDraft = useMemo<ShotEditDraft | null>(
+    () =>
+      editingShot
+        ? {
+            clubId: editingShot.clubId,
+            distance: editingShot.distance,
+            distanceUnit: editingShot.distanceUnit,
+            targetType: editingShot.targetType,
+            targetResult: editingShot.targetResult,
+            lie: editingShot.lie,
+            penaltyType: editingShot.penaltyType,
+            notes: editingShot.notes,
+            startLat: editingShot.startLat ?? null,
+            startLng: editingShot.startLng ?? null,
+            endLat: editingShot.endLat ?? null,
+            endLng: editingShot.endLng ?? null,
+            calculatedDistance: editingShot.calculatedDistance ?? null
+          }
+        : null,
+    [editingShot]
+  );
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
   /** Phone-side mirror of the watch's tracking state. Set true when the
@@ -125,6 +187,8 @@ export function HoleTrackingPage() {
   // GPS opt-in. Off by default so we don't prompt non-GPS users for location.
   const gpsEnabled = useSettingsStore((s) => s.gpsEnabled);
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
+  const roundTourCompleted = useSettingsStore((s) => s.roundTourCompleted);
+  const setRoundTourCompleted = useSettingsStore((s) => s.setRoundTourCompleted);
 
   // At-course detection. Skipped entirely when GPS is disabled.
   const courseQuery = useQuery({
@@ -181,6 +245,9 @@ export function HoleTrackingPage() {
   const [selectedClubId, setSelectedClubId] = useState<string | null>(null);
   const [selectedClubTier1, setSelectedClubTier1] = useState<ClubTier1 | null>(null);
   const [clubPickerOpen, setClubPickerOpen] = useState(false);
+  // Player tapped the putt panel's close (X) — hide putting until they pick the
+  // putter again or reach the next hole. Lets them chip from the fringe/green.
+  const [puttPanelDismissed, setPuttPanelDismissed] = useState(false);
   // Pin-edit mode: when on, the next tap on the map sets this hole's pin
   // position (stored on the LocalHole as pinLat/pinLng) and exits the mode.
   // Hides the aim UI and disables tap-to-record-shot while active so the
@@ -193,19 +260,39 @@ export function HoleTrackingPage() {
   // Bumped by the post-hole "Recap" button to replay the shots as a growing
   // tee → landings → pin line with the numbered dots popping in one by one.
   const [recapToken, setRecapToken] = useState(0);
-  // Newest confirmed ball-strike pushed from the watch (Phase 1 impact gate).
-  // Fed to useAutoTrack so a "walked then stopped" pattern only counts as a
-  // shot when a real strike preceded it. Null until the watch sends one;
-  // absence leaves auto-track on its pure-GPS behavior.
+  // Newest confirmed ball-strike pushed from the watch. Fed to useAutoTrack,
+  // where each strike auto-records a shot. Null until the watch sends one;
+  // without a watch, no shots are auto-detected (manual Add Shot only).
   const [lastImpact, setLastImpact] = useState<{
     impactId: number;
     capturedAt: number;
+    // Watch GPS at the strike — used to place the shot even when the phone's
+    // own GPS is asleep in a pocket.
+    lat?: number;
+    lng?: number;
   } | null>(null);
+  // The club the watch reported in-hand on its most recent strike. Latched onto
+  // the impact-opened shot (see captureShotMeta) so the recorded club matches
+  // what the player saw on the watch — the phone's own selectedClubId resets to
+  // null after each shot and its live suggestion freezes while backgrounded, so
+  // neither is a reliable source for a watch-detected shot.
+  const watchStrikeClubIdRef = useRef<string | null>(null);
+  // Motion swing data from the latest watch strike (migration 031), latched here
+  // BEFORE setLastImpact so the strike-open effect's captureShotMeta reads it
+  // this render — exactly how watchStrikeClubIdRef latches the club.
+  const watchStrikeMetricsRef = useRef<{
+    swingType: import('@/models').SwingTypeValue | null;
+    swingMetrics: import('@/models').RoundSwingMetrics | null;
+    watchImpactId: number | null;
+  }>({ swingType: null, swingMetrics: null, watchImpactId: null });
+  // Watch impact ids already committed to a shot this session — an in-memory
+  // guard so a duplicated/re-delivered strike can't double-record a shot.
+  const committedImpactIdsRef = useRef<Set<number>>(new Set());
   // True while the watch strike stream is "live" — flipped on each roundImpact
-  // and cleared by a staleness timeout. Gates Phase 2 impact-primary mode: only
-  // when strikes are actually arriving do we hand detection to the watch;
-  // otherwise we stay on Phase 1 GPS-gated tracking so non-watch users are
-  // unaffected.
+  // and cleared by a staleness timeout. Gates impact-primary mode: only when
+  // strikes are actually arriving do we hand detection to the watch. When no
+  // watch is streaming, the phone only tracks position — it does not auto-detect
+  // shots from its own GPS movement.
   const [strikeStreamLive, setStrikeStreamLive] = useState(false);
   const strikeStaleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Headless auto-commit handler, assigned below once onSubmitShot exists.
@@ -217,6 +304,11 @@ export function HoleTrackingPage() {
   // Tracks which hole we've already auto-prompted for verification so closing
   // the dialog doesn't immediately reopen it on the next render.
   const promptedHoleRef = useRef<number | null>(null);
+  // Backstop against duplicate watch putts: if the watch sends the same putt
+  // result again within a few seconds (rapid re-taps because it hadn't seen a
+  // confirming snapshot), drop it. The watch now guards this locally too, but a
+  // non-idempotent INSERT is worth defending on the phone as well.
+  const lastPuttRef = useRef<{ result: string; at: number } | null>(null);
   const [pendingGps, setPendingGps] = useState<{
     startLat: number;
     startLng: number;
@@ -227,15 +319,17 @@ export function HoleTrackingPage() {
     inferredTargetResult?: import('@/models').TargetResult | null;
   } | null>(null);
 
-  // Toggle auto-tracking on/off. On enable: check GPS availability +
+  // Enable/disable auto-tracking. On enable: check GPS availability +
   // permission + at-course, then arm the state machine. On disable: the
   // useAutoTrack hook tears down its watch via the enabled=false branch.
-  const onToggleAutoTrack = async () => {
-    if (autoTrackEnabled) {
+  // Shared by the on-screen FAB and the watch's synced Track toggle.
+  const applyAutoTrack = async (enable: boolean) => {
+    if (!enable) {
       setAutoTrackEnabled(false);
       setTrackingError(null);
       return;
     }
+    if (autoTrackEnabled) return;
     if (!isGpsAvailable()) {
       setTrackingError('GPS not available on this device');
       return;
@@ -280,6 +374,7 @@ export function HoleTrackingPage() {
       setTrackingBusy(false);
     }
   };
+  const onToggleAutoTrack = () => applyAutoTrack(!autoTrackEnabled);
 
   if (!active) return <Navigate to="/round" replace />;
 
@@ -403,6 +498,29 @@ export function HoleTrackingPage() {
   // at the tee before the drive, so the drive's start is the tee).
   const teeLat = layoutQuery.data?.hole.tee_lat ?? null;
   const teeLng = layoutQuery.data?.hole.tee_lng ?? null;
+
+  // Effective pin: the precise shared/per-round pin when set, else the green
+  // centroid. Hoisted above the club recommendation so the live GPS→pin
+  // distance can drive the recommended club as the player walks up to the ball.
+  const pinLatEff = sharedPinLat ?? localPinLat ?? greenLat;
+  const pinLngEff = sharedPinLng ?? localPinLng ?? greenLng;
+  // Yards from the player's CURRENT GPS position to the pin. Updates live as
+  // they walk (unlike the recorded-shot remaining) and self-corrects through a
+  // missed strike. Guarded on a trustworthy fix (≤30 m accuracy) so a noisy
+  // reading can't swing the club; null when untrustworthy so callers fall back
+  // to the recorded-shot remaining yardage.
+  const liveYardsToPin =
+    liveFix != null &&
+    (liveFix.accuracyM == null || liveFix.accuracyM <= 30) &&
+    pinLatEff != null &&
+    pinLngEff != null
+      ? Math.round(
+          haversineMeters(
+            { lat: liveFix.lat, lng: liveFix.lng, accuracyM: 0, timestamp: 0 },
+            { lat: pinLatEff, lng: pinLngEff, accuracyM: 0, timestamp: 0 }
+          ) * 1.0936133
+        )
+      : null;
   const AROUND_GREEN_THRESHOLD_M = 27;
   let lastShotEndDistFromGreenM: number | null = null;
   if (
@@ -486,11 +604,39 @@ export function HoleTrackingPage() {
   //   • last shot was a putt (you were on the green when it was taken)
   //   • last shot was an approach to the green tagged as a hit
   //   • the user already picked the putter for the next shot
+  // Live-position green detection: are we PHYSICALLY standing on the putting
+  // surface right now? Hit-tests the current GPS fix against the mapped green
+  // polygon — independent of the committed shot list. This is what lets putting
+  // mode engage under AUTO-TRACK: there the approach that lands on the green
+  // stays in-flight (uncommitted) until the next strike closes it, so committed
+  // shots alone can't tell us we've reached the green. Guarded on a trustworthy
+  // fix (≤30 m) so a noisy reading near the green can't false-trigger it.
+  const liveFeatures = layoutQuery.data?.features;
+  // Does this hole actually have a mapped green OUTLINE we can hit-test? Many
+  // courses only carry a pin / green-centre point, no polygon — in which case
+  // classifyLie can never return 'green' and putting mode would never auto-arm.
+  const hasGreenPolygon =
+    !!liveFeatures && liveFeatures.some((f) => f.feature_type === 'green' && !f.is_line);
+  // Fallback radius (yards from the pin) that counts as "on the green" when no
+  // green polygon is mapped. Kept tight so a chip from just off the green
+  // doesn't read as on the surface; tunable if it proves too strict on-course.
+  const ON_GREEN_FALLBACK_YDS = 6;
+  // Deciding "you're putting" needs a TRUSTWORTHY fix — a 30 m-accuracy reading
+  // near a front pin flips putting on while you're still on the fringe. Require
+  // ≤12 m before arming putting from live GPS (tighter than the ≤30 m used for
+  // coarser signals). Below fallback radius also tightened 8→6 yds.
+  const liveOnGreen =
+    liveFix != null &&
+    (liveFix.accuracyM == null || liveFix.accuracyM <= 12) &&
+    (hasGreenPolygon
+      ? classifyLie([liveFix.lng, liveFix.lat], liveFeatures!) === 'green'
+      : liveYardsToPin != null && liveYardsToPin <= ON_GREEN_FALLBACK_YDS);
   const ballOnGreen =
     lastShot?.lie === 'green' ||
     lastShotWasPutt ||
     (lastShot?.targetType === 'green' && lastShot?.targetResult === 'hit') ||
-    userPickedPutter;
+    userPickedPutter ||
+    liveOnGreen;
 
   // Pre-select the user's putter when on the green. Uses the first putter in
   // the bag (most users have only one). The user-driven `selectedClubId`
@@ -510,13 +656,16 @@ export function HoleTrackingPage() {
   // never suggest the driver — you don't swing one off the deck. The
   // recommender falls back to the longest non-driver in the bag (typically
   // a 3-wood or hybrid). For shot 1 from the tee we still allow the driver.
+  // Yardage the recommendation runs off: live GPS→pin when we have a trustworthy
+  // fix (so the recommended club tracks the player as they walk up to the ball),
+  // else the recorded-shot remaining. Same live-first source as the TO PIN panel
+  // so the button and the panel agree.
+  const recClubYards = liveYardsToPin ?? remainingYardsEarly;
   const excludeDriverForRec =
-    ballDistanceFromTeeM > 0 &&
-    remainingYardsEarly != null &&
-    remainingYardsEarly > 200;
+    ballDistanceFromTeeM > 0 && recClubYards != null && recClubYards > 200;
   const recommendedClubId =
-    !ballOnGreen && remainingYardsEarly != null && remainingYardsEarly > 0
-      ? recommendClub(bagClubs, remainingYardsEarly, {
+    !ballOnGreen && recClubYards != null && recClubYards > 0
+      ? recommendClub(bagClubs, recClubYards, {
           excludeDriver: excludeDriverForRec
         })?.clubId ?? null
       : null;
@@ -530,12 +679,26 @@ export function HoleTrackingPage() {
   // states where the watch should switch to "Recording: <club>" mode.
   const setWatchSelectedClubId = useWatchHintsStore((s) => s.setSelectedClubId);
   const setWatchRecordingShot = useWatchHintsStore((s) => s.setRecordingShot);
+  const setWatchAtCourse = useWatchHintsStore((s) => s.setAtCourse);
+  const setWatchAutoTracking = useWatchHintsStore((s) => s.setAutoTracking);
+  const setWatchLastShotSummary = useWatchHintsStore((s) => s.setLastShotSummary);
+  const setWatchLiveSuggestedClubId = useWatchHintsStore((s) => s.setLiveSuggestedClubId);
+  const setWatchLiveOnGreen = useWatchHintsStore((s) => s.setLiveOnGreen);
   useEffect(() => {
     setWatchSelectedClubId(defaultClubId ?? null);
   }, [defaultClubId, setWatchSelectedClubId]);
   useEffect(() => {
     setWatchRecordingShot(shotSheet || pendingGps != null);
   }, [shotSheet, pendingGps, setWatchRecordingShot]);
+  // Mirror at-course + auto-track state into the watch snapshot so the watch can
+  // hide its controls off-course and render Track as a synced toggle.
+  const watchAtCourse = atCourseStatus ? atCourseStatus.atCourse : null;
+  useEffect(() => {
+    setWatchAtCourse(watchAtCourse);
+  }, [watchAtCourse, setWatchAtCourse]);
+  useEffect(() => {
+    setWatchAutoTracking(autoTrackEnabled);
+  }, [autoTrackEnabled, setWatchAutoTracking]);
   // Reset the user club pick whenever the hole changes — each new hole starts
   // with a blank slate so the picker doesn't carry e.g. a wedge over to a tee
   // shot on the next hole.
@@ -543,15 +706,18 @@ export function HoleTrackingPage() {
     setSelectedClubId(null);
     setSelectedClubTier1(null);
     setPinEditMode(false);
+    // New hole → re-arm putting (a fringe dismiss shouldn't carry over).
+    setPuttPanelDismissed(false);
+    // Reset the watch-impact dedupe set. The watch's impactId is monotonic only
+    // within a tracking session and resets to 1 if tracking restarts mid-round;
+    // scoping the guard to the current hole keeps a restart from colliding with
+    // earlier ids and silently dropping the new hole's shots.
+    committedImpactIdsRef.current.clear();
   }, [hole.holeNumber]);
 
-  // The Move Pin button is hidden when the player isn't on the green. If
-  // they leave the green while pin-edit mode is active (rare — usually they'd
-  // tap to set first), clear the flag so subsequent map taps aren't
-  // misinterpreted as pin placements.
-  useEffect(() => {
-    if (!lastShotOnGreen && pinEditMode) setPinEditMode(false);
-  }, [lastShotOnGreen, pinEditMode]);
+  // Move Pin is available throughout the hole now (not only on the green), so
+  // the flag can be repositioned any time. Pin-edit mode is still cleared on
+  // hole change (above); no on-green auto-cancel.
 
   // Auto-select the putter whenever the last recorded shot signals the ball
   // is on the green. Three signals — any one is enough:
@@ -678,52 +844,47 @@ export function HoleTrackingPage() {
     return null;
   }, [lastShotForAutoTrack?.endLat, lastShotForAutoTrack?.endLng]);
 
-  // Phase 2 impact-primary mode: hand detection to the watch when GPS + the
-  // shot-detection setting are on AND the strike stream is live. Otherwise fall
-  // back to Phase 1 GPS-gated tracking (impactPrimary off).
+  // Impact-primary mode: shot detection is handed to the watch when GPS + the
+  // shot-detection setting are on AND the strike stream is live. When off, no
+  // auto-detection happens — the phone only tracks position; shots are logged
+  // manually via the Add Shot button.
   const impactPrimary = gpsEnabled && watchShotDetectionEnabled && strikeStreamLive;
 
   const autoTrack = useAutoTrack({
     enabled: autoTrackEnabled,
     initialBallPos: autoTrackInitialBallPos,
-    // Phase 1 impact gate — the latest confirmed strike from the watch,
-    // gated by the user's "watch shot detection" setting.
+    // The latest confirmed strike from the watch — drives detection.
     lastImpact,
-    impactGateEnabled: watchShotDetectionEnabled,
-    // Phase 2 — strikes drive detection; emitted shots carry source:'impact'.
+    // Strikes drive detection; emitted shots carry source:'impact'.
     impactPrimary,
+    // Latch the club at the moment a strike OPENS a shot — the club the player
+    // just swung — so it travels with the shot and isn't overwritten by the
+    // (live) suggestion that has since drifted to the NEXT club by the time the
+    // following strike commits this one. Evaluated at strike time, so the
+    // suggestedClub const declared lower in this component is already resolved.
+    captureShotMeta: () => ({
+      // Prefer the phone's own selection when the user set one (it's null again
+      // after each committed shot), then the club the watch reported at the
+      // strike, then the live suggestion. This is what makes a watch-side club
+      // change actually stick to the shot the player just hit.
+      clubId:
+        selectedClubId ?? watchStrikeClubIdRef.current ?? suggestedClub?.clubId ?? null,
+      // Latch the motion swing metrics of the strike that OPENED this shot — the
+      // swing the player just made — so they travel with it to commit.
+      swingType: watchStrikeMetricsRef.current.swingType,
+      swingMetrics: watchStrikeMetricsRef.current.swingMetrics,
+      watchImpactId: watchStrikeMetricsRef.current.watchImpactId
+    }),
     onShotDetected: (shot) => {
-      if (shot.source === 'impact') {
-        // Phase 2: a watch strike closed the in-flight shot. Auto-commit it in
-        // an UNVERIFIED state — no sheet interruption; the golfer reviews it
-        // at hole-complete / round summary.
-        autoCommitRef.current?.(shot);
-        return;
-      }
-      // Phase 1 (source:'gps'): 8s-stationary detection fired — stage
-      // pendingGps AND open the AddShotSheet pre-filled with the captured GPS
-      // pair + calculated distance. The user picks club + result and submits.
+      // Auto-recording is WATCH-driven only. A watch strike (source:'impact')
+      // closes the in-flight shot → auto-commit it UNVERIFIED (no sheet
+      // interruption; reviewed at hole-complete / round summary).
       //
-      // To reposition the auto-detected landing point: cancel the
-      // sheet → the Ball Landed bar (managed by pendingGps) still
-      // appears so the user can tap the map elsewhere or hit Record
-      // again to reopen the sheet. (Cancel calls autoTrack.dismissShot
-      // via the sheet's onClose handler, re-anchoring the tracker.)
-      // Classify from where the ball came to rest (= the player's current
-      // position) against the mapped features, so the sheet pre-fills the
-      // correct lie + target result instead of leaving them blank.
-      const inferred = inferShotAt(shot.endLat, shot.endLng);
-      setPendingGps({
-        startLat: shot.startLat,
-        startLng: shot.startLng,
-        endLat: shot.endLat,
-        endLng: shot.endLng,
-        calculatedDistanceM: shot.distanceM,
-        inferredLie: inferred.lie,
-        inferredTargetResult: inferred.targetResult
-      });
-      setEditingShot(null);
-      setShotSheet(true);
+      // The phone deliberately does NOT auto-detect shots from its own GPS
+      // movement ("walked then stopped") — it just keeps the live position.
+      // Non-watch shots are logged manually via the Add Shot button, which
+      // fills the yardage from the GPS last→current distance.
+      autoCommitRef.current?.(shot);
     }
   });
 
@@ -738,6 +899,37 @@ export function HoleTrackingPage() {
     // this effect's identity matched to actual ball-pos changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoTrackEnabled, autoTrackInitialBallPos?.lat, autoTrackInitialBallPos?.lng]);
+
+  // Sticky "you are here" position for the map blue dot. Tracks the FRESHEST
+  // fix from ANY source — the always-on `liveFix`, auto-track's own fix (even
+  // when the phone FAB is off, since watch-driven tracking doesn't flip it), or
+  // the watch's reported position — and NEVER blanks once acquired, so the dot
+  // is always visible no matter which source is momentarily quiet. Kept in a ref
+  // + state so the map re-renders on change but stale sources can't erase it.
+  const [dotPos, setDotPos] = useState<[number, number] | null>(null);
+  useEffect(() => {
+    const fixes = [autoTrack.latestFix, liveFix].filter(
+      (f): f is GpsPoint => f != null
+    );
+    if (fixes.length > 0) {
+      const best = fixes.reduce((x, y) => (y.timestamp >= x.timestamp ? y : x));
+      setDotPos([best.lng, best.lat]);
+    } else if (
+      watchTracking.active &&
+      watchTracking.currentLat != null &&
+      watchTracking.currentLng != null
+    ) {
+      setDotPos([watchTracking.currentLng, watchTracking.currentLat]);
+    }
+    // Intentionally no `else setDotPos(null)` — keep the last known position so
+    // the dot never disappears mid-round when every source briefly goes quiet.
+  }, [
+    autoTrack.latestFix,
+    liveFix,
+    watchTracking.active,
+    watchTracking.currentLat,
+    watchTracking.currentLng
+  ]);
 
   // Always-on live-location watch. Runs whenever GPS is enabled — including
   // during auto-track — so the "you are here" dot is ALWAYS on the map for the
@@ -758,6 +950,92 @@ export function HoleTrackingPage() {
     const stop = watchPosition((fix) => setLiveFix(fix), { maxAccuracyM: 100 });
     return stop;
   }, [gpsEnabled]);
+
+  // --- First-run guided tour of the round screen ---
+  const [tourOpen, setTourOpen] = useState(false);
+  // Guards the auto-open so it fires at most once per mount.
+  const tourAutoStartedRef = useRef(false);
+  const tourSteps = useMemo<TourStep[]>(
+    () => [
+      {
+        selector: null,
+        title: 'Welcome to your round',
+        body: "Here's a quick tour of how to track each hole. It takes about 20 seconds."
+      },
+      {
+        selector: '[data-tour="map"]',
+        title: 'The hole & your position',
+        body: 'The map shows the hole layout. Your live GPS position is the blue dot — tap anywhere on the map to drop a marker where your shot landed.'
+      },
+      {
+        selector: '.grt-aim-handle',
+        title: 'Aim where you want',
+        body: 'This is your aim target. Drag it on the map to your intended landing spot — the distance to it updates as you move it, so you can plan your shot.'
+      },
+      {
+        selector: '[data-tour="topin"]',
+        title: 'Distance to the pin',
+        body: 'This updates as you play and suggests a club for the distance. Live wind shows just below it.'
+      },
+      {
+        selector: '[data-tour="club"]',
+        title: 'Pick your club',
+        body: 'Tap to choose the club you’re hitting. The highlighted suggestion is based on your distance to the pin.'
+      },
+      {
+        selector: '[data-tour="track"]',
+        title: 'Track — auto-record your shots',
+        body: 'Tap Track to start following your position for the round. With your Apple Watch on, each swing is then recorded automatically as you play — no tapping per shot. Tap Track again to stop. This button only appears when GPS is turned on in Settings.'
+      },
+      {
+        selector: '[data-tour="addshot"]',
+        title: 'Log a shot manually',
+        body: 'No watch? Tap Add Shot once you’ve walked up to your ball — the distance from your last shot is filled in from GPS automatically.'
+      },
+      {
+        selector: '[data-tour="measure"]',
+        title: 'Show distances',
+        body: 'Tap the ruler to show the 100/150/200-yard distance markers down the hole. Tap again to hide them.'
+      },
+      {
+        selector: '[data-tour="recenter"]',
+        title: 'Recenter the map',
+        body: 'Panned or zoomed in? Tap this to snap the map back and re-frame the whole hole.'
+      },
+      {
+        // Selector-less (centered): the putting panel only renders once the
+        // ball is on the green, so it isn't in the DOM during the first-run
+        // tour. A centered step always shows; on the green it'd be skipped by
+        // the engine anyway if we anchored it.
+        selector: null,
+        title: 'Putting on the green',
+        body: 'Once you reach the green, a putting panel appears with your live distance to the flag. Tap Missed or Made for each putt — use − / + to nudge the distance if GPS reads a touch high. The hole finishes when you tap Made.'
+      },
+      {
+        selector: '[data-tour="nav"]',
+        title: 'Move between holes',
+        body: 'Use the arrows up top to switch holes. Finish a hole by recording your made putt, then move on.'
+      }
+    ],
+    []
+  );
+
+  const closeTour = useCallback(() => {
+    setTourOpen(false);
+    setRoundTourCompleted(true);
+  }, [setRoundTourCompleted]);
+
+  // Auto-launch the walkthrough the first time a user reaches the round screen,
+  // once the hole layout has loaded so the anchored controls exist in the DOM.
+  useEffect(() => {
+    if (roundTourCompleted) return;
+    if (tourAutoStartedRef.current) return;
+    if (!layoutQuery.data) return;
+    tourAutoStartedRef.current = true;
+    // Small delay so the floating controls have painted before we measure them.
+    const t = setTimeout(() => setTourOpen(true), 600);
+    return () => clearTimeout(t);
+  }, [roundTourCompleted, layoutQuery.data]);
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
@@ -788,6 +1066,33 @@ export function HoleTrackingPage() {
     () => hole.shots.filter((s) => s.verified === false),
     [hole.shots]
   );
+  // Putts already recorded on this hole — shown in the on-green putting panel.
+  const puttsThisHole = useMemo(
+    () => hole.shots.filter((s) => s.targetType === 'putt').length,
+    [hole.shots]
+  );
+  // The on-green putting panel is the dedicated Missed / Made recorder. It
+  // shows once the ball is actually on the green (and a putter is in the bag)
+  // and stays up until the hole is made. While it's up the right-side FAB stack
+  // lifts clear of it (it's full-width, anchored at the same bottom slot).
+  //
+  // Gated on the STRICT `ballOnGreen` — NOT `lastShotOnGreen`. The latter folds
+  // in the ~30 yd "around the green" heuristic (good for map zoom / aim
+  // suppression), but it popped the putt recorder when the player was merely
+  // NEAR the green on a chip/pitch. `ballOnGreen` requires the ball to be on the
+  // putting surface (lie green / approach stuck the green / a putt was taken),
+  // with a manual putter pick as the deliberate escape hatch for fringe putts.
+  // Only show putting when the club you're set to IS the putter. Picking a
+  // wedge/iron (to chip from the fringe or green) hides it; picking the putter
+  // back — or reaching the green with the putter auto-selected — shows it again.
+  // The close (X) on the panel sets `puttPanelDismissed` for the same effect.
+  const effectiveClubIsPutter = selectedClub?.category === 'putter';
+  const showPuttPanel =
+    !holeComplete &&
+    ballOnGreen &&
+    effectiveClubIsPutter &&
+    !puttPanelDismissed &&
+    bagClubs.some((c) => c.category === 'putter');
   // When a hole completes with unverified auto shots, prompt the review once.
   useEffect(() => {
     if (!holeComplete) return;
@@ -810,27 +1115,92 @@ export function HoleTrackingPage() {
     remainingYards != null &&
     remainingYards > 0 &&
     remainingYards <= APPROACH_RANGE_YDS;
+  // On the green the "to pin" reading should be the distance from WHERE THE
+  // USER IS to the actual pin, in feet — so it tracks them as they walk to the
+  // ball. Prefer the live GPS fix → pin; fall back to the last shot's end → pin,
+  // then a rough yards×3. Uses the effective pin (pinLatEff/pinLngEff) hoisted
+  // above. (Previously this used last-shot-end → green CENTROID, which read
+  // stale + offset — e.g. 21 ft when the user was ~5 ft from the pin.)
+  const feetToPinFrom = (lat: number | null, lng: number | null): number | null =>
+    lat != null && lng != null && pinLatEff != null && pinLngEff != null
+      ? Math.round(
+          haversineMeters(
+            { lat, lng, accuracyM: 0, timestamp: 0 },
+            { lat: pinLatEff, lng: pinLngEff, accuracyM: 0, timestamp: 0 }
+          ) * 3.28084
+        )
+      : null;
+  const liveFeetToPin = feetToPinFrom(liveFix?.lat ?? null, liveFix?.lng ?? null);
+  // The ball rests where the last shot ended, so that → pin is the putt distance
+  // (stable as the player walks around reading it). Prefer it; fall back to the
+  // live fix when the last shot has no GPS, then a rough yards×3.
+  const lastShotEndFeetToPin = feetToPinFrom(
+    lastShot?.endLat ?? null,
+    lastShot?.endLng ?? null
+  );
   const remainingFeet = lastShotOnGreen
     ? lastShotMadePutt
       ? 0
-      : lastShotEndDistFromGreenM != null
-        ? Math.round(lastShotEndDistFromGreenM * 3.28084)
-        : remainingYards != null
-          ? remainingYards * 3
-          : null
+      : lastShotEndFeetToPin ??
+        liveFeetToPin ??
+        (remainingYards != null ? remainingYards * 3 : null)
     : null;
+
+  // The single "yards to the pin" value that drives BOTH the headline TO PIN
+  // number and the club recommendation: live GPS→pin when we have a trustworthy
+  // fix (so it updates as the player walks AND self-corrects when a watch strike
+  // is missed), else the recorded-shot remaining yardage. Using live position as
+  // the primary source is what stops the "150 shows 300+ and stays stuck" bug —
+  // the summed-remaining value never grows when a strike goes undetected.
+  const toPinYards = liveYardsToPin ?? remainingYards;
 
   // Putters are filtered out of the recommendation — the panel hides the
   // suggestion entirely once the ball is on the green (lastShotOnGreen).
   // The driver exclusion mirrors the defaultClubId recommendation above so
   // the TO PIN panel and the bottom-left club button never disagree.
   const suggestedClub =
-    remainingYards != null && !lastShotOnGreen
-      ? recommendClub(bagClubs, remainingYards, {
+    toPinYards != null && !lastShotOnGreen
+      ? recommendClub(bagClubs, toPinYards, {
           excludeDriver:
-            ballDistanceFromTeeM > 0 && remainingYards > 200
+            ballDistanceFromTeeM > 0 && toPinYards > 200
         })
       : null;
+
+  // Push the live-position suggestion to the watch (via the hints store →
+  // useWatchSync snapshot) so the watch's club hint tracks the player as they
+  // walk up to the ball, not just when a shot is committed.
+  useEffect(() => {
+    setWatchLiveSuggestedClubId(suggestedClub?.clubId ?? null);
+  }, [suggestedClub?.clubId, setWatchLiveSuggestedClubId]);
+
+  // Push live-position green detection to the watch so it flips into putting
+  // mode the instant the player walks onto the green — even under auto-track,
+  // where the approach shot stays in-flight (uncommitted) until the next strike.
+  useEffect(() => {
+    setWatchLiveOnGreen(liveOnGreen);
+  }, [liveOnGreen, setWatchLiveOnGreen]);
+
+  // Live wind, resolved against the direction the player is hitting. Target
+  // bearing: from the current position to the pin/green when we have a fix,
+  // else the static tee→green line so it still reads on un-located holes.
+  const windPinLat = sharedPinLat ?? greenLat;
+  const windPinLng = sharedPinLng ?? greenLng;
+  const windTargetBearing =
+    liveFix && windPinLat != null && windPinLng != null
+      ? bearingDeg(liveFix.lat, liveFix.lng, windPinLat, windPinLng)
+      : layoutQuery.data?.hole
+        ? teeToGreenBearing(layoutQuery.data.hole)
+        : null;
+  const windPos =
+    liveFix ??
+    userLoc ??
+    (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
+  const { wind, relative: windRelative } = useWind(
+    windPos?.lat,
+    windPos?.lng,
+    windTargetBearing,
+    gpsEnabled
+  );
 
   // Push derived values back into the local hole so autosave persists them.
   // Without this, the round_holes columns would stay stale because the user
@@ -887,7 +1257,10 @@ export function HoleTrackingPage() {
     endLat,
     endLng,
     calculatedDistance,
-    verified = true
+    verified = true,
+    swingType = null,
+    swingMetrics = null,
+    watchImpactId = null
   }: {
     clubId: string | null;
     clubCategory: import('@/models').ClubCategory | null;
@@ -907,6 +1280,10 @@ export function HoleTrackingPage() {
     /** False for auto-detected shots (await review). Manual/sheet saves omit
      *  it → true. The EDIT path always confirms (verified true) regardless. */
     verified?: boolean;
+    // Motion swing data from the watch strike (migration 031); null for manual.
+    swingType?: import('@/models').SwingTypeValue | null;
+    swingMetrics?: import('@/models').RoundSwingMetrics | null;
+    watchImpactId?: number | null;
   }) => {
     // The pendingGps prop is read by AddShotSheet on open; clear it now so a
     // subsequent manual Add Shot doesn't reuse stale GPS.
@@ -969,7 +1346,11 @@ export function HoleTrackingPage() {
     // store write is synchronous (pre-await), so the manual shot below reads the
     // updated count and the two land in the right order. Guarded to manual
     // saves (verified) so the auto path itself doesn't recurse.
-    if (verified && impactPrimary && autoTrack.hasPendingShot()) {
+    // NOT gated on impactPrimary: the in-flight shot was opened by a real
+    // strike, so commit it even if the watch's strike stream has since gone
+    // stale — otherwise the approach/drive dies in-flight and is lost (e.g. the
+    // next "strike" is a putt recorded via the panel, not the impact stream).
+    if (verified && autoTrack.hasPendingShot()) {
       const pending = autoTrack.resolvePendingShot();
       if (pending) autoCommitRef.current?.(pending);
     }
@@ -981,6 +1362,8 @@ export function HoleTrackingPage() {
     const freshHole = useRoundStore
       .getState()
       .active?.holes.find((h) => h.holeNumber === hole.holeNumber);
+    // Append at the end. A shot logged out of order is moved into position with
+    // the up/down reorder controls in the shots list, so add is always append.
     const nextNum = (freshHole?.shots.length ?? hole.shots.length ?? 0) + 1;
     const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     addShotLocal(hole.holeNumber, {
@@ -1004,6 +1387,13 @@ export function HoleTrackingPage() {
       calculatedDistance
     });
     setShotSheet(false);
+    // Clear the manual club pick now that this shot is committed, so the NEXT
+    // shot re-recommends off live yardage instead of sticking on the club that
+    // was used for the shot just played. The club for THIS shot is already
+    // latched into the payload above; a manual pick sticks only for the shot the
+    // player is currently on. (Hole change also clears it.) On the green the
+    // putter auto-select re-affirms itself, so putting isn't affected.
+    setSelectedClubId(null);
     // Live-push this hole to TM (tournament rounds only; debounced + no-op otherwise).
     syncHole(hole.holeNumber);
 
@@ -1048,7 +1438,10 @@ export function HoleTrackingPage() {
         end_lat: endLat,
         end_lng: endLng,
         calculated_distance: calculatedDistance,
-        verified
+        verified,
+        swing_type: swingType,
+        swing_metrics: swingMetrics,
+        watch_impact_id: watchImpactId
       });
       markShotSynced(hole.holeNumber, tempId, persisted.id);
 
@@ -1100,8 +1493,29 @@ export function HoleTrackingPage() {
   // best-effort defaults (selected club, optimistic "hit") — the golfer
   // reviews and edits before verifying at hole-complete / round summary.
   const autoCommitShot = (shot: ShotDetected) => {
-    const club = bagClubs.find((c) => c.clubId === selectedClubId) ?? null;
-    const tType = upcomingTargetType;
+    // Idempotency: the same watch strike must never record two shots (e.g. a
+    // re-delivered WC message, or an auto-commit racing a manual add). Guard on
+    // the watch's monotonic impact id latched onto this shot (migration 031).
+    const impactId = shot.meta?.watchImpactId ?? null;
+    if (impactId != null) {
+      if (committedImpactIdsRef.current.has(impactId)) return;
+      committedImpactIdsRef.current.add(impactId);
+    }
+    // Prefer the club latched when this shot was STRUCK (shot.meta) so it
+    // reflects the swing, not the suggestion that has since drifted to the next
+    // club. Fall back to the current selection/suggestion only if nothing was
+    // latched, so an auto-committed shot is never saved with "no club". The
+    // golfer still reviews/changes it before verifying.
+    const autoClubId =
+      shot.meta?.clubId ?? selectedClubId ?? suggestedClub?.clubId ?? null;
+    const club = bagClubs.find((c) => c.clubId === autoClubId) ?? null;
+    const swingType = shot.meta?.swingType ?? null;
+    // A putt swing is a strong signal even when the course has no mapped green
+    // polygon (a common real gap that makes GPS-only green detection miss) — so
+    // treat the landing as a putt/on-green when the watch says the motion was a
+    // putt. Otherwise fall back to the GPS-inferred target type.
+    const tType: import('@/models').TargetType =
+      swingType === 'putt' ? 'putt' : upcomingTargetType;
     // Classify lie + target result from the actual landing point against the
     // mapped features first; only fall back to the target-type lie guess /
     // optimistic 'hit' result when features aren't loaded or the point matched
@@ -1109,12 +1523,16 @@ export function HoleTrackingPage() {
     const inferred = inferShotAt(shot.endLat, shot.endLng);
     const tResult: import('@/models').TargetResult = inferred.targetResult ?? 'hit';
     const lie: import('@/models').Lie | null =
-      inferred.lie ??
-      (tType === 'green' ? 'green' : tType === 'fairway' ? 'fairway' : null);
+      // The swing motion refines the lie the GPS point couldn't: a putt is on
+      // the green; otherwise trust the GPS-inferred lie, then the target type.
+      swingType === 'putt'
+        ? 'green'
+        : inferred.lie ??
+          (tType === 'green' ? 'green' : tType === 'fairway' ? 'fairway' : null);
     const derived: import('@/models').ShotResult =
-      tType === 'fairway' ? 'fairway' : 'green';
+      tType === 'putt' ? 'putt' : tType === 'fairway' ? 'fairway' : 'green';
     void onSubmitShot({
-      clubId: selectedClubId,
+      clubId: autoClubId,
       clubCategory: club?.category ?? null,
       distance: Math.round(shot.distanceM * 1.0936133),
       distanceUnit: 'yards',
@@ -1129,7 +1547,10 @@ export function HoleTrackingPage() {
       endLat: shot.endLat,
       endLng: shot.endLng,
       calculatedDistance: shot.distanceM,
-      verified: false
+      verified: false,
+      swingType,
+      swingMetrics: shot.meta?.swingMetrics ?? null,
+      watchImpactId: impactId
     });
   };
   // Keep the ref the useAutoTrack callback reads pointed at the latest closure.
@@ -1137,10 +1558,100 @@ export function HoleTrackingPage() {
     autoCommitRef.current = autoCommitShot;
   });
 
+  // Monotonic id for the watch's post-save overview so each summary shows once.
+  const watchShotSummaryIdRef = useRef(0);
+  // Record a shot the WATCH logged at the user's current GPS (Track-off "I'm at
+  // my ball", or the Add Shot button). Mirrors autoCommitShot but uses the
+  // watch's club + end position; the START is the hole's prior ball position
+  // (last shot end / tee) so distance + inferred lie/result match the phone's
+  // own GPS-aware add. Auto-saves UNVERIFIED (golfer reviews at hole-complete)
+  // and pushes a brief club·result·distance summary back for the watch overview.
+  const recordWatchAutoShot = (msg: {
+    clubId: string | null;
+    startLat?: number | null;
+    startLng?: number | null;
+    endLat?: number | null;
+    endLng?: number | null;
+  }) => {
+    const endLat = msg.endLat ?? null;
+    const endLng = msg.endLng ?? null;
+    if (endLat == null || endLng == null) return;
+
+    // Under impact-primary with a shot already in flight, "Add Shot" / "Stop"
+    // means "close the shot I just hit, here". Flush the in-flight shot at the
+    // watch's GPS and use ITS launch point as the start — instead of fabricating
+    // a separate shot from the hole's last-committed position. Fabricating would
+    // (a) double-count once the next strike also closes the still-open in-flight
+    // shot and (b) measure from the wrong start. resolvePendingShot also CLEARS
+    // the in-flight anchor, so the next strike opens fresh. Falls back to a plain
+    // GPS log when nothing is in flight (auto-track armed but unstruck, or
+    // impact-primary off).
+    const flushed = autoTrack.hasPendingShot()
+      ? autoTrack.resolvePendingShot({ lat: endLat, lng: endLng })
+      : null;
+    const ballStart = flushed
+      ? { lat: flushed.startLat, lng: flushed.startLng }
+      : msg.startLat != null && msg.startLng != null
+        ? { lat: msg.startLat, lng: msg.startLng }
+        : autoTrackInitialBallPos ??
+          (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
+
+    // Prefer the watch's explicit club, then the club latched when the in-flight
+    // shot was struck, then the phone's selection / live suggestion — never save
+    // a watch auto shot with no club.
+    const autoClubId =
+      msg.clubId ?? flushed?.meta?.clubId ?? selectedClubId ?? suggestedClub?.clubId ?? null;
+    const club = bagClubs.find((c) => c.clubId === autoClubId) ?? null;
+    const tType = upcomingTargetType;
+    const inferred = inferShotAt(endLat, endLng);
+    const tResult: import('@/models').TargetResult = inferred.targetResult ?? 'hit';
+    const lie: import('@/models').Lie | null =
+      inferred.lie ??
+      (tType === 'green' ? 'green' : tType === 'fairway' ? 'fairway' : null);
+    const derived: import('@/models').ShotResult =
+      tType === 'fairway' ? 'fairway' : 'green';
+
+    const calculatedDistanceM = ballStart
+      ? haversineMeters(
+          { lat: ballStart.lat, lng: ballStart.lng, accuracyM: 0, timestamp: 0 },
+          { lat: endLat, lng: endLng, accuracyM: 0, timestamp: 0 }
+        )
+      : null;
+    const distanceYds =
+      calculatedDistanceM != null ? Math.round(calculatedDistanceM * 1.0936133) : null;
+
+    void onSubmitShot({
+      clubId: autoClubId,
+      clubCategory: club?.category ?? null,
+      distance: distanceYds,
+      distanceUnit: distanceYds != null ? 'yards' : null,
+      targetType: tType,
+      targetResult: tResult,
+      lie,
+      penaltyType: null,
+      derivedShotResult: derived,
+      notes: null,
+      startLat: ballStart?.lat ?? null,
+      startLng: ballStart?.lng ?? null,
+      endLat,
+      endLng,
+      calculatedDistance: calculatedDistanceM,
+      verified: false
+    });
+
+    watchShotSummaryIdRef.current += 1;
+    setWatchLastShotSummary({
+      id: watchShotSummaryIdRef.current,
+      clubName: club ? club.customName || club.name : 'Shot',
+      result: watchResultLabel(tType, tResult),
+      distanceText: distanceYds != null ? `${distanceYds} yds` : '—'
+    });
+  };
+
   // Close + commit any in-flight auto shot (e.g. on hole exit). End position
   // defaults to the latest GPS fix inside resolvePendingShot.
   const flushPendingAutoShot = () => {
-    if (!impactPrimary || !autoTrack.hasPendingShot()) return;
+    if (!autoTrack.hasPendingShot()) return;
     const pending = autoTrack.resolvePendingShot();
     if (pending) autoCommitShot(pending);
   };
@@ -1150,6 +1661,72 @@ export function HoleTrackingPage() {
   useEffect(() => {
     if (!impactPrimary) autoTrack.clearPendingShot();
   }, [impactPrimary, autoTrack]);
+
+  // Record a putt from the on-green putting panel. The distance (feet to the
+  // flag) is the panel's shown reading — GPS → pin, optionally ± corrected —
+  // and `made` holes out. Start = where the player is standing now (the ball);
+  // every putt is drawn toward the cup, so end = the pin. onSubmitShot itself
+  // closes any pending auto approach shot first (verified save), keeping order.
+  // (The watch records its own putts via the recordShot inbound handler.)
+  const recordPutt = (made: boolean, distanceFeet: number | null) => {
+    const putter = bagClubs.find((c) => c.category === 'putter');
+    if (!putter) return;
+    const startLat = liveFix?.lat ?? lastShot?.endLat ?? null;
+    const startLng = liveFix?.lng ?? lastShot?.endLng ?? null;
+    void onSubmitShot({
+      clubId: putter.clubId,
+      clubCategory: 'putter',
+      distance: distanceFeet,
+      distanceUnit: distanceFeet != null ? 'feet' : null,
+      targetType: 'putt',
+      targetResult: made ? 'made' : 'missed',
+      lie: 'green',
+      penaltyType: null,
+      derivedShotResult: made ? 'made_putt' : 'putt',
+      notes: null,
+      startLat,
+      startLng,
+      endLat: pinLatEff,
+      endLng: pinLngEff,
+      calculatedDistance: distanceFeet != null ? distanceFeet * 0.3048 : null
+    });
+  };
+
+  // Push every synced shot's current local shotNumber to remote for the hole.
+  // Called after an insert, reorder, or delete renumbers the hole, so the play
+  // order survives a reload (hydrate sorts by shot_number). Best-effort — the
+  // local store already reflects the order for the live session.
+  const persistShotNumbers = async (holeNumber: number) => {
+    const fresh = useRoundStore
+      .getState()
+      .active?.holes.find((h) => h.holeNumber === holeNumber);
+    if (!fresh) return;
+    await Promise.all(
+      fresh.shots
+        .filter((sh) => sh.remoteId)
+        .map((sh) =>
+          roundRepo
+            .updateShot(sh.remoteId!, { shot_number: sh.shotNumber })
+            .catch((err) => console.warn('[shot] shot_number persist failed', err))
+        )
+    );
+  };
+
+  // Nudge a shot one slot earlier/later in the hole and persist the new order.
+  const onMoveShot = (shot: LocalShot, dir: -1 | 1) => {
+    const fresh = useRoundStore
+      .getState()
+      .active?.holes.find((h) => h.holeNumber === hole.holeNumber);
+    const sorted = [...(fresh?.shots ?? hole.shots)].sort(
+      (a, b) => a.shotNumber - b.shotNumber
+    );
+    const idx = sorted.findIndex((s) => s.tempId === shot.tempId);
+    const toIndex = idx + dir;
+    if (idx < 0 || toIndex < 0 || toIndex >= sorted.length) return;
+    moveShotLocal(hole.holeNumber, shot.tempId, toIndex);
+    syncHole(hole.holeNumber);
+    void persistShotNumbers(hole.holeNumber);
+  };
 
   const onDeleteShot = async (shot: LocalShot) => {
     removeShotLocal(hole.holeNumber, shot.tempId);
@@ -1161,6 +1738,9 @@ export function HoleTrackingPage() {
         console.error('[shot] delete failed', err);
       }
     }
+    // Deleting renumbers the remaining shots locally; push the new numbers so
+    // the order is consistent after a reload too.
+    void persistShotNumbers(hole.holeNumber);
   };
 
   // Confirm an auto-detected shot — clears its pending-review flag locally and
@@ -1197,11 +1777,27 @@ export function HoleTrackingPage() {
   const goNextRef = useRef(goNext);
   const onSubmitShotRef = useRef(onSubmitShot);
   const bagClubsRef = useRef(bagClubs);
+  const applyAutoTrackRef = useRef(applyAutoTrack);
+  const recordWatchAutoShotRef = useRef(recordWatchAutoShot);
+  // Current pin/layout context, kept fresh for the pinned watch-message handler
+  // (which can't close over the latest layoutQuery/hole). Used by `setPin`.
+  const pinCtxRef = useRef<{
+    holeId: string | null;
+    courseId: string | null;
+    holeNumber: number;
+  }>({ holeId: null, courseId: null, holeNumber: hole.holeNumber });
   useEffect(() => {
     goPrevRef.current = goPrev;
     goNextRef.current = goNext;
     onSubmitShotRef.current = onSubmitShot;
     bagClubsRef.current = bagClubs;
+    applyAutoTrackRef.current = applyAutoTrack;
+    recordWatchAutoShotRef.current = recordWatchAutoShot;
+    pinCtxRef.current = {
+      holeId: layoutQuery.data?.hole?.id ?? null,
+      courseId: active?.courseId ?? null,
+      holeNumber: hole.holeNumber
+    };
   });
   useEffect(() => {
     let handle: { remove: () => Promise<void> } | null = null;
@@ -1210,6 +1806,45 @@ export function HoleTrackingPage() {
         if (msg.type === 'navigateHole') {
           if (msg.direction === 'prev') goPrevRef.current();
           else if (msg.direction === 'next') goNextRef.current();
+          return;
+        }
+        if (msg.type === 'setPin') {
+          // Watch tapped "Set flag here" at the flag — move the current hole's
+          // pin to the watch's GPS. Same shared-course pin the phone's Move Pin
+          // updates. Best-effort; ignore if the layout hole isn't loaded.
+          const { holeId, courseId, holeNumber } = pinCtxRef.current;
+          if (holeId) {
+            void (async () => {
+              try {
+                await holesRepo.setPin(holeId, msg.lng, msg.lat);
+                queryClient.invalidateQueries({
+                  queryKey: ['hole-layout', courseId, holeNumber]
+                });
+              } catch (err) {
+                console.error('[watch] setPin failed', err);
+              }
+            })();
+          }
+          return;
+        }
+        if (msg.type === 'setAutoTrack') {
+          // Watch toggled round-wide auto-tracking. Run the same gated
+          // enable/disable as the phone FAB; the resulting state echoes back
+          // to the watch via the snapshot's `autoTracking`.
+          void applyAutoTrackRef.current(msg.active);
+          return;
+        }
+        if (msg.type === 'autoShot') {
+          // Watch logged a shot at the user's current GPS (Track-off at the
+          // ball, or Add Shot). Infer fairway/left/right from the landing
+          // point, auto-save, and push a summary back for the watch overview.
+          recordWatchAutoShotRef.current({
+            clubId: msg.clubId,
+            startLat: msg.startLat,
+            startLng: msg.startLng,
+            endLat: msg.endLat,
+            endLng: msg.endLng
+          });
           return;
         }
         if (msg.type === 'trackingShot') {
@@ -1239,11 +1874,46 @@ export function HoleTrackingPage() {
           return;
         }
         if (msg.type === 'roundImpact') {
-          // A confirmed ball-strike from the watch. Drives both the Phase 1
-          // gate (lastImpact) and Phase 2 impact-primary activation
-          // (strikeStreamLive). New object identity each message so the hook
-          // treats it as a fresh strike.
-          setLastImpact({ impactId: msg.impactId, capturedAt: msg.capturedAt });
+          // A confirmed ball-strike from the watch. Drives both the strike gate
+          // (lastImpact) and impact-primary activation (strikeStreamLive). New
+          // object identity each message so the hook treats it as a fresh strike.
+          // Carry the watch's GPS at impact so the shot is placed from the
+          // WATCH's position — the source of truth — even when the phone's own
+          // GPS has stopped in a pocket. This is what lets shot 1, 2, 3… record
+          // without the phone being awake and located.
+          // Latch the club the watch had in hand BEFORE setLastImpact so it's in
+          // place when the strike-open effect reads captureShotMeta this render.
+          // Only overwrite when the watch actually sent one (older builds don't).
+          if (msg.clubId != null) watchStrikeClubIdRef.current = msg.clubId;
+          // Latch the motion swing metrics for THIS strike so the shot it opens
+          // carries them to commit (migration 031). Assemble the bundle from the
+          // message's flat fields; undefined-safe for older watch builds.
+          watchStrikeMetricsRef.current = {
+            swingType: (msg.swingType as import('@/models').SwingTypeValue) ?? null,
+            watchImpactId: msg.impactId,
+            swingMetrics: {
+              backswingTimeMs: msg.backswingTimeMs,
+              downswingTimeMs: msg.downswingTimeMs,
+              tempoRatio: msg.tempoRatio,
+              transitionScore: msg.transitionScore,
+              estimatedHandSpeed: msg.handSpeed,
+              wristRotationScore: msg.wristRotationScore,
+              finishStabilityScore: msg.finishStabilityScore,
+              planeAxis: msg.planeAxis,
+              backswingRotation: msg.backswingRotation,
+              releaseTimingScore: msg.releaseTimingScore,
+              decelerationScore: msg.decelerationScore,
+              transitionDirectionScore: msg.transitionDirectionScore,
+              addressGravity: msg.addressGravity,
+              heartRate: msg.heartRate
+            }
+          };
+          setLastImpact({
+            impactId: msg.impactId,
+            capturedAt: msg.capturedAt,
+            lat: msg.startLat ?? undefined,
+            lng: msg.startLng ?? undefined
+          });
           // Mark the stream live and (re)arm a staleness timeout — if strikes
           // stop arriving (watch off / out of range), impact-primary relaxes
           // back to Phase 1 GPS tracking after the window.
@@ -1266,9 +1936,23 @@ export function HoleTrackingPage() {
           // phone reflects the new selection too.
           const club = bagClubsRef.current.find((c) => c.clubId === msg.clubId);
           if (club) setSelectedClubTier1(tier1ForCategory(club.category));
+          // Watch picking the putter re-arms putting; any other club hides it
+          // (the showPuttPanel gate keys off the effective club being a putter).
+          if (club?.category === 'putter') setPuttPanelDismissed(false);
           return;
         }
         if (msg.type === 'recordShot') {
+          // Drop duplicate putts: the same result arriving within 3s is a rapid
+          // re-tap (the watch user didn't see confirmation), not two real putts.
+          // Real consecutive putts are always seconds apart (walk + line up).
+          if (msg.targetType === 'putt') {
+            const now = Date.now();
+            const prev = lastPuttRef.current;
+            if (prev && prev.result === msg.targetResult && now - prev.at < 3000) {
+              return;
+            }
+            lastPuttRef.current = { result: msg.targetResult, at: now };
+          }
           // The watch finished a shot — if a tracking session was open,
           // it's done now. Clear the indicator before processing the
           // shot save below.
@@ -1313,7 +1997,15 @@ export function HoleTrackingPage() {
           let watchDistance: number | null = null;
           let watchDistanceUnit: import('@/models').DistanceUnit | null = null;
           let watchCalculatedDistanceM: number | null = null;
-          if (
+          if (msg.targetType === 'putt' && msg.distanceFeet != null) {
+            // Putts from the watch's on-green panel carry the player-seen (and
+            // possibly ± nudged) feet-to-flag directly — GPS can't measure a
+            // putt, so this is the source of truth. Mirror the phone panel,
+            // which stores feet + the meter equivalent.
+            watchDistance = msg.distanceFeet;
+            watchDistanceUnit = 'feet';
+            watchCalculatedDistanceM = msg.distanceFeet * 0.3048;
+          } else if (
             msg.startLat != null &&
             msg.startLng != null &&
             msg.endLat != null &&
@@ -1535,11 +2227,18 @@ export function HoleTrackingPage() {
             </Typography>
           </Box>
           <IconButton
+            data-tour="nav"
             aria-label="next hole"
             onClick={goNext}
             disabled={idx === active.holes.length - 1}
           >
             <ArrowForwardIosRoundedIcon />
+          </IconButton>
+          <IconButton
+            aria-label="how to use this screen"
+            onClick={() => setTourOpen(true)}
+          >
+            <HelpOutlineRoundedIcon />
           </IconButton>
           <IconButton aria-label="view round stats" color="primary" onClick={viewStats}>
             <FlagCircleRoundedIcon />
@@ -1551,6 +2250,7 @@ export function HoleTrackingPage() {
           top bar (hole / par / yardage / nav); the bottom nav has been folded
           into the map via View Shots + Add Shot floating buttons. */}
       <Box
+        data-tour="map"
         sx={{
           position: 'relative',
           height: 'calc(100dvh - 64px - env(safe-area-inset-top))',
@@ -1587,22 +2287,10 @@ export function HoleTrackingPage() {
           showYardageMarkers={showYardageMarkers}
           pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
-          // Live "you are here" dot, shown at all times while GPS is on.
-          // Priority: phone auto-track fix (active tracking on this device) →
-          // the WATCH-reported position (so the phone mirrors the watch) →
-          // the always-on `liveFix`. Marking a spot / recording a shot never
-          // clears it, because `liveFix` keeps updating independently.
-          currentLocation={
-            autoTrackEnabled && autoTrack.latestFix
-              ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
-              : watchTracking.active &&
-                  watchTracking.currentLat != null &&
-                  watchTracking.currentLng != null
-                ? [watchTracking.currentLng, watchTracking.currentLat]
-                : liveFix
-                  ? [liveFix.lng, liveFix.lat]
-                  : null
-          }
+          // Live "you are here" dot — the sticky freshest fix from any source
+          // (see `dotPos`), so it's always visible during a round and never
+          // blanks when one GPS source momentarily goes quiet.
+          currentLocation={dotPos}
           // Reset the cached aim drag whenever the player edits par or
           // yardage. The handle re-anchors at the new defaults so the
           // aim distance reflects the corrected hole length instead of
@@ -1617,9 +2305,11 @@ export function HoleTrackingPage() {
               : 1
           }
           onShotLanded={
-            holeComplete
-              ? undefined
-              : (data) => {
+            // Map taps are enabled even after the hole is complete, so a missed
+            // shot can be added by tapping where it landed → Record → pick club
+            // → reorder in the Shots drawer (pin-edit can't be active when
+            // complete — its button is hidden — so a tap always stages a shot).
+            (data) => {
                   // Pin-edit mode reuses the same tap stream — set the new
                   // pin position and exit the mode. Everything that uses the
                   // pin (flag marker, aim line endpoint, putting bounds,
@@ -1665,64 +2355,74 @@ export function HoleTrackingPage() {
             suggested club for that distance (skipped on the green and when no
             club in the bag has a recorded typical distance). Hidden entirely
             when no yardage is known (e.g. unsynced course). */}
-        {(remainingYards != null || remainingFeet != null) && (
-          <Box
-            sx={{
-              position: 'absolute',
-              top: 12,
-              left: 12,
-              zIndex: 3,
-              pointerEvents: 'none',
-              bgcolor: 'rgba(11,20,16,0.88)',
-              color: 'common.white',
-              border: 1.5,
-              borderColor: '#fbbf24',
-              borderRadius: 1.5,
-              px: 1.25,
-              py: 0.5,
-              boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
-              lineHeight: 1.1,
-              textAlign: 'center',
-              minWidth: 90
-            }}
-          >
-            <Typography
-              variant="caption"
+        {/* Left column — To Pin yardage with the live wind readout beneath it. */}
+        <Stack
+          spacing={1}
+          alignItems="center"
+          sx={{
+            position: 'absolute',
+            top: 12,
+            left: 12,
+            zIndex: 3,
+            pointerEvents: 'none'
+          }}
+        >
+          {(toPinYards != null || remainingFeet != null) && (
+            <Box
+              data-tour="topin"
               sx={{
-                display: 'block',
-                fontSize: '0.6rem',
-                fontWeight: 700,
-                letterSpacing: 0.6,
-                color: '#fbbf24',
-                textTransform: 'uppercase'
+                bgcolor: 'rgba(11,20,16,0.88)',
+                color: 'common.white',
+                border: 1.5,
+                borderColor: '#fbbf24',
+                borderRadius: '5px',
+                px: 1.25,
+                py: 0.5,
+                boxShadow: '0 2px 6px rgba(0,0,0,0.45)',
+                lineHeight: 1.1,
+                textAlign: 'center',
+                minWidth: 90
               }}
             >
-              To Pin
-            </Typography>
-            <Typography
-              sx={{
-                fontSize: '1.1rem',
-                fontWeight: 800
-              }}
-            >
-              {lastShotOnGreen && remainingFeet != null
-                ? `${remainingFeet} ft`
-                : `${remainingYards} yds`}
-            </Typography>
-            {suggestedClub && (
               <Typography
+                variant="caption"
                 sx={{
-                  fontSize: '0.75rem',
+                  display: 'block',
+                  fontSize: '0.6rem',
                   fontWeight: 700,
+                  letterSpacing: 0.6,
                   color: '#fbbf24',
-                  mt: 0.25
+                  textTransform: 'uppercase'
                 }}
               >
-                {suggestedClub.customName || suggestedClub.name}
+                To Pin
               </Typography>
-            )}
-          </Box>
-        )}
+              <Typography
+                sx={{
+                  fontSize: '1.1rem',
+                  fontWeight: 800
+                }}
+              >
+                {lastShotOnGreen && remainingFeet != null
+                  ? `${remainingFeet} ft`
+                  : `${toPinYards} yds`}
+              </Typography>
+              {suggestedClub && (
+                <Typography
+                  sx={{
+                    fontSize: '0.75rem',
+                    fontWeight: 700,
+                    color: '#fbbf24',
+                    mt: 0.25
+                  }}
+                >
+                  {suggestedClub.customName || suggestedClub.name}
+                </Typography>
+              )}
+            </Box>
+          )}
+          {windPos && <WindIndicator wind={wind} relative={windRelative} tone="dark" circle />}
+        </Stack>
 
         {/* Stat pills — top-right column. Score is the headline value (accent). */}
         <Stack
@@ -1741,14 +2441,14 @@ export function HoleTrackingPage() {
           <StatPill label="Penalty" value={penaltyStrokes} />
         </Stack>
 
-        {/* Move Pin — small icon button on the top-center. Visible only once
-            the player is on the green (avoids accidental taps while still
-            playing the hole, and matches when the precise pin actually
-            matters). Tap to enter pin-edit mode; the next tap on the map
-            saves the new pin position to the shared course library so every
-            other player inherits it. While active, shows a banner + Reset
-            to clear the override and revert to the course coord. */}
-        {!holeComplete && lastShotOnGreen && (
+        {/* Move Pin — small icon button on the top-center. Available throughout
+            the hole AND after hole-out, so the flag can be repositioned per hole
+            any time. Tap to enter pin-edit mode; the next tap on the map saves
+            the new pin to the shared course library so every player inherits it.
+            (When the hole is complete, map taps stage a shot UNLESS pin-edit is
+            active — the pin-edit branch is checked first — so the two don't
+            conflict.) While active, shows a banner + Reset to revert. */}
+        {(
           <IconButton
             aria-label={pinEditMode ? 'cancel pin move' : 'move pin position'}
             onClick={() => setPinEditMode((v) => !v)}
@@ -1844,6 +2544,7 @@ export function HoleTrackingPage() {
             slide up the drawer with the full ClubPicker tier-1 / tier-2
             UI. Empty placeholder is "+" when nothing's selected. */}
         <Button
+          data-tour="club"
           onClick={() => setClubPickerOpen(true)}
           sx={{
             position: 'absolute',
@@ -1865,20 +2566,40 @@ export function HoleTrackingPage() {
             fontWeight: 800,
             fontSize: '0.95rem',
             lineHeight: 1,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
             '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
           }}
         >
-          {selectedClub
-            ? abbreviateClubName(
-                selectedClub.customName || selectedClub.name,
-                selectedClub.category
-              )
-            : '+'}
+          <Box
+            component="span"
+            sx={{
+              fontSize: '0.5rem',
+              fontWeight: 700,
+              letterSpacing: 0.6,
+              opacity: 0.7,
+              lineHeight: 1,
+              mb: 0.25
+            }}
+          >
+            CLUB
+          </Box>
+          <Box component="span" sx={{ lineHeight: 1 }}>
+            {selectedClub
+              ? abbreviateClubName(
+                  selectedClub.customName || selectedClub.name,
+                  selectedClub.category
+                )
+              : '+'}
+          </Box>
         </Button>
 
-        {/* View Shots — bottom-left, stacked above the club picker. Only
-            renders once shots exist; opens the shots tracker drawer. */}
-        {hole.shots.length > 0 && (
+        {/* View Shots — bottom-left, stacked above the club picker. Renders once
+            shots exist OR a strike has opened an in-flight shot (so the current
+            shot is visible live, not only after the next strike commits it). */}
+        {(hole.shots.length > 0 || autoTrack.pendingStart != null) && (
           <Button
             variant="contained"
             size="small"
@@ -1893,23 +2614,24 @@ export function HoleTrackingPage() {
               bgcolor: 'rgba(11,20,16,0.85)',
               color: 'common.white',
               border: 1,
-              borderColor: 'rgba(255,255,255,0.18)',
+              borderColor: autoTrack.pendingStart != null ? '#fbbf24' : 'rgba(255,255,255,0.18)',
               backdropFilter: 'blur(6px)',
               WebkitBackdropFilter: 'blur(6px)',
               '&:hover': { bgcolor: 'rgba(11,20,16,0.95)' }
             }}
           >
-            Shots ({hole.shots.length})
+            Shots ({hole.shots.length}
+            {autoTrack.pendingStart != null ? ' +1' : ''})
           </Button>
         )}
 
         {/* Auto-track GPS FAB. Only when GPS is enabled in Settings.
-            Tap to arm continuous tracking; the state machine in
-            useAutoTrack detects "walked then stopped" patterns and
-            opens the Add Shot sheet pre-filled when a shot lands.
-            Tap again to disarm. */}
+            Tap to arm continuous position tracking, which lets the watch's
+            ball-strikes auto-record onto your current location. The phone does
+            not detect shots from its own movement. Tap again to disarm. */}
         {gpsEnabled && (
           <Fab
+            data-tour="track"
             variant="extended"
             color={autoTrackEnabled ? 'error' : 'default'}
             aria-label={autoTrackEnabled ? 'stop auto-tracking' : 'start auto-tracking'}
@@ -1957,12 +2679,7 @@ export function HoleTrackingPage() {
               textAlign: 'right'
             }}
           >
-            {trackingError ??
-              (autoTrack.state === 'moving'
-                ? 'Auto-track: walking to ball…'
-                : autoTrack.state === 'arrived'
-                  ? 'Shot detected — confirming…'
-                  : 'Auto-track ON — at ball')}
+            {trackingError ?? 'Auto-track ON — watch will record shots'}
           </Box>
         )}
 
@@ -2011,87 +2728,28 @@ export function HoleTrackingPage() {
           </Box>
         )}
 
-        {/* Made — one-tap putt record. Only on the green and before the hole
-            is complete. Uses the player's putter, the current remaining feet
-            as the putt distance, and records a made-putt shot directly —
-            skipping the Add Shot sheet for the most common end-of-hole
-            action. Sits above the Add Shot FAB to keep the FAB stack
-            consistent on every hole. */}
-        {!holeComplete &&
-          lastShotOnGreen &&
-          bagClubs.some((c) => c.category === 'putter') && (
-            <Fab
-              variant="extended"
-              aria-label="record made putt"
-              onClick={() => {
-                const putter = bagClubs.find((c) => c.category === 'putter');
-                if (!putter) return;
-                // Pin position: prefer the shared course-wide / per-round
-                // pin override; fall back to the OSM green coord. This is
-                // the geographic spot the ball is in once "Made" is
-                // tapped, so use it as the made putt's end position. With
-                // an end coord set, the shot shows up in shotEndPoints
-                // and renders as the next numbered dot on the map — every
-                // shot is visible after hole-out.
-                const pinLng =
-                  pinOverride?.[0] ?? layoutQuery.data?.hole.green_lng ?? null;
-                const pinLat =
-                  pinOverride?.[1] ?? layoutQuery.data?.hole.green_lat ?? null;
-                // Use the last shot's end position as the putt's start
-                // (the ball was sitting there before the putt). Gives the
-                // putt a real start→end pair so any GPS-aware downstream
-                // analytics still works.
-                const startLng = lastShot?.endLng ?? null;
-                const startLat = lastShot?.endLat ?? null;
-                const calculatedDistanceM =
-                  pinLng != null && pinLat != null && startLng != null && startLat != null
-                    ? haversineMeters(
-                        { lat: startLat, lng: startLng, accuracyM: 0, timestamp: 0 },
-                        { lat: pinLat, lng: pinLng, accuracyM: 0, timestamp: 0 }
-                      )
-                    : null;
-                void onSubmitShot({
-                  clubId: putter.clubId,
-                  clubCategory: 'putter',
-                  distance: remainingFeet,
-                  distanceUnit: remainingFeet != null ? 'feet' : null,
-                  targetType: 'putt',
-                  targetResult: 'made',
-                  lie: 'green',
-                  penaltyType: null,
-                  derivedShotResult: 'made_putt',
-                  notes: null,
-                  startLat,
-                  startLng,
-                  endLat: pinLat,
-                  endLng: pinLng,
-                  calculatedDistance: calculatedDistanceM
-                });
-              }}
-              sx={{
-                position: 'absolute',
-                bottom: 'calc(84px + env(safe-area-inset-bottom))',
-                right: 16,
-                zIndex: 4,
-                bgcolor: '#2e7d32',
-                color: 'common.white',
-                fontWeight: 800,
-                px: 2.5,
-                '&:hover': { bgcolor: '#1b5e20' },
-                boxShadow: '0 4px 12px rgba(0,0,0,0.4)'
-              }}
-            >
-              <FlagCircleRoundedIcon sx={{ mr: 1 }} />
-              Made
-            </Fab>
-          )}
+        {/* On-green putting panel — the full Missed / Made recorder with a
+            live GPS → flag distance and a quick ± correction. Replaces the old
+            single "Made" Fab; it captures both outcomes and the putt distance,
+            and stays up until the hole is made. */}
+        {showPuttPanel && (
+          <PuttModePanel
+            holeNumber={hole.holeNumber}
+            liveFeetToPin={remainingFeet}
+            puttsThisHole={puttsThisHole}
+            onPutt={recordPutt}
+            onClose={() => setPuttPanelDismissed(true)}
+          />
+        )}
 
         {/* Yardage markers toggle — small FAB above the Add Shot button.
             Tap to show the 100/150/200/250-yd distance markers from the
             green along the centerline. Tap again to hide. Hidden once the
-            hole is complete. */}
-        {!holeComplete && (
+            hole is complete, and while the putting panel is up (the green-from
+            markers are meaningless once the ball is on the green). */}
+        {!holeComplete && !showPuttPanel && (
           <Fab
+            data-tour="measure"
             size="small"
             aria-label={showYardageMarkers ? 'hide yardage markers' : 'show yardage markers'}
             onClick={() => setShowYardageMarkers((v) => !v)}
@@ -2120,14 +2778,19 @@ export function HoleTrackingPage() {
             pinch-zoomed the map. Sits one slot (68px) above the ruler button. */}
         {!holeComplete && (
           <Fab
+            data-tour="recenter"
             size="small"
             aria-label="recenter map on hole"
             onClick={() => recenterMapRef.current?.()}
             sx={{
               position: 'absolute',
-              bottom: lastShotOnGreen
-                ? 'calc(220px + env(safe-area-inset-bottom))'
-                : 'calc(152px + env(safe-area-inset-bottom))',
+              // While the putting panel is up the yardage toggle is hidden and
+              // the full-width panel fills the lower slots, so sit just above it.
+              bottom: showPuttPanel
+                ? 'calc(244px + env(safe-area-inset-bottom))'
+                : lastShotOnGreen
+                  ? 'calc(220px + env(safe-area-inset-bottom))'
+                  : 'calc(152px + env(safe-area-inset-bottom))',
               right: 16,
               zIndex: 4,
               bgcolor: 'rgba(11,20,16,0.85)',
@@ -2146,6 +2809,7 @@ export function HoleTrackingPage() {
             shot. Use the header arrows to move on to the next hole. */}
         {!holeComplete && (
           <Fab
+            data-tour="addshot"
             color="primary"
             aria-label="add shot"
             onClick={() => {
@@ -2361,14 +3025,9 @@ export function HoleTrackingPage() {
             <IconButton
               aria-label="cancel landing point"
               onClick={() => {
-                // If this pendingGps came from an auto-track detection
-                // (state machine in 'arrived'), tell the tracker the
-                // detection was a false positive so it re-anchors and
-                // resumes detecting. Manual-tap pendingGps never sets
-                // 'arrived' so this guard is safe.
-                if (autoTrack.state === 'arrived') {
-                  autoTrack.dismissShot();
-                }
+                // pendingGps only ever comes from a manual map tap / Add Shot
+                // now — shot detection is watch-driven, so cancelling just
+                // clears the staged landing point.
                 setPendingGps(null);
               }}
               size="small"
@@ -2423,6 +3082,9 @@ export function HoleTrackingPage() {
               onChange={(nextClubId, nextTier1) => {
                 setSelectedClubId(nextClubId);
                 setSelectedClubTier1(nextTier1);
+                // Picking the putter re-arms the putting panel (undoes a prior
+                // fringe dismiss). Any other club leaves it hidden.
+                if (nextTier1 === 'putter') setPuttPanelDismissed(false);
                 // Close the drawer on a concrete club pick. A tier-1 tap that
                 // expands a multi-club group (and leaves clubId null) keeps
                 // the drawer open so the user can pick the leaf club next.
@@ -2461,6 +3123,7 @@ export function HoleTrackingPage() {
               setEditingShot(shot);
               setShotSheet(true);
             }}
+            onMove={onMoveShot}
             onDelete={onDeleteShot}
           />
         </Box>
@@ -2469,25 +3132,7 @@ export function HoleTrackingPage() {
       <AddShotSheet
         open={shotSheet}
         shotNumber={editingShot ? editingShot.shotNumber : hole.shots.length + 1}
-        editing={
-          editingShot
-            ? ({
-                clubId: editingShot.clubId,
-                distance: editingShot.distance,
-                distanceUnit: editingShot.distanceUnit,
-                targetType: editingShot.targetType,
-                targetResult: editingShot.targetResult,
-                lie: editingShot.lie,
-                penaltyType: editingShot.penaltyType,
-                notes: editingShot.notes,
-                startLat: editingShot.startLat ?? null,
-                startLng: editingShot.startLng ?? null,
-                endLat: editingShot.endLat ?? null,
-                endLng: editingShot.endLng ?? null,
-                calculatedDistance: editingShot.calculatedDistance ?? null
-              } satisfies ShotEditDraft)
-            : null
-        }
+        editing={editingDraft}
         holePar={hole.par}
         bagClubs={bagClubs}
         defaultClubId={defaultClubId}
@@ -2495,13 +3140,6 @@ export function HoleTrackingPage() {
         onClose={() => {
           setShotSheet(false);
           setEditingShot(null);
-          // If the sheet was opened by an auto-track detection that the
-          // user is now cancelling, treat the detection as a false
-          // positive: re-arm the tracker anchored at the current location
-          // (the cancelled "end" is presumed to be where the user is now).
-          if (autoTrack.state === 'arrived' && pendingGps) {
-            autoTrack.dismissShot();
-          }
           setPendingGps(null);
         }}
         onSubmit={onSubmitShot}
@@ -2632,6 +3270,8 @@ export function HoleTrackingPage() {
           </Button>
         </DialogActions>
       </Dialog>
+
+      <RoundTour open={tourOpen} steps={tourSteps} onClose={closeTour} />
     </Box>
   );
 }
@@ -2649,10 +3289,18 @@ interface ShotsCardProps {
   bagClubs: BagClub[];
   onAdd: () => void;
   onEdit: (shot: LocalShot) => void;
+  onMove: (shot: LocalShot, dir: -1 | 1) => void;
   onDelete: (shot: LocalShot) => void;
 }
 
-function ShotsCard({ shots, bagClubs, onAdd, onEdit, onDelete }: ShotsCardProps) {
+function ShotsCard({
+  shots,
+  bagClubs,
+  onAdd,
+  onEdit,
+  onMove,
+  onDelete
+}: ShotsCardProps) {
   return (
     <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
       <CardContent>
@@ -2700,12 +3348,16 @@ function ShotsCard({ shots, bagClubs, onAdd, onEdit, onDelete }: ShotsCardProps)
               {shots
                 .slice()
                 .sort((a, b) => a.shotNumber - b.shotNumber)
-                .map((shot) => (
+                .map((shot, idx, arr) => (
                   <ShotRow
                     key={shot.tempId}
                     shot={shot}
                     bagClubs={bagClubs}
+                    canMoveUp={idx > 0}
+                    canMoveDown={idx < arr.length - 1}
                     onEdit={() => onEdit(shot)}
+                    onMoveUp={() => onMove(shot, -1)}
+                    onMoveDown={() => onMove(shot, 1)}
                     onDelete={() => onDelete(shot)}
                   />
                 ))}
@@ -2720,12 +3372,20 @@ function ShotsCard({ shots, bagClubs, onAdd, onEdit, onDelete }: ShotsCardProps)
 function ShotRow({
   shot,
   bagClubs,
+  canMoveUp,
+  canMoveDown,
   onEdit,
+  onMoveUp,
+  onMoveDown,
   onDelete
 }: {
   shot: LocalShot;
   bagClubs: BagClub[];
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   onEdit: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
   onDelete: () => void;
 }) {
   const club = bagClubs.find((c) => c.clubId === shot.clubId);
@@ -2769,6 +3429,34 @@ function ShotRow({
         }
       }}
     >
+      {/* Reorder — stacked up/down to the LEFT of the shot number. Add appends
+          via the header button; these nudge a shot into its play position. */}
+      <Box sx={{ display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+        <IconButton
+          size="small"
+          aria-label="move shot earlier"
+          disabled={!canMoveUp}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMoveUp();
+          }}
+          sx={{ p: 0.25 }}
+        >
+          <KeyboardArrowUpRoundedIcon fontSize="small" />
+        </IconButton>
+        <IconButton
+          size="small"
+          aria-label="move shot later"
+          disabled={!canMoveDown}
+          onClick={(e) => {
+            e.stopPropagation();
+            onMoveDown();
+          }}
+          sx={{ p: 0.25 }}
+        >
+          <KeyboardArrowDownRoundedIcon fontSize="small" />
+        </IconButton>
+      </Box>
       <Box
         sx={{
           width: 32,
@@ -2823,6 +3511,7 @@ function ShotRow({
           </Typography>
         )}
       </Box>
+      {/* Delete. stopPropagation so it doesn't trigger the row's tap-to-edit. */}
       <IconButton
         size="small"
         aria-label="delete shot"
@@ -2831,6 +3520,7 @@ function ShotRow({
           onDelete();
         }}
         color="error"
+        sx={{ flexShrink: 0 }}
       >
         <DeleteOutlineRoundedIcon fontSize="small" />
       </IconButton>
@@ -2862,7 +3552,7 @@ function StatPill({
       sx={{
         bgcolor: accent ? 'rgba(46,125,50,0.85)' : 'rgba(11,20,16,0.78)',
         color: 'common.white',
-        borderRadius: 1.5,
+        borderRadius: '5px',
         border: 1,
         borderColor: accent ? 'rgba(165,214,167,0.55)' : 'rgba(255,255,255,0.18)',
         backdropFilter: 'blur(6px)',

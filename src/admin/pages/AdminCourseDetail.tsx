@@ -15,10 +15,11 @@ import {
   TextField,
   Typography
 } from '@mui/material';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Navigate, useParams } from 'react-router-dom';
+import VerifiedRoundedIcon from '@mui/icons-material/VerifiedRounded';
 import { adminCoursesRepo } from '@/services/adminCoursesRepo';
-import { useResyncCourse } from '../hooks/useCoursesApi';
+import { useResyncCourse, useImportCourse } from '../hooks/useCoursesApi';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { CourseEditDialog } from '../components/CourseEditDialog';
 
@@ -30,11 +31,20 @@ export function AdminCourseDetail() {
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pastedJson, setPastedJson] = useState('');
   const resync = useResyncCourse();
+  const reimport = useImportCourse();
 
   const { data: course, isLoading } = useQuery({
     queryKey: ['admin-course', id],
     enabled: !!id,
     queryFn: () => adminCoursesRepo.getOne(id!)
+  });
+
+  const verify = useMutation({
+    mutationFn: (next: boolean) => adminCoursesRepo.setVerified(id!, next),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin-course', id] });
+      queryClient.invalidateQueries({ queryKey: ['admin-all-courses'] });
+    }
   });
 
   if (!id) return <Navigate to="/admin/courses" replace />;
@@ -55,6 +65,19 @@ export function AdminCourseDetail() {
 
   const onResync = () => {
     resync.mutate({ courseId: course.id }, { onSuccess: invalidateAfterSync });
+  };
+
+  // Re-fetch the GolfCourseAPI detail and re-upsert the course (matched on
+  // course_api_id) — this is how courses imported before tee-parsing existed
+  // pick up their `course_tees` rows. Also refreshes the start-round tee picker.
+  const onReimport = () => {
+    if (!course.course_api_id) return;
+    reimport.mutate(course.course_api_id, {
+      onSuccess: () => {
+        invalidateAfterSync();
+        queryClient.invalidateQueries({ queryKey: ['course-tees', course.id] });
+      }
+    });
   };
 
   const onSyncFromPaste = () => {
@@ -96,6 +119,13 @@ export function AdminCourseDetail() {
             {[course.city, course.state, course.country].filter(Boolean).join(', ') || '—'}
           </Typography>
           <Stack direction="row" spacing={0.5} mt={1} flexWrap="wrap" useFlexGap>
+            <Chip
+              size="small"
+              color={course.verified ? 'primary' : 'default'}
+              variant={course.verified ? 'filled' : 'outlined'}
+              icon={course.verified ? <VerifiedRoundedIcon sx={{ fontSize: 16 }} /> : undefined}
+              label={course.verified ? 'verified' : 'unverified'}
+            />
             <Chip size="small" label={`source: ${course.source ?? '—'}`} />
             <Chip size="small" label={`osm: ${course.osm_status ?? '—'}`} />
             {course.course_api_id && <Chip size="small" label={`api id: ${course.course_api_id}`} />}
@@ -113,10 +143,35 @@ export function AdminCourseDetail() {
             </Button>
             <Button
               variant="outlined"
+              onClick={onReimport}
+              disabled={reimport.isPending || !course.course_api_id}
+              title={
+                course.course_api_id
+                  ? 'Re-fetch from GolfCourseAPI (refreshes tee sets)'
+                  : 'No GolfCourseAPI id — this course was added manually'
+              }
+            >
+              {reimport.isPending ? 'Re-importing…' : 'Re-import (tees)'}
+            </Button>
+            <Button
+              variant="outlined"
               onClick={() => setPasteOpen(true)}
               disabled={resync.isPending}
             >
               Sync from JSON
+            </Button>
+            <Button
+              variant={course.verified ? 'outlined' : 'contained'}
+              color={course.verified ? 'inherit' : 'primary'}
+              startIcon={<VerifiedRoundedIcon />}
+              onClick={() => verify.mutate(!course.verified)}
+              disabled={verify.isPending}
+            >
+              {verify.isPending
+                ? 'Saving…'
+                : course.verified
+                  ? 'Unverify'
+                  : 'Verify (make public)'}
             </Button>
             <Button
               variant="text"
@@ -179,6 +234,21 @@ export function AdminCourseDetail() {
           {resync.error && (
             <Alert severity="error" sx={{ mt: 1 }}>
               {(resync.error as Error).message}
+            </Alert>
+          )}
+          {verify.error && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              {(verify.error as Error).message}
+            </Alert>
+          )}
+          {reimport.error && (
+            <Alert severity="error" sx={{ mt: 1 }}>
+              {(reimport.error as Error).message}
+            </Alert>
+          )}
+          {reimport.data && (
+            <Alert severity="success" sx={{ mt: 1 }}>
+              Re-imported from GolfCourseAPI — tee sets refreshed.
             </Alert>
           )}
           {resync.data && (

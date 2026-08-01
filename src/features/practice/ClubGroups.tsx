@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
-import { Box, Button, Chip, Collapse, Divider, Paper, Stack, Typography } from '@mui/material';
+import { Box, Chip, Collapse, Divider, Paper, Stack, Typography } from '@mui/material';
+import MoreVertRoundedIcon from '@mui/icons-material/MoreVertRounded';
 import type { SwingFeedback, SwingMetric } from '@/types/swing';
 import { useClubNameLookup } from './useClubName';
 import { SwingCard } from './SwingCard';
@@ -83,7 +84,7 @@ export function ClubGroups({
 function MiniStat({ label, value }: { label: string; value: string }) {
   return (
     <Stack alignItems="center" sx={{ minWidth: 0 }}>
-      <Typography variant="subtitle2" fontWeight={700}>
+      <Typography fontWeight={700} sx={{ fontSize: '1.5rem', lineHeight: 1.1 }} noWrap>
         {value}
       </Typography>
       <Typography variant="caption" color="text.secondary" noWrap>
@@ -107,29 +108,33 @@ function ClubGroupCard({
 
   return (
     <Paper variant="outlined" sx={{ p: 1.5, borderRadius: 0 }}>
-      <Stack direction="row" justifyContent="space-between" alignItems="center">
-        <Typography variant="subtitle1" fontWeight={800}>
-          {name}
+      <Box
+        onClick={() => setOpen((v) => !v)}
+        role="button"
+        aria-expanded={open}
+        sx={{ cursor: 'pointer' }}
+      >
+        <Stack direction="row" alignItems="center" spacing={1}>
+          <Typography variant="subtitle1" fontWeight={800} sx={{ flex: 1, minWidth: 0 }} noWrap>
+            {name}
+          </Typography>
+          <Chip size="small" label={`${count} swing${count === 1 ? '' : 's'}`} />
+          <MoreVertRoundedIcon fontSize="small" sx={{ color: 'text.secondary', flexShrink: 0 }} />
+        </Stack>
+
+        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, mt: 1 }}>
+          <MiniStat label="Tempo" value={group.avgTempo > 0 ? `${group.avgTempo.toFixed(1)}:1` : '—'} />
+          <MiniStat label="Transition" value={`${Math.round(group.avgTransition)}`} />
+          <MiniStat label="Finish" value={`${Math.round(group.avgFinish)}`} />
+          <MiniStat
+            label="Consistency"
+            value={group.avgConsistency != null ? `${Math.round(group.avgConsistency)}` : '—'}
+          />
+        </Box>
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
+          Averages · estimated, motion-based
         </Typography>
-        <Chip size="small" label={`${count} swing${count === 1 ? '' : 's'}`} />
-      </Stack>
-
-      <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 1, mt: 1 }}>
-        <MiniStat label="Tempo" value={group.avgTempo > 0 ? `${group.avgTempo.toFixed(1)}:1` : '—'} />
-        <MiniStat label="Transition" value={`${Math.round(group.avgTransition)}`} />
-        <MiniStat label="Finish" value={`${Math.round(group.avgFinish)}`} />
-        <MiniStat
-          label="Consistency"
-          value={group.avgConsistency != null ? `${Math.round(group.avgConsistency)}` : '—'}
-        />
       </Box>
-      <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 0.5 }}>
-        Averages · estimated, motion-based
-      </Typography>
-
-      <Button size="small" onClick={() => setOpen((v) => !v)} sx={{ mt: 0.5, px: 0, minWidth: 0 }}>
-        {open ? 'Hide swings' : `View ${count} swing${count === 1 ? '' : 's'}`}
-      </Button>
 
       <Collapse in={open} unmountOnExit>
         <Divider sx={{ my: 1 }} />

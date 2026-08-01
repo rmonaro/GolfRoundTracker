@@ -8,6 +8,7 @@ import { evaluateSession } from '@/services/swingFeedbackEngine';
 import { MotionDisclaimer } from '@/components/practice/MotionDisclaimer';
 import { practicePageSx } from './practicePageSx';
 import { ClubGroups } from '@/features/practice/ClubGroups';
+import { FeedbackChips } from '@/features/practice/FeedbackChips';
 import { SWING_DISCLAIMER } from '@/utils/swingLabels';
 import type { SwingFeedback, SwingMetric, SwingSession } from '@/types/swing';
 import type { SwingFeedbackRow } from '@/types/database';
@@ -97,8 +98,6 @@ export function PracticeSessionDetailPage() {
   const setupConsistency = derived.setupConsistencyScore ?? session?.setupConsistencyScore ?? null;
   const avgRest = derived.avgRestSeconds ?? session?.avgRestSeconds ?? null;
 
-  const levelColor = (level: string) =>
-    level === 'positive' ? 'success' : level === 'attention' ? 'warning' : 'default';
 
   if (loading) {
     return (
@@ -176,11 +175,7 @@ export function PracticeSessionDetailPage() {
           <Typography variant="subtitle2" fontWeight={700} sx={{ mb: 1 }}>
             Session feedback
           </Typography>
-          <Stack direction="row" spacing={0.5} useFlexGap flexWrap="wrap">
-            {sessionFeedback.map((f) => (
-              <Chip key={f.code} size="small" color={levelColor(f.level)} label={f.message} />
-            ))}
-          </Stack>
+          <FeedbackChips items={sessionFeedback} />
         </>
       )}
 

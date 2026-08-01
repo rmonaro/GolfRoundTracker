@@ -2,22 +2,51 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { haversineMeters, watchPosition, type GpsPoint } from '@/services/gpsService';
 
 /**
- * Auto-track shot detection state machine.
+ * Auto-track shot detection.
  *
- * No motion sensors required — works purely from continuous GPS. The model:
- * the user is either standing at the ball (ARMED), walking away (MOVING), or
- * has arrived at a new resting spot (ARRIVED → emit "shot detected"). The
- * watch-position loop drives the transitions; the user confirms or dismisses
- * each detected shot via the consuming UI.
+ * Shot detection is WATCH-DRIVEN ONLY. The phone deliberately does NOT detect
+ * shots from its own GPS movement ("walked then stopped") — that heuristic was
+ * removed because it produced false positives (cart rides, walking to a
+ * partner's ball) and the phone is often pocketed. The only auto-detection here
+ * comes from the watch's confirmed ball-strikes (see the `lastImpact` effect).
  *
- *   IDLE  → tap enabled              → ARMED (capture ball pos from first fix)
- *   ARMED → fix > moveThresholdM     → MOVING
- *   MOVING → recent fixes cluster
- *            (≤ stationaryRadiusM
- *            over stationaryWindowS) → ARRIVED  (emit ShotDetected)
- *   ARRIVED → confirm/dismiss        → ARMED   (ball pos = new location)
+ * The continuous GPS watch this hook runs exists solely to keep `latestFix`
+ * flowing so a watch strike can be geo-tagged onto the player's current
+ * position. The always-on "you are here" dot is a separate watch owned by the
+ * consuming page and is unaffected by this hook.
+ *
+ *   strike arrives → close prior in-flight shot (end = current fix),
+ *                    open a new one → emit ShotDetected(source:'impact')
  */
-export type AutoTrackState = 'idle' | 'armed' | 'moving' | 'arrived';
+export type AutoTrackState = 'idle' | 'armed';
+
+/**
+ * Minimum ball travel (metres) for a strike to close the in-flight shot as a
+ * real shot. Two impacts landing within this of each other — a waggle, a
+ * practice swing that crossed the impact threshold, a double-trigger, or
+ * re-addressing the ball — would otherwise commit a phantom shot with ~0 yards.
+ * Below this we treat the strike as noise: keep the original in-flight start
+ * (don't corrupt it) and emit nothing. ~5 m ≈ 5.5 yds, well under any real
+ * chip, so legitimate short shots still register.
+ */
+const MIN_SHOT_M = 5;
+
+/**
+ * Opaque per-shot metadata latched when a strike OPENS a shot and carried
+ * through to when that shot is CLOSED. The hook never inspects it — it only
+ * snapshots (via `captureShotMeta`) and hands it back on the emitted shot.
+ * The consumer uses it to record the club the player was set to AT THE SWING,
+ * not the (possibly different) club showing when the next strike commits it.
+ */
+export interface ShotMeta {
+  clubId: string | null;
+  /** Motion swing data latched from the watch strike that opened this shot
+   *  (migration 031). Null when the strike carried no metrics (older builds /
+   *  phone-side shots). */
+  swingType?: import('@/models').SwingTypeValue | null;
+  swingMetrics?: import('@/models').RoundSwingMetrics | null;
+  watchImpactId?: number | null;
+}
 
 export interface ShotDetected {
   startLat: number;
@@ -25,59 +54,51 @@ export interface ShotDetected {
   endLat: number;
   endLng: number;
   distanceM: number;
+  /** Always 'impact' — shots are detected from watch strikes only. */
+  source: 'impact';
   /**
-   * How this shot was detected:
-   *   'gps'    — Phase 1 walked-then-stopped (consumer opens the confirm sheet)
-   *   'impact' — Phase 2 a watch strike closed the in-flight shot (auto-commit)
+   * Metadata latched when THIS shot's launch strike opened it (see ShotMeta).
+   * Null when no `captureShotMeta` was provided or it returned null.
    */
-  source: 'gps' | 'impact';
+  meta: ShotMeta | null;
 }
 
 export interface UseAutoTrackOptions {
   enabled: boolean;
   /** Initial ball position. If null, the first GPS fix becomes the ball. */
   initialBallPos?: { lat: number; lng: number } | null;
-  /** Distance threshold to transition ARMED → MOVING (meters). Default 10. */
-  moveThresholdM?: number;
-  /** Cluster radius for stationary detection (meters). Default 5. */
-  stationaryRadiusM?: number;
-  /** Stationary window length (seconds). Default 8. */
-  stationaryWindowS?: number;
   /**
-   * Newest confirmed ball-strike from the watch (Phase 1 impact gating).
-   * When the watch is streaming these, a detected "walked then stopped" shot
-   * is only emitted if a strike arrived since the last anchor — killing false
-   * positives (cart rides, walking to a partner's ball). When no impacts ever
-   * arrive (no watch / not worn / dropped link), the gate self-disables and
-   * the pure-GPS behavior is unchanged. A change in object identity counts as
-   * a new strike; `impactId` is informational.
-   */
-  lastImpact?: { impactId: number; capturedAt: number } | null;
-  /**
-   * Master switch for the impact gate, wired to the user's "watch shot
-   * detection" setting. When false the gate is bypassed entirely (pure GPS),
-   * so turning the setting off mid-round relaxes detection immediately instead
-   * of waiting out the stale window. Default true.
-   */
-  impactGateEnabled?: boolean;
-  /**
-   * How long (ms) after the last received strike the impact stream is still
-   * considered "live" for gating. Past this, the gate relaxes back to pure
-   * GPS so a dropped watch link can't strand detection. Default 12 minutes.
-   */
-  impactGateStaleMs?: number;
-  /**
-   * Phase 2 impact-primary mode. When true, watch strikes drive detection:
-   * each strike closes the in-flight shot (start = the PRIOR strike's spot,
-   * end = where you're standing now) and the GPS walked-then-stopped emitter
-   * is suppressed to avoid double-counting. Emitted shots carry source:
-   * 'impact' so the consumer auto-commits them. Off → Phase 1 behavior.
+   * Newest confirmed ball-strike from the watch. A change in object identity
+   * counts as a new strike; `impactId` is informational. Each strike closes
+   * the in-flight shot (start = the PRIOR strike's spot, end = where you're
+   * standing now) and opens a new one, but only while `impactPrimary` is true.
    *
-   * Only enable when strikes are actually LIVE — with this on and no strikes
-   * arriving, nothing is detected (GPS emission is suppressed). The consumer
-   * is responsible for gating this on a live strike stream.
+   * `lat`/`lng` are the WATCH's GPS position at the strike. Preferred over the
+   * phone's own fix so shots still record when the phone is pocketed/backgrounded
+   * and its GPS has stopped — the watch is the source of truth for where the
+   * strike happened. Falls back to the phone's live fix when absent.
+   */
+  lastImpact?: {
+    impactId: number;
+    capturedAt: number;
+    lat?: number;
+    lng?: number;
+  } | null;
+  /**
+   * Impact-primary mode. When true, watch strikes drive detection and emitted
+   * shots carry source:'impact' so the consumer auto-commits them. When false,
+   * strikes are ignored (no auto-detection happens at all — the user records
+   * shots manually via the Add Shot button). The consumer is responsible for
+   * gating this on a live strike stream + the user's shot-detection setting.
    */
   impactPrimary?: boolean;
+  /**
+   * Snapshot metadata for the shot a strike is OPENING, evaluated at strike
+   * time. The returned value travels with the in-flight shot and comes back on
+   * `ShotDetected.meta` when the NEXT strike (or resolvePendingShot) closes it.
+   * This is how the club latches to the swing rather than to the commit moment.
+   */
+  captureShotMeta?: () => ShotMeta | null;
   /** Fired when a shot is detected. */
   onShotDetected: (shot: ShotDetected) => void;
 }
@@ -88,14 +109,12 @@ export interface UseAutoTrackResult {
   latestFix: GpsPoint | null;
   /**
    * Mark the detected shot as confirmed. `newBallPos` defaults to the latest
-   * GPS fix (the resting spot that triggered ARRIVED). Resets buffer and
-   * returns to ARMED.
+   * GPS fix. Resets the anchor and returns to ARMED.
    */
   confirmShot: (newBallPos?: { lat: number; lng: number }) => void;
   /**
-   * Dismiss the detected shot (false positive — cart ride, looking for a
-   * lost ball, etc.). Treats the current location as the new ball anchor
-   * so the next detection starts fresh from here.
+   * Dismiss the detected shot (false positive). Treats the current location as
+   * the new ball anchor so the next detection starts fresh from here.
    */
   dismissShot: () => void;
   /** Manually reseed the ball anchor (e.g. after a manually-recorded shot). */
@@ -113,19 +132,21 @@ export interface UseAutoTrackResult {
   clearPendingShot: () => void;
   /** True while a strike has opened a shot that hasn't been closed yet. */
   hasPendingShot: () => boolean;
+  /**
+   * Reactive launch point of the in-flight (not-yet-committed) shot, or null.
+   * Unlike `hasPendingShot()` (a ref read), this is React state so the UI can
+   * render a provisional "shot in progress" marker live as it's tracked.
+   */
+  pendingStart: { lat: number; lng: number } | null;
 }
 
 export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   const {
     enabled,
     initialBallPos = null,
-    moveThresholdM = 10,
-    stationaryRadiusM = 5,
-    stationaryWindowS = 8,
     lastImpact = null,
-    impactGateEnabled = true,
-    impactGateStaleMs = 12 * 60 * 1000,
     impactPrimary = false,
+    captureShotMeta,
     onShotDetected
   } = opts;
 
@@ -140,16 +161,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   const ballPosRef = useRef(ballPos);
   const stateRef = useRef<AutoTrackState>(state);
   const onShotDetectedRef = useRef(onShotDetected);
-  const bufferRef = useRef<GpsPoint[]>([]);
-  // --- Phase 1 impact gate ---
-  // True once a confirmed strike has arrived since we last anchored at the
-  // ball; reset on every re-anchor (confirm/dismiss/external ball move).
-  const impactSinceAnchorRef = useRef(false);
-  // Phone-clock arrival time of the most recent strike. Drives the
-  // "stream live" check — we deliberately use arrival time, not the watch's
-  // capturedAt, to sidestep cross-device clock skew.
-  const lastImpactAtRef = useRef<number | null>(null);
-  // --- Phase 2 impact-primary ---
+  const captureShotMetaRef = useRef(captureShotMeta);
   const impactPrimaryRef = useRef(impactPrimary);
   // Latest GPS fix, readable synchronously by the strike handler (which fires
   // off a prop change, not inside the GPS callback).
@@ -157,11 +169,24 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   // The in-flight shot's launch point (start). Set on each strike; its END
   // resolves on the NEXT strike — or via resolvePendingShot(). Null = nothing
   // currently in flight.
-  const inFlightRef = useRef<{ lat: number; lng: number; t: number } | null>(null);
+  const inFlightRef = useRef<{
+    lat: number;
+    lng: number;
+    t: number;
+    meta: ShotMeta | null;
+  } | null>(null);
+  // Reactive mirror of inFlightRef's launch point so the UI can show a
+  // provisional "shot in progress" marker (the ref alone doesn't re-render).
+  const [pendingStart, setPendingStart] = useState<{ lat: number; lng: number } | null>(
+    null
+  );
 
   useEffect(() => {
     impactPrimaryRef.current = impactPrimary;
   }, [impactPrimary]);
+  useEffect(() => {
+    captureShotMetaRef.current = captureShotMeta;
+  }, [captureShotMeta]);
   useEffect(() => {
     ballPosRef.current = ballPos;
   }, [ballPos]);
@@ -172,35 +197,55 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
     onShotDetectedRef.current = onShotDetected;
   }, [onShotDetected]);
 
-  // A confirmed strike arrived from the watch — mark it against the current
-  // anchor and stamp the phone-side arrival time. Object identity changes per
-  // message, so this fires once per strike.
+  // A confirmed strike arrived from the watch. Object identity changes per
+  // message, so this fires once per strike. In impact-primary mode the strike
+  // closes the previous in-flight shot (its end = where you're standing now,
+  // having walked to the ball) and opens a new one.
   useEffect(() => {
     if (!lastImpact) return;
-    impactSinceAnchorRef.current = true;
-    lastImpactAtRef.current = Date.now();
-
-    // Phase 2: a strike closes the previous in-flight shot (its end = where
-    // you're standing now, having walked to the ball) and opens a new one.
     if (!impactPrimaryRef.current) return;
-    const fix = latestFixRef.current;
-    if (!fix) return; // no GPS to place the strike — skip this one
+    // Prefer the WATCH's position carried on the strike (the striker's wrist,
+    // and available even when the phone's own GPS has stopped in a pocket).
+    // Fall back to the phone's live fix. Only skip when neither exists.
+    const fix: { lat: number; lng: number } | null =
+      lastImpact.lat != null && lastImpact.lng != null
+        ? { lat: lastImpact.lat, lng: lastImpact.lng }
+        : latestFixRef.current
+          ? { lat: latestFixRef.current.lat, lng: latestFixRef.current.lng }
+          : null;
+    if (!fix) return; // no GPS anywhere to place the strike — skip this one
     const prev = inFlightRef.current;
     if (prev) {
       const distM = haversineMeters(
         { lat: prev.lat, lng: prev.lng, accuracyM: 0, timestamp: 0 },
-        fix
+        { lat: fix.lat, lng: fix.lng, accuracyM: 0, timestamp: 0 }
       );
+      // Strike landed essentially on top of the in-flight start — almost
+      // certainly a waggle / practice swing / double-trigger, not a real shot.
+      // Drop it WITHOUT moving the in-flight start, so the next real strike
+      // still measures from the true launch point. This is what stops the
+      // "extra shots to verify with ~0 yards" the auto-tracker was producing.
+      if (distM < MIN_SHOT_M) return;
       onShotDetectedRef.current({
         startLat: prev.lat,
         startLng: prev.lng,
         endLat: fix.lat,
         endLng: fix.lng,
         distanceM: distM,
-        source: 'impact'
+        source: 'impact',
+        // Club latched when THIS shot was struck (its launch strike), not the
+        // club showing now as the player stands over the next ball.
+        meta: prev.meta
       });
     }
-    inFlightRef.current = { lat: fix.lat, lng: fix.lng, t: Date.now() };
+    // Open the next shot, latching the club the player is set to at THIS strike.
+    inFlightRef.current = {
+      lat: fix.lat,
+      lng: fix.lng,
+      t: Date.now(),
+      meta: captureShotMetaRef.current?.() ?? null
+    };
+    setPendingStart({ lat: fix.lat, lng: fix.lng });
   }, [lastImpact]);
 
   // Resolve the in-flight shot immediately (hole-out, or right before a manual
@@ -211,6 +256,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
       const prev = inFlightRef.current;
       if (!prev) return null;
       inFlightRef.current = null;
+      setPendingStart(null);
       const endPos =
         end ??
         (latestFixRef.current
@@ -227,7 +273,9 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
         endLat: endPos.lat,
         endLng: endPos.lng,
         distanceM: distM,
-        source: 'impact'
+        source: 'impact',
+        // Carry the club latched when this (now hole-out / flushed) shot opened.
+        meta: prev.meta
       };
     },
     []
@@ -235,6 +283,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
 
   const clearPendingShot = useCallback(() => {
     inFlightRef.current = null;
+    setPendingStart(null);
   }, []);
 
   const hasPendingShot = useCallback(() => inFlightRef.current != null, []);
@@ -248,12 +297,9 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
     (pos: { lat: number; lng: number }) => {
       ballPosRef.current = pos;
       setBallPosState(pos);
-      bufferRef.current = [];
-      // New anchor → the next detection must be backed by its OWN strike.
-      impactSinceAnchorRef.current = false;
       // Re-arm whenever the anchor moves. Without this, an external
       // ball-pos update (e.g., after a manual shot save) would leave the
-      // state machine stuck in 'arrived' from the prior detection.
+      // state machine stuck from a prior state.
       transition('armed');
     },
     [transition]
@@ -279,7 +325,6 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   useEffect(() => {
     if (!enabled) {
       transition('idle');
-      bufferRef.current = [];
       return;
     }
 
@@ -291,105 +336,21 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
       setLatestFix(fix);
       latestFixRef.current = fix;
 
-      // Impact-primary mode drives detection from strikes, not GPS arrival.
-      // Keep the live fix flowing (for the map dot + strike geo-tagging) but
-      // skip the walked-then-stopped state machine entirely.
-      if (impactPrimaryRef.current) return;
-
-      // Bootstrap ball position from the first fix when we don't have one.
+      // The phone does NOT auto-detect shots from GPS movement — detection is
+      // watch-driven only (see the lastImpact effect). This watch exists solely
+      // to keep latestFix flowing so the watch's strikes can be geo-tagged onto
+      // the player's current position. Bootstrap the ball anchor from the first
+      // fix as a sensible default.
       if (!ballPosRef.current) {
         const init = { lat: fix.lat, lng: fix.lng };
         ballPosRef.current = init;
         setBallPosState(init);
         transition('armed');
-        return;
       }
-
-      const distFromBallM = haversineMeters(
-        {
-          lat: ballPosRef.current.lat,
-          lng: ballPosRef.current.lng,
-          accuracyM: 0,
-          timestamp: 0
-        },
-        fix
-      );
-
-      if (stateRef.current === 'armed') {
-        if (distFromBallM > moveThresholdM) {
-          bufferRef.current = [fix];
-          transition('moving');
-        }
-        return;
-      }
-
-      if (stateRef.current === 'moving') {
-        // Sliding window of recent fixes within the stationary detection
-        // window. We compute "stationary" as: spread between any two fixes
-        // in the window is ≤ stationaryRadiusM.
-        const cutoffMs = Date.now() - stationaryWindowS * 1000;
-        bufferRef.current = [...bufferRef.current, fix].filter(
-          (f) => f.timestamp >= cutoffMs
-        );
-
-        // Need to actually span the window before deciding the user is
-        // stationary; otherwise a single fix at the new spot would fire.
-        const oldest = bufferRef.current[0];
-        if (!oldest) return;
-        const spanMs = fix.timestamp - oldest.timestamp;
-        if (spanMs < stationaryWindowS * 1000) return;
-
-        let maxSpread = 0;
-        const buf = bufferRef.current;
-        for (let i = 0; i < buf.length; i++) {
-          for (let j = i + 1; j < buf.length; j++) {
-            const d = haversineMeters(buf[i], buf[j]);
-            if (d > maxSpread) maxSpread = d;
-          }
-        }
-        if (maxSpread > stationaryRadiusM) return;
-
-        // Also require that the resting spot is actually away from the ball,
-        // so a walk-out-and-back doesn't register as a shot.
-        if (distFromBallM <= moveThresholdM) return;
-
-        // Phase 1 impact gate. When the watch's strike stream is LIVE (a
-        // confirmed strike arrived recently), only treat this as a shot if a
-        // real ball-strike happened since we anchored at the ball — that's
-        // what filters out cart rides / walking to a partner's ball. The gate
-        // self-disables when no strikes are arriving (no watch / dropped
-        // link), so pure-GPS detection is completely unaffected.
-        const streamLive =
-          lastImpactAtRef.current != null &&
-          Date.now() - lastImpactAtRef.current < impactGateStaleMs;
-        if (impactGateEnabled && streamLive && !impactSinceAnchorRef.current) return;
-
-        // ARRIVED — emit detection. Stay in this state until the consumer
-        // calls confirmShot / dismissShot.
-        const ball = ballPosRef.current;
-        transition('arrived');
-        onShotDetectedRef.current({
-          startLat: ball.lat,
-          startLng: ball.lng,
-          endLat: fix.lat,
-          endLng: fix.lng,
-          distanceM: distFromBallM,
-          source: 'gps'
-        });
-      }
-      // ARRIVED: ignore further fixes; waiting for user action.
     });
 
     return unsubscribe;
-  }, [
-    enabled,
-    moveThresholdM,
-    stationaryRadiusM,
-    stationaryWindowS,
-    impactGateEnabled,
-    impactGateStaleMs,
-    transition
-  ]);
+  }, [enabled, transition]);
 
   return {
     state,
@@ -400,6 +361,7 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
     setBallPos,
     resolvePendingShot,
     clearPendingShot,
-    hasPendingShot
+    hasPendingShot,
+    pendingStart
   };
 }

@@ -911,6 +911,7 @@ export function HoleLayout({
 
   useEffect(() => {
     if (!useMapbox || !containerRef.current) return;
+    const container = containerRef.current;
     const hole = layout.hole;
 
     // Without tee + green we can't compute a center, bearing, or markers.
@@ -1685,6 +1686,12 @@ export function HoleLayout({
 
       // Frame the hole overview once the canvas is ready (see applyOverview).
       applyOverview(false);
+      // Belt-and-suspenders: re-frame once after the map settles, in case the
+      // canvas was still resizing when onLoad ran (otherwise the first fit can
+      // be computed against a too-small viewport and crop the tee/green). The
+      // jumpTo inside applyOverview triggers its own 'idle'; we don't re-register
+      // the listener, so this runs exactly once — no loop.
+      map.once('idle', () => applyOverview(false));
     };
 
     // Frame the hole overview (tee→green + any recorded shots). Extracted so
@@ -1699,20 +1706,28 @@ export function HoleLayout({
       // on the right.
       const padding = puttingMode
         ? { top: 16, bottom: 16, left: 16, right: 16 }
-        : { top: 24, bottom: 70, left: 16, right: 90 };
+        : // Thin edge margin only — frame tee→green as large as possible while
+          // keeping both fully on screen (the hole runs vertically after the
+          // bearing rotation, so top/bottom is what controls the fill).
+          { top: 10, bottom: 10, left: 10, right: 10 };
       // Putting maxZoom up to 23 (Mapbox cap is 24) so even a small green fills
-      // the screen; normal mode caps at 19.
-      const maxZoom = puttingMode ? 23 : 19;
+      // the screen; normal mode caps at 21 so even short holes fill the view.
+      const maxZoom = puttingMode ? 23 : 21;
       try {
+        // cameraForBounds is computed against the CURRENT canvas size. On first
+        // load the canvas may not have settled to its final dimensions yet, so a
+        // stale (smaller) size makes it over-zoom and crop the tee/green. Force a
+        // resize first so the fit is measured against the real viewport.
+        map.resize();
         // Both modes use the tee→green bearing so the tee anchors at the bottom
         // and the green sits above it.
         const cam = map.cameraForBounds(targetBounds, { padding, maxZoom, bearing });
         if (!cam) return;
-        // Pull back ~10% in normal mode for breathing room. Mapbox zoom is
-        // logarithmic (each level doubles scale) so a 10% scale reduction is
-        // log2(1.1) ≈ 0.137 zoom units. Putting mode keeps its tight framing.
-        const zoom =
-          (cam.zoom ?? map.getZoom()) - (puttingMode ? 0 : Math.log2(1.1));
+        // Negative pulls back from the tee→green fit for breathing room; 0 = the
+        // tightest framing that still keeps both ends on screen. Mapbox zoom is
+        // logarithmic (each +1 doubles scale), so -0.4 ≈ 25% wider than the fit.
+        const LOAD_ZOOM_BOOST = -0.4;
+        const zoom = (cam.zoom ?? map.getZoom()) + (puttingMode ? 0 : LOAD_ZOOM_BOOST);
         const camera = { center: cam.center, zoom, bearing };
         if (animate) {
           map.easeTo({ ...camera, duration: 500 });
@@ -1730,6 +1745,33 @@ export function HoleLayout({
     if (recenterRef) recenterRef.current = () => applyOverview(true);
 
     map.on('load', onLoad);
+
+    // Re-fit the overview when the CONTAINER size settles — e.g. a dialog
+    // finishing its open animation. cameraForBounds is measured against the
+    // canvas, so a mid-animation (smaller) container would otherwise leave the
+    // hole over-zoomed (tee/green cropped). We resize on every container change
+    // and re-frame until the user first touches the map, then back off so we
+    // never fight their gesture. Detecting interaction via DOM pointer/wheel on
+    // the container (not Mapbox camera events) avoids tripping on programmatic
+    // jumpTo/easeTo from applyOverview itself.
+    let userMovedCamera = false;
+    const markUserMoved = () => {
+      userMovedCamera = true;
+    };
+    container.addEventListener('pointerdown', markUserMoved);
+    container.addEventListener('wheel', markUserMoved, { passive: true });
+    let reframeRaf: number | null = null;
+    const containerResizeObserver = new ResizeObserver(() => {
+      map.resize();
+      if (userMovedCamera) return;
+      if (reframeRaf != null) cancelAnimationFrame(reframeRaf);
+      // Defer a frame so we measure the settled size, not an intermediate one.
+      reframeRaf = requestAnimationFrame(() => {
+        reframeRaf = null;
+        if (!userMovedCamera) applyOverview(false);
+      });
+    });
+    containerResizeObserver.observe(container);
 
     // Recorded-shot markers — small numbered amber disks at each prior shot's
     // end position. The last marker visually sits under the aim handle (which
@@ -1939,6 +1981,10 @@ export function HoleLayout({
       landingMarkerRef.current?.remove();
       landingMarkerRef.current = null;
       if (recenterRef) recenterRef.current = null;
+      containerResizeObserver.disconnect();
+      container.removeEventListener('pointerdown', markUserMoved);
+      container.removeEventListener('wheel', markUserMoved);
+      if (reframeRaf != null) cancelAnimationFrame(reframeRaf);
       mapRef.current = null;
       map.remove();
     };

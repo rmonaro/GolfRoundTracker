@@ -1,5 +1,41 @@
 import { Geolocation, type Position, type PermissionStatus } from '@capacitor/geolocation';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
+
+// --- background geolocation (native) ---------------------------------------
+// @capacitor-community/background-geolocation keeps delivering fixes while the
+// app is backgrounded / the phone is locked (the official @capacitor/geolocation
+// plugin does not). We register it lazily and fall back to the foreground watch
+// if it isn't available (e.g. web, or before `npx cap sync`).
+
+interface BgLocation {
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+  /** Epoch ms, or null if unknown. */
+  time: number | null;
+}
+
+interface BgWatcherError {
+  code?: string;
+  message?: string;
+}
+
+interface BackgroundGeolocationPlugin {
+  addWatcher(
+    options: {
+      backgroundMessage?: string;
+      backgroundTitle?: string;
+      requestPermissions?: boolean;
+      stale?: boolean;
+      distanceFilter?: number;
+    },
+    callback: (position?: BgLocation, error?: BgWatcherError) => void
+  ): Promise<string>;
+  removeWatcher(options: { id: string }): Promise<void>;
+  openSettings(): Promise<void>;
+}
+
+const BackgroundGeolocation = registerPlugin<BackgroundGeolocationPlugin>('BackgroundGeolocation');
 
 /**
  * Thin wrapper around Capacitor Geolocation. Same API works on web (the
@@ -81,13 +117,23 @@ export interface WatchOptions {
   maxAccuracyM?: number;
   /** Minimum time between forwarded fixes (ms). De-bounces rapid-fire providers. Default 800. */
   minIntervalMs?: number;
+  /**
+   * If the underlying watch goes silent (no fix OR error callback) for this
+   * long, transparently tear it down and restart it. Keeps the "you are here"
+   * dot alive when the OS suspends the watch on backgrounding, a provider
+   * stalls, or the handle dies — so the user never has to toggle tracking
+   * off/on. Default 20s.
+   */
+  staleRestartMs?: number;
 }
 
 /**
  * Continuous-watch wrapper. Forwards each accepted fix to `onFix`. Returns
  * an unsubscribe function safe to call before the watch even starts.
  *
- * Filters applied before forwarding:
+ * On native it uses background geolocation, so the live position keeps updating
+ * (and auto-track keeps detecting shots) while the phone is locked / pocketed.
+ * On web it uses the official watch with a self-healing watchdog. Either way:
  *   • Drop fixes with accuracy radius > `maxAccuracyM`.
  *   • Coalesce bursts to 1 fix per `minIntervalMs`.
  */
@@ -95,42 +141,153 @@ export function watchPosition(
   onFix: (point: GpsPoint) => void,
   options?: WatchOptions
 ): () => void {
-  let watchId: string | null = null;
-  let cancelled = false;
-  let lastEmittedMs = 0;
   const maxAccuracy = options?.maxAccuracyM ?? 25;
   const minInterval = options?.minIntervalMs ?? 800;
+  let lastEmittedMs = 0;
 
-  Geolocation.watchPosition(
+  // Shared gate: accuracy + de-bounce, applied to every accepted fix.
+  const forward = (fix: GpsPoint) => {
+    if (fix.accuracyM > maxAccuracy) return;
+    const now = Date.now();
+    if (now - lastEmittedMs < minInterval) return;
+    lastEmittedMs = now;
+    onFix(fix);
+  };
+
+  if (Capacitor.isNativePlatform()) {
+    return watchBackgroundNative(forward, options);
+  }
+  return watchForeground(forward, options);
+}
+
+/**
+ * Native background watch. Survives backgrounding / a locked screen via
+ * `UIBackgroundModes: location` + the Always permission (requested here). Falls
+ * back to the foreground watch if the plugin isn't present (e.g. not synced).
+ */
+function watchBackgroundNative(
+  forward: (fix: GpsPoint) => void,
+  options?: WatchOptions
+): () => void {
+  let watcherId: string | null = null;
+  let cancelled = false;
+  let fellBack: (() => void) | null = null;
+
+  BackgroundGeolocation.addWatcher(
     {
-      enableHighAccuracy: options?.enableHighAccuracy ?? true,
-      timeout: 15_000,
-      maximumAge: 0
+      // A non-empty backgroundMessage is what enables background updates +
+      // triggers the Always-permission request on iOS.
+      backgroundMessage: 'Tracking your round so shot distances stay accurate.',
+      backgroundTitle: 'Round in progress',
+      requestPermissions: true,
+      // Deliver fresh fixes only (no stale cached location on start).
+      stale: false,
+      distanceFilter: 0
     },
-    (pos, err) => {
-      if (cancelled || err || !pos) return;
-      const fix = normalize(pos);
-      if (fix.accuracyM > maxAccuracy) return;
-      const now = Date.now();
-      if (now - lastEmittedMs < minInterval) return;
-      lastEmittedMs = now;
-      onFix(fix);
+    (position, error) => {
+      if (cancelled) return;
+      if (error || !position) return;
+      forward({
+        lat: position.latitude,
+        lng: position.longitude,
+        accuracyM: position.accuracy,
+        timestamp: position.time ?? Date.now()
+      });
     }
   )
     .then((id) => {
       if (cancelled) {
-        Geolocation.clearWatch({ id }).catch(() => undefined);
+        BackgroundGeolocation.removeWatcher({ id }).catch(() => undefined);
         return;
       }
-      watchId = id;
+      watcherId = id;
     })
-    .catch(() => undefined);
+    .catch((err) => {
+      // Plugin missing / failed to start — degrade to the foreground watch so
+      // the dot still works (just not while backgrounded).
+      console.warn('[gps] background watcher unavailable, using foreground', err);
+      if (!cancelled) fellBack = watchForeground(forward, options);
+    });
 
   return () => {
     cancelled = true;
-    if (watchId) {
-      Geolocation.clearWatch({ id: watchId }).catch(() => undefined);
+    if (watcherId) BackgroundGeolocation.removeWatcher({ id: watcherId }).catch(() => undefined);
+    if (fellBack) fellBack();
+  };
+}
+
+/**
+ * Foreground watch (web + native fallback). Self-healing: a watchdog restarts
+ * the underlying Geolocation watch if it stops calling back (provider stall,
+ * dead handle) so the live position doesn't silently freeze.
+ */
+function watchForeground(
+  forward: (fix: GpsPoint) => void,
+  options?: WatchOptions
+): () => void {
+  let watchId: string | null = null;
+  let cancelled = false;
+  let restarting = false;
+  // Last time the OS called back AT ALL (fix or error) — a liveness signal.
+  let lastCallbackMs = Date.now();
+  const staleMs = options?.staleRestartMs ?? 20_000;
+
+  const clearCurrent = async () => {
+    const id = watchId;
+    watchId = null;
+    if (id) await Geolocation.clearWatch({ id }).catch(() => undefined);
+  };
+
+  const start = () => {
+    if (cancelled) return;
+    lastCallbackMs = Date.now();
+    Geolocation.watchPosition(
+      {
+        enableHighAccuracy: options?.enableHighAccuracy ?? true,
+        timeout: 15_000,
+        maximumAge: 0
+      },
+      (pos, err) => {
+        if (cancelled) return;
+        // Any callback — even an error — means the watch is alive; reset the
+        // watchdog so a burst of transient errors doesn't thrash restarts.
+        lastCallbackMs = Date.now();
+        if (err || !pos) return;
+        forward(normalize(pos));
+      }
+    )
+      .then((id) => {
+        if (cancelled) {
+          Geolocation.clearWatch({ id }).catch(() => undefined);
+          return;
+        }
+        watchId = id;
+      })
+      .catch(() => undefined);
+  };
+
+  const restart = async () => {
+    if (cancelled || restarting) return;
+    restarting = true;
+    await clearCurrent();
+    start();
+    restarting = false;
+  };
+
+  start();
+
+  const watchdog = setInterval(() => {
+    if (cancelled || restarting) return;
+    if (Date.now() - lastCallbackMs > staleMs) {
+      lastCallbackMs = Date.now(); // avoid a tight loop while it re-locks
+      void restart();
     }
+  }, 5_000);
+
+  return () => {
+    cancelled = true;
+    clearInterval(watchdog);
+    void clearCurrent();
   };
 }
 

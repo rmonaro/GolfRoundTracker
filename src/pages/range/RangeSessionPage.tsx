@@ -10,6 +10,7 @@ import {
   CircularProgress,
   Drawer,
   IconButton,
+  Slide,
   Slider,
   Stack,
   Tab,
@@ -21,9 +22,10 @@ import type { SxProps, Theme } from '@mui/material';
 import LocationOnRoundedIcon from '@mui/icons-material/LocationOnRounded';
 import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
-import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
-import AddRoundedIcon from '@mui/icons-material/AddRounded';
+import { TargetIcon } from '@/components/icons/TargetIcon';
 import HelpOutlineRoundedIcon from '@mui/icons-material/HelpOutlineRounded';
+import ExploreRoundedIcon from '@mui/icons-material/ExploreRounded';
+import LockRoundedIcon from '@mui/icons-material/LockRounded';
 import { useNavigate } from 'react-router-dom';
 import { Capacitor } from '@capacitor/core';
 import { useAuthStore } from '@/stores/authStore';
@@ -43,13 +45,17 @@ import {
   type SwingEvent
 } from '@/services/rangeSwingBridge';
 import { targetCenter } from '@/services/rangeRepo';
+import { WindIndicator } from '@/components/ui/WindIndicator';
+import { useWind } from '@/hooks/useWind';
 import { RangeMap, type ShotMarker, type TargetShape } from '@/features/range/RangeMap';
+import { RangeTour } from './RangeTour';
 import { classifyShotVsTarget, clubColor, shotChipLabel } from '@/features/range/rangeStats';
 import {
   circleRing,
   computeBearing,
   destinationPoint,
   haversineMeters,
+  pointInPolygon,
   yardsToM
 } from '@/features/range/rangeGeo';
 import type { LatLng, RangeSession, RangeShot, RangeTarget } from '@/types/range';
@@ -85,6 +91,13 @@ export function RangeSessionPage() {
   const [lastChip, setLastChip] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "Select a club" hint when tapping with no club chosen.
+  const [clubHint, setClubHint] = useState(false);
+  // Top instruction banner slides in from the left, then auto-hides.
+  const [showInstruction, setShowInstruction] = useState(true);
+  // Guided overlay tour — auto-shows once, replayable from the "?" button.
+  const TOUR_KEY = 'grt.range.tour.v1';
+  const [tourOpen, setTourOpen] = useState(false);
   const [shotsDrawerOpen, setShotsDrawerOpen] = useState(false);
   const [shotsTab, setShotsTab] = useState<string | null>(null);
 
@@ -97,7 +110,45 @@ export function RangeSessionPage() {
   const [draftRadiusYd, setDraftRadiusYd] = useState(12);
   const [draftPoints, setDraftPoints] = useState<LatLng[]>([]);
 
+  // Down-range aim direction: dragged by the user. This drives the aim LINE
+  // only — it no longer rotates the map once the range orientation is locked.
+  // null → fall back to the session's bearing, else straight up (north).
+  const [manualBearing, setManualBearing] = useState<number | null>(null);
+  // The exact point the user dragged the aim to (lat/lng). Holds both direction
+  // AND distance so the aim stays where dropped instead of snapping to a fixed
+  // down-range distance. null → fall back to the default 250-yd aim line.
+  const [manualAim, setManualAim] = useState<LatLng | null>(null);
+  // The locked orientation of the range (which way is "up" on the map). Set when
+  // the user locks the direction (or it's restored for this mat). Decoupled from
+  // the aim so moving the aim never re-rotates the map.
+  const [orientationBearing, setOrientationBearing] = useState<number | null>(null);
+  const [aimLocked, setAimLocked] = useState(false);
+  const [aimDirty, setAimDirty] = useState(false);
+
   const aimTarget = selectedTargetId ? targets.find((t) => t.id === selectedTargetId) ?? null : null;
+
+  // Hit-test a point against saved targets so dragging the aim back onto a
+  // target re-selects it (snapping the aim to its center) without opening the
+  // targets drawer. Circles use a radius check; polygons a point-in-polygon.
+  const targetAtPoint = useCallback(
+    (p: LatLng): RangeTarget | null => {
+      for (const t of targets) {
+        if (t.kind === 'circle' && t.center) {
+          if (haversineMeters(p, t.center) <= (t.radiusM ?? yardsToM(12))) return t;
+        } else if (t.kind === 'polygon' && t.points && t.points.length >= 3) {
+          if (pointInPolygon(p, t.points)) return t;
+        }
+      }
+      return null;
+    },
+    [targets]
+  );
+
+  // Live wind at the mat, resolved against the down-range aim line so the HUD
+  // reads head/tail/cross the same way the round does.
+  const windAimBearing =
+    manualBearing != null ? manualBearing : session ? session.targetBearing : null;
+  const { wind, relative: windRelative } = useWind(origin?.lat, origin?.lng, windAimBearing);
 
   // When a swing event arrives (deferred bridge), it drives the next tap:
   // pre-fill club + swing_event_id. In v1 the stub never fires, so the manual
@@ -199,6 +250,26 @@ export function RangeSessionPage() {
     };
   }, [origin?.lat, origin?.lng, userId]);
 
+  // Restore the remembered down-range aim direction for this mat, if any.
+  useEffect(() => {
+    if (!origin || !userId) return;
+    let cancelled = false;
+    rangeRepo
+      .getOrientationNear(userId, origin)
+      .then((o) => {
+        if (!cancelled && o) {
+          setOrientationBearing(o.bearing);
+          setManualBearing(o.bearing);
+          setAimLocked(true);
+          setAimDirty(false);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [origin?.lat, origin?.lng, userId]);
+
   const cancelDraw = useCallback(() => {
     setDrawMode('none');
     setDraftCenter(null);
@@ -242,6 +313,23 @@ export function RangeSessionPage() {
     []
   );
 
+  // Persist the current down-range aim direction for this mat (reload on return).
+  const lockAim = useCallback(async () => {
+    if (!origin || !userId) return;
+    const bearing = manualBearing != null ? manualBearing : session ? session.targetBearing : 0;
+    try {
+      await rangeRepo.saveOrientation(userId, origin, bearing);
+      // Lock this as the map orientation; the aim starts pointing straight up
+      // the range and can then be dragged freely without rotating the map.
+      setOrientationBearing(bearing);
+      setManualBearing(bearing);
+      setAimLocked(true);
+      setAimDirty(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Could not save aim direction');
+    }
+  }, [origin, userId, manualBearing, session]);
+
   // --- Watch practice: track tempo/consistency during the range session ----
   // Started tagged source='range' so it stays out of the Swing/Net history.
   // Swings flow in via the root usePracticeWatchSync. Native-only.
@@ -269,6 +357,33 @@ export function RangeSessionPage() {
     if (phase === 'logging') practiceController.setClub(selectedClubId);
   }, [selectedClubId, phase]);
 
+  // Slide the instruction banner in (from the left), then hide it. Re-shows when
+  // the instruction context changes (phase, drawing mode, a detected swing).
+  useEffect(() => {
+    setShowInstruction(true);
+    const t = setTimeout(() => setShowInstruction(false), 3200);
+    return () => clearTimeout(t);
+  }, [phase, drawMode, draftCenter, pendingSwing]);
+
+  // Auto-show the guided tour the first time the map is reached.
+  useEffect(() => {
+    if (phase !== 'logging') return;
+    try {
+      if (localStorage.getItem(TOUR_KEY) !== 'done') setTourOpen(true);
+    } catch {
+      /* localStorage unavailable — skip the auto-tour */
+    }
+  }, [phase]);
+
+  const closeTour = useCallback(() => {
+    setTourOpen(false);
+    try {
+      localStorage.setItem(TOUR_KEY, 'done');
+    } catch {
+      /* ignore */
+    }
+  }, []);
+
   // --- taps ---------------------------------------------------------------
   const handleTap = useCallback(
     async (p: LatLng) => {
@@ -282,17 +397,23 @@ export function RangeSessionPage() {
         return;
       }
       if (busy || phase !== 'logging' || !origin || !userId) return;
+      // Require a club before logging a shot.
+      if (!selectedClubId) {
+        setClubHint(true);
+        return;
+      }
       setBusy(true);
       setError(null);
+      setClubHint(false);
       try {
         // Current aim: the selected target wins (so re-aiming mid-session works),
-        // else the session's saved line, else straight up the range (north).
+        // else the user's chosen/locked direction (or the session's saved bearing).
         let activeSession = session;
+        const baseBearing =
+          manualBearing != null ? manualBearing : activeSession ? activeSession.targetBearing : 0;
         const aim = aimTarget
           ? targetCenter(aimTarget)
-          : activeSession
-            ? activeSession.target
-            : destinationPoint(origin, 0, yardsToM(250));
+          : destinationPoint(origin, baseBearing, yardsToM(250));
         // Lazily open the session on the first shot.
         if (!activeSession) {
           activeSession = await rangeRepo.createSession(userId, origin, aim);
@@ -328,7 +449,7 @@ export function RangeSessionPage() {
         setBusy(false);
       }
     },
-    [drawMode, busy, phase, origin, userId, session, aimTarget, selectedClubId, clubLabel]
+    [drawMode, busy, phase, origin, userId, session, aimTarget, manualBearing, selectedClubId, clubLabel]
   );
 
   // End the range session (idempotent) and go to the summary.
@@ -455,15 +576,22 @@ export function RangeSessionPage() {
           ? 'Swing detected — tap where the ball landed.'
           : 'Tap where the ball landed.';
 
-  // Aim point/bearing: the selected target always wins (so switching targets
-  // re-aims the line mid-session), then the active session's saved line, else
-  // straight up the range. Shots are decomposed relative to this current aim.
+  // Aim point/bearing: a selected target always wins (so switching targets
+  // re-aims mid-session). Otherwise the aim points down the user's chosen/locked
+  // direction (else the session's saved bearing, else straight up the range).
+  const freeBearing = manualBearing != null ? manualBearing : session ? session.targetBearing : 0;
   const aimPoint: LatLng = aimTarget
     ? targetCenter(aimTarget)
-    : session
-      ? session.target
-      : destinationPoint(origin, 0, yardsToM(250));
+    : manualAim ?? destinationPoint(origin, freeBearing, yardsToM(250));
   const aimBearing = computeBearing(origin, aimPoint);
+
+  // Map orientation is independent of the aim. Once the range direction is
+  // locked, the map stays fixed at that orientation no matter where the aim
+  // points — so the user can re-aim freely without the world spinning. Before
+  // locking (or while re-orienting via the "Aim locked" chip → aimDirty) the
+  // map follows the dragged aim so they can square it up to the real range.
+  const orientationActive = aimLocked && !aimDirty && orientationBearing != null;
+  const mapBearing = orientationActive ? (orientationBearing as number) : aimBearing;
 
   const targetShapes: TargetShape[] = targets.map((t) => ({
     id: t.id,
@@ -487,46 +615,52 @@ export function RangeSessionPage() {
       <RangeMap
         origin={origin}
         target={aimPoint}
-        bearing={aimBearing}
+        bearing={mapBearing}
         shots={shotMarkers}
         showArcs
         bottomBar={phase === 'logging' && drawMode === 'none'}
         targets={targetShapes}
         draftRing={draftRing}
         drawing={drawMode !== 'none'}
+        // The aim line is ALWAYS freely draggable while logging — including
+        // after locking a direction and when a target is selected. Dragging
+        // breaks away from a target into free aim (re-select it to aim again).
+        // Once the orientation is locked, dragging the aim moves only the line —
+        // the map keeps its locked orientation (re-orient via the "Aim locked"
+        // chip). Before locking, dragging both aims and squares up the map.
+        aimDraggable={drawMode === 'none'}
+        onAimChange={(p) => {
+          // Keep the aim exactly where dropped (direction + distance); also track
+          // the bearing for orientation (pre-lock) and the wind readout.
+          setManualAim(p);
+          setManualBearing(computeBearing(origin, p));
+          // If dropped onto an existing target, re-select it (aim snaps to its
+          // center) — no need to open the targets drawer. Otherwise free-aim.
+          const hit = targetAtPoint(p);
+          setSelectedTargetId(hit ? hit.id : null);
+          // Keep the locked orientation — only mark "dirty" (re-orienting) when
+          // nothing is locked yet, which just toggles the lock button's label.
+          if (!aimLocked) setAimDirty(true);
+        }}
         onMapTap={handleTap}
       />
 
-      {/* Top instruction bar */}
+      {/* Top-right controls */}
       <Box
         sx={{
           position: 'absolute',
           top: 'calc(env(safe-area-inset-top) + 8px)',
-          left: 8,
           right: 8,
+          zIndex: 5,
           display: 'flex',
           gap: 1,
           alignItems: 'flex-start'
         }}
       >
-        <Box
-          sx={{
-            flex: 1,
-            bgcolor: 'rgba(0,0,0,0.6)',
-            color: '#fff',
-            borderRadius: 2,
-            px: 1.5,
-            py: 1
-          }}
-        >
-          <Typography variant="body2" fontWeight={600}>
-            {instruction}
-          </Typography>
-        </Box>
         {drawMode === 'none' && (
           <IconButton
             aria-label="How the range works"
-            onClick={() => navigate('/range/guide')}
+            onClick={() => setTourOpen(true)}
             sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff', '&:hover': { bgcolor: 'rgba(0,0,0,0.75)' } }}
           >
             <HelpOutlineRoundedIcon fontSize="small" />
@@ -535,19 +669,102 @@ export function RangeSessionPage() {
         <Button
           size="small"
           variant="contained"
-          color="inherit"
+          color="primary"
           disabled={busy}
           onClick={drawMode === 'none' ? onEnd : cancelDraw}
-          sx={{ bgcolor: 'rgba(0,0,0,0.6)', color: '#fff' }}
+          sx={{ borderRadius: '5px' }}
         >
           {drawMode === 'none' ? 'End' : 'Cancel'}
         </Button>
       </Box>
 
+      {/* Top-left — live wind, relative to the down-range aim line. */}
+      {phase === 'logging' && origin && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 'calc(env(safe-area-inset-top) + 8px)',
+            left: 8,
+            zIndex: 5
+          }}
+        >
+          <WindIndicator wind={wind} relative={windRelative} tone="surface" circle />
+        </Box>
+      )}
+
+      {/* Aim-direction control — drag the marker to point down the range, then lock. */}
+      {phase === 'logging' && drawMode === 'none' && !aimTarget && (
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 'calc(env(safe-area-inset-top) + 58px)',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 5
+          }}
+        >
+          {aimLocked && !aimDirty ? (
+            <Chip
+              size="small"
+              icon={<LockRoundedIcon />}
+              label="Aim locked"
+              onClick={() => setAimDirty(true)}
+              sx={{
+                bgcolor: 'rgba(0,0,0,0.6)',
+                color: '#fff',
+                fontWeight: 700,
+                '& .MuiChip-icon': { color: '#fff' }
+              }}
+            />
+          ) : (
+            <Button
+              size="small"
+              variant="contained"
+              color="primary"
+              startIcon={aimDirty ? <LockRoundedIcon /> : <ExploreRoundedIcon />}
+              onClick={lockAim}
+              sx={{ borderRadius: '5px' }}
+            >
+              {aimDirty ? 'Lock this direction' : 'Lock aim direction'}
+            </Button>
+          )}
+        </Box>
+      )}
+
+      {/* Instruction banner — theme blue, centered up top, slides down then hides. */}
+      <Slide direction="down" in={showInstruction} mountOnEnter unmountOnExit>
+        <Box
+          sx={{
+            position: 'absolute',
+            top: 'calc(env(safe-area-inset-top) + 8px)',
+            left: 0,
+            right: 0,
+            mx: 'auto',
+            width: 'fit-content',
+            maxWidth: '70%',
+            zIndex: 4,
+            bgcolor: 'info.main',
+            color: 'info.contrastText',
+            borderRadius: 2,
+            px: 1.5,
+            py: 1,
+            boxShadow: 4,
+            textAlign: 'center'
+          }}
+        >
+          <Typography variant="body2" fontWeight={700}>
+            {instruction}
+          </Typography>
+        </Box>
+      </Slide>
+
       {/* Club selection — always present from load, just the circle. */}
       {drawMode === 'none' && (
       <Button
-        onClick={() => setClubPickerOpen(true)}
+        onClick={() => {
+          setClubHint(false);
+          setClubPickerOpen(true);
+        }}
         sx={{
           position: 'absolute',
           bottom: `calc(env(safe-area-inset-bottom) + ${controlsBottomPx}px)`,
@@ -558,21 +775,40 @@ export function RangeSessionPage() {
           minWidth: 56,
           borderRadius: '50%',
           p: 0,
-          bgcolor: 'rgba(0,0,0,0.6)',
-          color: '#fff',
-          border: 1.5,
-          borderColor: selectedClubObj ? 'primary.main' : 'rgba(255,255,255,0.35)',
+          bgcolor: (theme) => alpha(theme.palette.info.main, 0.85),
+          color: 'info.contrastText',
+          border: 2,
+          borderColor: selectedClubObj ? 'primary.main' : 'rgba(255,255,255,0.55)',
           backdropFilter: 'blur(6px)',
           WebkitBackdropFilter: 'blur(6px)',
           fontWeight: 800,
           fontSize: '0.95rem',
           lineHeight: 1,
-          '&:hover': { bgcolor: 'rgba(0,0,0,0.75)' }
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          '&:hover': { bgcolor: (theme) => alpha(theme.palette.info.main, 0.95) }
         }}
       >
-        {selectedClubObj
-          ? abbreviateClubName(selectedClubObj.customName || selectedClubObj.name, selectedClubObj.category)
-          : '+'}
+        <Box
+          component="span"
+          sx={{
+            fontSize: '0.5rem',
+            fontWeight: 700,
+            letterSpacing: 0.6,
+            opacity: 0.75,
+            lineHeight: 1,
+            mb: 0.25
+          }}
+        >
+          CLUB
+        </Box>
+        <Box component="span" sx={{ lineHeight: 1 }}>
+          {selectedClubObj
+            ? abbreviateClubName(selectedClubObj.customName || selectedClubObj.name, selectedClubObj.category)
+            : '+'}
+        </Box>
       </Button>
       )}
 
@@ -685,21 +921,22 @@ export function RangeSessionPage() {
           {drawMode === 'none' && (
             <Button
               onClick={() => setTargetsDrawerOpen(true)}
-              startIcon={targets.length > 0 ? <VisibilityRoundedIcon /> : undefined}
-              endIcon={targets.length === 0 ? <AddRoundedIcon /> : undefined}
+              aria-label="Targets"
               sx={{
-                borderRadius: '5px',
+                alignSelf: 'center',
+                width: 56,
+                height: 56,
+                minWidth: 56,
+                p: 0,
+                borderRadius: '50%',
                 bgcolor: (theme) => alpha(theme.palette.primary.main, 0.78),
                 color: '#fff',
                 backdropFilter: 'blur(6px)',
                 WebkitBackdropFilter: 'blur(6px)',
-                fontWeight: 700,
-                textTransform: 'none',
-                py: 0.75,
                 '&:hover': { bgcolor: (theme) => alpha(theme.palette.primary.main, 0.9) }
               }}
             >
-              Targets
+              <TargetIcon sx={{ width: '100%', height: '100%' }} />
             </Button>
           )}
         </Box>
@@ -800,6 +1037,22 @@ export function RangeSessionPage() {
         </Alert>
       )}
 
+      {clubHint && phase === 'logging' && drawMode === 'none' && (
+        <Alert
+          severity="info"
+          onClose={() => setClubHint(false)}
+          sx={{
+            position: 'absolute',
+            left: 8,
+            right: 8,
+            bottom: 'calc(env(safe-area-inset-bottom) + 84px)',
+            zIndex: 6
+          }}
+        >
+          Select a club, then tap the screen.
+        </Alert>
+      )}
+
       {/* Club picker — same tier-1 / tier-2 affordance as the round GPS. */}
       <Drawer
         anchor="bottom"
@@ -835,7 +1088,10 @@ export function RangeSessionPage() {
               onChange={(nextClubId, nextTier1) => {
                 setSelectedClubId(nextClubId);
                 setSelectedClubTier1(nextTier1);
-                if (nextClubId) setClubPickerOpen(false);
+                if (nextClubId) {
+                  setClubHint(false);
+                  setClubPickerOpen(false);
+                }
               }}
             />
           )}
@@ -1035,6 +1291,8 @@ export function RangeSessionPage() {
           )}
         </Box>
       </Drawer>
+
+      <RangeTour open={tourOpen} onClose={closeTour} />
     </Box>
   );
 }

@@ -25,6 +25,9 @@ import { SwingMetricsGuidePage } from '@/pages/practice/SwingMetricsGuidePage';
 import { RangeSessionPage } from '@/pages/range/RangeSessionPage';
 import { RangeSummaryPage } from '@/pages/range/RangeSummaryPage';
 import { RangeGuidePage } from '@/pages/range/RangeGuidePage';
+import { DrillsPage } from '@/pages/range/DrillsPage';
+import { DrillRunnerPage } from '@/pages/range/DrillRunnerPage';
+import { DrillReportPage } from '@/pages/range/DrillReportPage';
 import { OnboardingPage } from '@/pages/onboarding/OnboardingPage';
 import { AdminGuard } from '@/admin/AdminGuard';
 import { AdminLayout } from '@/admin/pages/AdminLayout';
@@ -172,6 +175,30 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <RangeGuidePage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/drills"
+        element={
+          <AuthGuard>
+            <DrillsPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/drills/run"
+        element={
+          <AuthGuard>
+            <DrillRunnerPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/drills/report/:sessionId"
+        element={
+          <AuthGuard>
+            <DrillReportPage />
           </AuthGuard>
         }
       />

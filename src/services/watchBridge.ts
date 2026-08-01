@@ -46,6 +46,63 @@ export interface WatchRoundState {
    */
   shotDetection?: boolean;
   /**
+   * True when the ball is on/around the green (current hole) — so the watch
+   * shows its live distance-to-pin in FEET instead of yards, matching the phone.
+   */
+  onGreen?: boolean;
+  /**
+   * True once the hole is holed out (last shot a made putt). The watch shows the
+   * prev/next hole navigation arrows ONLY when this is true — they're hidden
+   * during active play so the player can't skip a hole mid-round.
+   */
+  holeComplete?: boolean;
+  /**
+   * Whether the user is within range of the course (mirrors the phone's 2 km
+   * at-course gate). Absent → treat as at-course (don't block). False → the
+   * watch hides its Track / Add Shot controls and shows a "not in range" note,
+   * the same way the phone refuses to start tracking off-course.
+   */
+  atCourse?: boolean;
+  /**
+   * Current phone-side auto-track state. Lets the watch Track button render as a
+   * synced toggle and reflect reality even when the phone's at-course gate
+   * refused to start tracking.
+   */
+  autoTracking?: boolean;
+  /**
+   * Transient summary of the most-recently auto-recorded shot (watch Track-off
+   * or Add Shot), for the watch's brief post-save overview. `id` increments per
+   * shot so the watch shows each summary exactly once. Null when there's nothing
+   * fresh to show.
+   */
+  lastShotSummary?: {
+    id: number;
+    clubName: string;
+    /** Human label for the inferred outcome, e.g. "Fairway", "Left", "Green". */
+    result: string;
+    /** Preformatted distance, e.g. "212 yds" / "14 ft". */
+    distanceText: string;
+  } | null;
+  /**
+   * Every hole's headline data, so the watch can navigate holes LOCALLY and
+   * show the tee yardage + suggested club immediately — without waiting on a
+   * phone roundtrip that's blocked when the phone is backgrounded (JS suspended).
+   * Sent on every snapshot; it only changes as shots are recorded.
+   */
+  holes?: Array<{
+    holeNumber: number;
+    par?: number | null;
+    /** Yards remaining to the pin — the full hole on an un-played hole. */
+    yardage?: number | null;
+    /** Recommender's club id for that yardage (computed phone-side). */
+    suggestedClubId?: string | null;
+    /** Shots / putts logged on this hole (so a previewed hole's counts match). */
+    shots?: number;
+    putts?: number;
+    pinLat?: number | null;
+    pinLng?: number | null;
+  }>;
+  /**
    * Slim club list the watch can render. Putters land in their own bucket on
    * the watch UI so we mark them; everything else is just name + (optional)
    * typical-distance hint for inline display.
@@ -70,8 +127,40 @@ export type WatchInboundMessage =
       startLng?: number | null;
       endLat?: number | null;
       endLng?: number | null;
+      /** Putt distance (feet to flag) the watch user saw / nudged. GPS can't
+       *  measure a putt, so for putts this is the authoritative distance. */
+      distanceFeet?: number | null;
     }
   | { type: 'navigateHole'; direction: 'prev' | 'next' }
+  | {
+      /** Watch user tapped "Set flag here" while standing at the flag. Carries
+       *  the watch's current GPS; the phone moves the current hole's pin to it
+       *  (same shared-course pin the phone's Move Pin button updates). */
+      type: 'setPin';
+      lat: number;
+      lng: number;
+    }
+  | {
+      /** Watch toggled round-wide auto-tracking. The phone enables/disables its
+       *  own auto-track (respecting the 2 km at-course gate) and echoes the
+       *  resulting state back via the snapshot's `autoTracking`. */
+      type: 'setAutoTrack';
+      active: boolean;
+    }
+  | {
+      /** Watch wants to log a shot at the user's current GPS position — either
+       *  Track-off "I'm at my ball" or the Add Shot button. The phone fills the
+       *  start from the hole's prior ball position, infers fairway/left/right
+       *  from the end against the course geometry, auto-saves (unverified, like
+       *  the phone's own auto-track), and returns a summary via the snapshot's
+       *  `lastShotSummary`. No club/result picker is involved. */
+      type: 'autoShot';
+      clubId: string | null;
+      startLat?: number | null;
+      startLng?: number | null;
+      endLat?: number | null;
+      endLng?: number | null;
+    }
   | {
       /** Watch user tapped the Track button — start position captured.
        *  active=true on tap; active=false when ended/cancelled.
@@ -109,6 +198,28 @@ export type WatchInboundMessage =
       capturedAt: number;
       swingType?: string;
       handSpeed?: number;
+      // Full motion-metric bundle (migration 031). Round mode now forwards the
+      // same rich SwingMetrics the watch computes in practice, latched onto the
+      // shot this strike opens. All optional — older watch builds omit them.
+      backswingTimeMs?: number;
+      downswingTimeMs?: number;
+      tempoRatio?: number;
+      transitionScore?: number;
+      wristRotationScore?: number;
+      finishStabilityScore?: number;
+      planeAxis?: number[];
+      backswingRotation?: number;
+      releaseTimingScore?: number;
+      decelerationScore?: number;
+      transitionDirectionScore?: number;
+      addressGravity?: number[];
+      heartRate?: number;
+      /** The club the watch had in hand at the strike (its displayed / selected
+       *  club — which may be a live GPS suggestion or a watch-side manual pick
+       *  the phone never saw). The phone latches THIS on the impact-opened shot
+       *  so the recorded club matches what the player saw on the watch, instead
+       *  of the phone's own selection (which it resets to null after each shot). */
+      clubId?: string | null;
       startLat?: number | null;
       startLng?: number | null;
     }
