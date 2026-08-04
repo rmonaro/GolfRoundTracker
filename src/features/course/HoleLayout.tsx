@@ -893,7 +893,6 @@ export function HoleLayout({
   // current view are already in memory, and a working satellite view beats a
   // schematic even if panning stops fetching.
   const [mapEverLoaded, setMapEverLoaded] = useState(false);
-  const useMapbox = tokenAvailable && !mapErrored && (isOnline || mapEverLoaded);
 
   // Which satellite imagery to draw: a downloaded pack, the same pack streamed
   // from Storage, or Mapbox. Resolving this BEFORE the map is built matters —
@@ -901,11 +900,29 @@ export function HoleLayout({
   // re-init and a visible flash.
   const imagery = useImagerySource(layout.hole.course_id);
 
-  // Signal came back — let the map try again rather than staying on the SVG
-  // fallback for the rest of the round.
+  // A pack renders from bytes already on the device, so it needs NO network —
+  // that is the entire point of downloading one. It therefore must not be gated
+  // on connectivity the way Mapbox is. Without this, a golfer who had saved the
+  // course still dropped to the schematic SVG the moment the component mounted
+  // with no signal (a fresh round, or moving to the next hole), which is
+  // precisely the case the download exists to cover.
+  const usingPack = imagery.ready && imagery.kind !== 'mapbox';
+
+  // NB: this gates the GL map as a whole, not Mapbox-hosted imagery — with a
+  // pack it renders our own tiles on an empty style.
+  const useMapbox = tokenAvailable && !mapErrored && (isOnline || mapEverLoaded || usingPack);
+
+  // Give the map another chance rather than leaving it on the SVG for the rest
+  // of the round: when signal returns, and when the imagery tier changes (a
+  // finished download is a different basemap and deserves a fresh attempt —
+  // otherwise an error against Mapbox permanently disqualifies the pack).
   useEffect(() => {
     if (isOnline && mapErrored) setMapErrored(false);
   }, [isOnline, mapErrored]);
+
+  useEffect(() => {
+    setMapErrored(false);
+  }, [imagery.kind, imagery.url]);
 
   const svgRender = useMemo(() => {
     if (useMapbox) return null;
@@ -993,12 +1010,13 @@ export function HoleLayout({
     try {
       map = new mapboxgl.Map({
         container: containerRef.current,
-        // Our own imagery when we have it (downloaded pack offline, or the same
-        // pack served by range from Storage online); Mapbox satellite only as
-        // the fallback for courses with no pack yet. `emptyStyle` gives us a
-        // blank canvas to attach the PMTiles raster layer to — loading the
-        // Mapbox satellite style first would fetch tiles we're not going to
-        // show, and would fail outright with no signal.
+        // Mapbox satellite whenever the connection is usable — it out-resolves
+        // our packs and keeps serving real tiles past their max zoom. Our own
+        // imagery (downloaded pack, or that pack read by range from Storage on
+        // a degraded connection) takes over when Mapbox can't be reached.
+        // `emptyStyle` gives us a blank canvas to attach the PMTiles raster
+        // layer to — loading the Mapbox satellite style first would fetch tiles
+        // we're not going to show, and would fail outright with no signal.
         style:
           imagery.kind === 'mapbox'
             ? 'mapbox://styles/mapbox/satellite-v9'
@@ -1043,6 +1061,17 @@ export function HoleLayout({
 
     map.on('error', (e) => {
       console.warn('[mapbox] runtime error', e);
+      // A pack covers the course bbox and nothing else, so panning to its edge
+      // MISSES tiles by design and fires one error event per miss. Those are
+      // expected, not a broken map — and `mapErrored` is sticky while offline
+      // (it clears on reconnect), so treating them as fatal stripped the
+      // imagery for the remainder of the round after a single edge tile.
+      //
+      // Errors carrying no `sourceId` are style/init failures and stay fatal.
+      // So does ANY error on the Mapbox tier: that's how a course with no pack
+      // detects it can't reach mapbox.com and drops to the SVG.
+      const isTileError = !!(e as unknown as { sourceId?: string }).sourceId;
+      if (isTileError && usingPack) return;
       setMapErrored(true);
     });
 
@@ -2117,7 +2146,9 @@ export function HoleLayout({
     // Rebuild when the imagery tier changes — a pack finishing its download, or
     // signal returning, both mean a different basemap.
     imagery.kind,
-    imagery.url
+    imagery.url,
+    // Read inside the error handler to decide whether a tile miss is fatal.
+    usingPack
   ]);
 
   // Landing-point marker — add/move/remove imperatively on the live map so a
@@ -2481,13 +2512,27 @@ function buildSvgRender(layout: HoleLayoutData, compact: boolean) {
 
   if (!Number.isFinite(bounds.minX)) return null;
 
-  // Asymmetric padding mirrors the Mapbox fitBounds framing: the hole anchors
-  // toward the top of the viewport, with extra space below + right to clear
-  // the bottom buttons and the floating stats column.
-  const padTop = compact ? 10 : 16;
-  const padBottom = compact ? 90 : 140;
-  const padLeft = compact ? 8 : 16;
-  const padRight = compact ? 70 : 100;
+  // Thin SYMMETRIC margin, matching what the Mapbox path actually does:
+  // `cameraForBounds` is given { top: 10, bottom: 10, left: 10, right: 10 },
+  // so the hole is centred with a small edge margin. (This used to apply
+  // asymmetric padding "to mirror the Mapbox framing" — but that framing had
+  // since become symmetric, so the fallback was mirroring a design that no
+  // longer existed.)
+  //
+  // PROPORTIONAL, because this viewBox is in projected METRES while Mapbox's
+  // padding is in screen pixels. Pixel-magnitude constants meant adding 100 m
+  // to the right of a fairway only ~50 m wide, which rendered the hole in the
+  // left quarter of the screen. One fraction of the hole's own extent, applied
+  // on all four sides, keeps it centred at any hole length.
+  const spanX = bounds.maxX - bounds.minX;
+  const spanY = bounds.maxY - bounds.minY;
+  // Both axes off the SAME span, so a long thin hole doesn't get wildly
+  // different margins horizontally and vertically.
+  const pad = Math.max(spanX, spanY, 1) * (compact ? 0.03 : 0.04);
+  const padTop = pad;
+  const padBottom = pad;
+  const padLeft = pad;
+  const padRight = pad;
   const minX = bounds.minX - padLeft;
   const minY = bounds.minY - padTop;
   const width = bounds.maxX - bounds.minX + padLeft + padRight;

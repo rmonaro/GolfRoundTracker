@@ -26,7 +26,9 @@ Environment:
     SUPABASE_SERVICE_ROLE_KEY    required (bypasses RLS; never ship to a client)
     IMAGERY_SOURCE               force a source ('naip', 'ct'); default is
                                  chosen from the course's state
-    MAX_ZOOM                     default 18
+    MAX_ZOOM                     override the per-source max zoom for every
+                                 source (see IMAGERY_SOURCES[*]["max_zoom"]:
+                                 naip 18, ct 20, ny 19)
 """
 
 from __future__ import annotations
@@ -52,11 +54,50 @@ SERVICE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 IMAGERY_SOURCE = os.environ.get("IMAGERY_SOURCE", "usgs")
 BUCKET = "course-tiles"
 
-# z18 is ~0.6 m/px — enough to pick a line over trees and read bunker shapes,
-# which is what golfers actually use the aerial view for. z19 roughly triples
-# the pack size for detail that only matters inside a few yards.
+# Max zoom drives the REQUEST resolution as well as the tile pyramid: the source
+# is fetched at exactly this zoom's ground resolution (see fetch_imagery and
+# build_pmtiles). So it is not just "how deep does the pack go" — it is "how
+# much of the source's detail do we keep", and it must be matched to the SOURCE.
+# Hence `max_zoom` per entry in IMAGERY_SOURCES rather than one global value:
+# asking for finer than a source actually holds costs 4x the bytes per level
+# and returns nothing but interpolation.
+#
+# Ground resolution at lat 41: z18 = 0.45 m/px, z19 = 0.22, z20 = 0.11.
+# Measured native: CT ECO 0.076 m (declared `pixelSizeX`, 3 inch); NY ITS ~0.15 m
+# (probed — JPEG size still grew 3.5x on the z18->z19 step, then flattened past
+# z20, which is what running out of real detail looks like); NAIP 0.3-0.6 m.
+#
+# The reason this matters at all: the map zooms to z21 (z23 in putting mode), so
+# past the pack's max zoom Mapbox STRETCHES tiles instead of showing detail —
+# blurry rather than zoomed.
+#
+# Each source therefore goes as deep as it genuinely holds detail, capped by
+# what's reasonable to download: CT z20, NY z19, NAIP z18. Note these are packs
+# a golfer pulls over cellular in a car park, so a source being capable of
+# another level is NOT on its own a reason to add one.
 MIN_ZOOM = 14
-MAX_ZOOM = int(os.environ.get("MAX_ZOOM", "18"))
+DEFAULT_MAX_ZOOM = 18
+
+# Ceiling on a finished pack. Two independent reasons, and the lower one wins:
+#
+#  1. Supabase Storage enforces a PROJECT-WIDE upload limit, default 50 MB, and
+#     rejects anything larger with a 413 EntityTooLarge. Measured against this
+#     project: a 45 MB upload returns 200, a 60 MB upload returns 413. Raising
+#     it is a dashboard setting and needs a paid plan.
+#  2. This is a file a golfer downloads over cellular in a car park before a
+#     round. Even with the limit lifted, 113 MB is not a reasonable ask.
+#
+# 48 rather than 50 to leave room for the limit being measured against the
+# encoded body rather than the file.
+PACK_SIZE_LIMIT = int(os.environ.get("PACK_SIZE_LIMIT_MB", "48")) * 1024 * 1024
+# Env override applies to every source; used for one-off experiments.
+MAX_ZOOM_OVERRIDE = os.environ.get("MAX_ZOOM")
+
+
+def max_zoom_for(cfg: dict[str, Any]) -> int:
+    if MAX_ZOOM_OVERRIDE:
+        return int(MAX_ZOOM_OVERRIDE)
+    return int(cfg.get("max_zoom", DEFAULT_MAX_ZOOM))
 
 # Ground resolution of one pixel at zoom 0 in EPSG:3857, i.e. earth
 # circumference / 256. Halves with each zoom level.
@@ -98,6 +139,10 @@ IMAGERY_SOURCES: dict[str, dict[str, Any]] = {
         "max_pixels": 7_500_000,
         "band_ids": None,
         "kind": "imageserver",
+        # 0.3-0.6 m native, so z18 (0.45 m/px) is already at or past it. Going
+        # deeper would just quadruple the pack to store interpolation — Pebble
+        # Beach alone would go from 21 MB to ~82 MB for no added detail.
+        "max_zoom": 18,
         "attribution": "Imagery: USDA NAIP / USGS (public domain)",
         "captured": None,
         "coverage": "continental US",
@@ -119,6 +164,13 @@ IMAGERY_SOURCES: dict[str, dict[str, Any]] = {
         # 4-band source (RGB + NIR); take the visible bands only.
         "band_ids": "0,1,2",
         "kind": "imageserver",
+        # 0.076 m native (3 inch), so z20 (0.11 m/px) is still real detail
+        # rather than interpolation — sharper than Google's typical 0.15 m.
+        # The cost is steep and worth knowing before changing this: ~4x the z19
+        # pack (expect 40-100 MB/course), ~48 source requests per course, and a
+        # ~1.3 GB intermediate GeoTIFF. Every one of those requests hits a free
+        # UConn service, so re-tile CT deliberately, not casually.
+        "max_zoom": 20,
         "attribution": "Imagery: CT ECO \u2014 UConn CLEAR / CT DEEP (2023)",
         "captured": "2023-01-01",
         "coverage": "Connecticut",
@@ -137,6 +189,11 @@ IMAGERY_SOURCES: dict[str, dict[str, Any]] = {
         "band_ids": None,
         "kind": "mapserver",
         "image_format": "jpg",
+        # ~0.15 m native (6 inch) by probe — the service publishes no pixel
+        # size, so this was measured by requesting one patch at successively
+        # finer resolutions and watching where JPEG size stopped growing with
+        # the pixel count. Real detail through z19; z20 is where it flattens.
+        "max_zoom": 19,
         "attribution": "Imagery: NYS Orthoimagery Program \u2014 ITS GPO (2022\u20132025)",
         # A rolling mosaic of several flight years; a single date would be a
         # guess, so leave it unset.
@@ -363,7 +420,7 @@ def fetch_imagery(cfg: dict[str, Any], bbox: BBox, out: Path) -> None:
     width_m = (bbox.max_lng - bbox.min_lng) * 111_320.0 * cos_lat
     height_m = (bbox.max_lat - bbox.min_lat) * 111_320.0
 
-    res = MERCATOR_M_PER_PX * cos_lat / (2 ** MAX_ZOOM)
+    res = MERCATOR_M_PER_PX * cos_lat / (2 ** max_zoom_for(cfg))
     total_w = max(256, int(width_m / res))
     total_h = max(256, int(height_m / res))
 
@@ -444,22 +501,27 @@ def mbtiles_zoom_range(mbtiles: Path) -> tuple[int, int]:
         return int(lo), int(hi)
 
 
-def build_pmtiles(src: Path, workdir: Path) -> tuple[Path, int, int]:
-    """GeoTIFF -> MBTiles (+ overviews) -> PMTiles. Returns the REAL zoom range."""
+def _build_at_zoom(src: Path, workdir: Path, zoom: int) -> tuple[Path, int, int, int]:
+    """One build attempt. Returns (pmtiles, zmin, zmax, size_bytes)."""
     warped = workdir / "warped.tif"
     mbtiles = workdir / "course.mbtiles"
     pmtiles = workdir / "course.pmtiles"
+    # A retry at a shallower zoom reuses the SAME source GeoTIFF, so nothing is
+    # re-fetched — but the outputs of the previous attempt must go, since
+    # gdalwarp and the MBTiles driver both refuse to overwrite.
+    for stale in (warped, mbtiles, pmtiles):
+        stale.unlink(missing_ok=True)
 
     # Web Mercator is what the tile pyramid is defined in; MBTiles requires it.
     #
-    # `-tr` pins the output to EXACTLY the ground resolution of MAX_ZOOM. That's
+    # `-tr` pins the output to EXACTLY the ground resolution of `zoom`. That's
     # how the base zoom is controlled: the MBTiles driver ignores a ZOOM_LEVEL
     # creation option (it warns and carries on) and picks the zoom nearest the
     # source resolution instead. Left to itself on native 0.3 m NAIP it chose
     # z19 — roughly triple the pack size for detail that only matters inside a
     # few yards. Setting the resolution makes the choice deterministic for both
     # the USGS and S3 paths.
-    res = MERCATOR_M_PER_PX / (2 ** MAX_ZOOM)
+    res = MERCATOR_M_PER_PX / (2 ** zoom)
     run(["gdalwarp", "-t_srs", "EPSG:3857", "-r", "bilinear",
          "-tr", str(res), str(res),
          "-co", "TILED=YES", str(src), str(warped)])
@@ -474,12 +536,46 @@ def build_pmtiles(src: Path, workdir: Path) -> tuple[Path, int, int]:
     # Overviews ARE the lower zoom levels for the MBTiles driver. Without them
     # the pack contains only the deepest zoom and the map is blank until you're
     # fully zoomed in.
-    levels = [str(2 ** i) for i in range(1, (MAX_ZOOM - MIN_ZOOM) + 1)]
+    levels = [str(2 ** i) for i in range(1, (zoom - MIN_ZOOM) + 1)]
     run(["gdaladdo", "-r", "average", str(mbtiles), *levels])
 
     zmin, zmax = mbtiles_zoom_range(mbtiles)
     run(["pmtiles", "convert", str(mbtiles), str(pmtiles)])
-    return pmtiles, zmin, zmax
+    return pmtiles, zmin, zmax, pmtiles.stat().st_size
+
+
+def build_pmtiles(src: Path, workdir: Path, cfg: dict[str, Any]) -> tuple[Path, int, int]:
+    """
+    GeoTIFF -> MBTiles (+ overviews) -> PMTiles. Returns the REAL zoom range.
+
+    Drops a zoom level and rebuilds if the pack won't fit PACK_SIZE_LIMIT.
+    This is not a nicety: Supabase Storage rejects anything over its project
+    upload limit with a 413, and the failure lands AFTER all the imagery has
+    been fetched and the pack built — the most expensive possible place to
+    fail. Four CT courses hit exactly that at z20 (69-113 MB), and because the
+    upload is the last step, the previous pack stays live and the course looks
+    untouched rather than broken.
+
+    The retry costs almost nothing: the source GeoTIFF was fetched at the
+    deepest zoom's resolution, so a shallower rebuild just re-warps what's
+    already on disk. No further requests to the imagery service.
+
+    Deliberately reactive rather than predictive — pack size depends on JPEG
+    compressibility of that specific course (tree cover, water, bunker
+    contrast), so measuring beats estimating.
+    """
+    top = max_zoom_for(cfg)
+    for zoom in range(top, MIN_ZOOM, -1):
+        pmtiles, zmin, zmax, size = _build_at_zoom(src, workdir, zoom)
+        if size <= PACK_SIZE_LIMIT or zoom == MIN_ZOOM + 1:
+            if zoom != top:
+                print(f"  fell back to z{zoom} to fit the {PACK_SIZE_LIMIT // (1024*1024)} MB limit")
+            return pmtiles, zmin, zmax
+        print(
+            f"  pack {size / 1e6:.1f} MB at z{zoom} exceeds "
+            f"{PACK_SIZE_LIMIT // (1024*1024)} MB — rebuilding at z{zoom - 1}"
+        )
+    raise RuntimeError("unreachable: loop returns at MIN_ZOOM + 1")
 
 
 # --------------------------------------------------------------------------
@@ -562,7 +658,7 @@ def tile_course(course_id: str) -> None:
         fetch_imagery(cfg, bbox, src)
         print(f"  imagery {src.stat().st_size / 1e6:.1f} MB")
 
-        pmtiles, zmin, zmax = build_pmtiles(src, workdir)
+        pmtiles, zmin, zmax = build_pmtiles(src, workdir, cfg)
         size = pmtiles.stat().st_size
         print(f"  pack {size / 1e6:.1f} MB (z{zmin}\u2013z{zmax})")
 
