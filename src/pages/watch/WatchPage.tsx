@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom';
 import { useRoundStore } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { roundRepo } from '@/services/roundRepo';
+import { newId } from '@/lib/ids';
 import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
 import type { ClubCategory } from '@/models';
@@ -56,13 +57,13 @@ export function WatchPage() {
   const onAddShotForCategory = async (category: ClubCategory) => {
     const club = bag.find((c) => c.category === category);
     const nextNum = hole.shots.length + 1;
-    const tempId = `tmp_${Date.now()}`;
+    const shotId = newId();
     const isPutt = category === 'putter';
     const targetType = isPutt ? ('putt' as const) : ('green' as const);
     const targetResult = isPutt ? ('made' as const) : ('hit' as const);
     const shotResult = isPutt ? ('made_putt' as const) : ('green' as const);
     addShot(hole.holeNumber, {
-      tempId,
+      id: shotId,
       shotNumber: nextNum,
       clubId: club?.clubId ?? null,
       shotResult,
@@ -80,7 +81,8 @@ export function WatchPage() {
     try {
       const holeId = useRoundStore.getState().active?.holes.find((h) => h.holeNumber === hole.holeNumber)?.holeId;
       if (!holeId) return;
-      const saved = await roundRepo.addShot({
+      await roundRepo.addShot({
+        id: shotId,
         round_id: active.roundId,
         hole_id: holeId,
         shot_number: nextNum,
@@ -99,7 +101,7 @@ export function WatchPage() {
         end_lng: null,
         calculated_distance: null
       });
-      useRoundStore.getState().markShotSynced(hole.holeNumber, tempId, saved.id);
+      useRoundStore.getState().markShotSynced(hole.holeNumber, shotId);
     } catch (err) {
       console.error('[watch] shot save failed', err);
     }

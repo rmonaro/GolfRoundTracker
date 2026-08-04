@@ -81,6 +81,9 @@ import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeCompletedTotals, computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
 import { roundRepo } from '@/services/roundRepo';
+import { newId } from '@/lib/ids';
+import { enqueueFinishedRound, syncRound } from '@/services/roundSync';
+import { SyncStatusChip } from '@/features/offline/SyncStatusChip';
 import { bagRepo } from '@/services/bagRepo';
 import { courseRepo } from '@/services/courseRepo';
 import { holesRepo } from '@/services/holesRepo';
@@ -1291,7 +1294,7 @@ export function HoleTrackingPage() {
 
     if (editingShot) {
       // EDIT path — update the existing shot in place.
-      updateShotLocal(hole.holeNumber, editingShot.tempId, {
+      updateShotLocal(hole.holeNumber, editingShot.id, {
         clubId,
         shotResult: derivedShotResult,
         targetType,
@@ -1314,9 +1317,9 @@ export function HoleTrackingPage() {
       setEditingShot(null);
       syncHole(hole.holeNumber);
 
-      if (editingShot.remoteId) {
+      if (editingShot.syncedAt) {
         try {
-          await roundRepo.updateShot(editingShot.remoteId, {
+          await roundRepo.updateShot(editingShot.id, {
             club_id: clubId,
             shot_result: derivedShotResult,
             target_type: targetType,
@@ -1365,9 +1368,11 @@ export function HoleTrackingPage() {
     // Append at the end. A shot logged out of order is moved into position with
     // the up/down reorder controls in the shots list, so add is always append.
     const nextNum = (freshHole?.shots.length ?? hole.shots.length ?? 0) + 1;
-    const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    // Real UUID, minted here: this IS the shots.id primary key, so the row can
+    // be written now or hours later from a queue and still land on one row.
+    const shotId = newId();
     addShotLocal(hole.holeNumber, {
-      tempId,
+      id: shotId,
       shotNumber: nextNum,
       clubId,
       shotResult: derivedShotResult,
@@ -1398,9 +1403,16 @@ export function HoleTrackingPage() {
     syncHole(hole.holeNumber);
 
     try {
-      // Ensure the hole row exists so we have a holeId to point the shot at.
-      if (!hole.holeId) {
-        const saved = await roundRepo.upsertHole({
+      // The hole id is minted locally, so there's no round-trip to wait on —
+      // this used to bail out entirely when the server hadn't named the hole
+      // yet, which is precisely why a shot couldn't be recorded offline.
+      //
+      // Only upsert the parent when the server hasn't confirmed it. Doing it on
+      // every shot would add a round-trip per stroke; the row is normally
+      // created at round start and maintained by useAutosaveHole.
+      if (!hole.syncedAt) {
+        const savedHole = await roundRepo.upsertHole({
+          id: hole.holeId,
           round_id: active.roundId,
           hole_number: hole.holeNumber,
           par: hole.par,
@@ -1413,16 +1425,13 @@ export function HoleTrackingPage() {
           gir: hole.gir,
           clubs_used: hole.clubsUsed
         });
-        useRoundStore.getState().applyHoleIds([saved]);
+        useRoundStore.getState().applyHoleIds([savedHole]);
       }
-      const holeId = useRoundStore
-        .getState()
-        .active?.holes.find((h) => h.holeNumber === hole.holeNumber)?.holeId;
-      if (!holeId) return;
 
-      const persisted = await roundRepo.addShot({
+      await roundRepo.addShot({
+        id: shotId,
         round_id: active.roundId,
-        hole_id: holeId,
+        hole_id: hole.holeId,
         shot_number: nextNum,
         club_id: clubId,
         shot_result: derivedShotResult,
@@ -1443,7 +1452,7 @@ export function HoleTrackingPage() {
         swing_metrics: swingMetrics,
         watch_impact_id: watchImpactId
       });
-      markShotSynced(hole.holeNumber, tempId, persisted.id);
+      markShotSynced(hole.holeNumber, shotId);
 
       // Auto-record typical yardage the first time a non-putter club is
       // used. The recommender depends on `typicalDistanceYards` to suggest
@@ -1703,10 +1712,10 @@ export function HoleTrackingPage() {
     if (!fresh) return;
     await Promise.all(
       fresh.shots
-        .filter((sh) => sh.remoteId)
+        .filter((sh) => sh.syncedAt)
         .map((sh) =>
           roundRepo
-            .updateShot(sh.remoteId!, { shot_number: sh.shotNumber })
+            .updateShot(sh.id, { shot_number: sh.shotNumber })
             .catch((err) => console.warn('[shot] shot_number persist failed', err))
         )
     );
@@ -1720,22 +1729,27 @@ export function HoleTrackingPage() {
     const sorted = [...(fresh?.shots ?? hole.shots)].sort(
       (a, b) => a.shotNumber - b.shotNumber
     );
-    const idx = sorted.findIndex((s) => s.tempId === shot.tempId);
+    const idx = sorted.findIndex((s) => s.id === shot.id);
     const toIndex = idx + dir;
     if (idx < 0 || toIndex < 0 || toIndex >= sorted.length) return;
-    moveShotLocal(hole.holeNumber, shot.tempId, toIndex);
+    moveShotLocal(hole.holeNumber, shot.id, toIndex);
     syncHole(hole.holeNumber);
     void persistShotNumbers(hole.holeNumber);
   };
 
   const onDeleteShot = async (shot: LocalShot) => {
-    removeShotLocal(hole.holeNumber, shot.tempId);
+    removeShotLocal(hole.holeNumber, shot.id);
     syncHole(hole.holeNumber);
-    if (shot.remoteId) {
+    if (shot.syncedAt) {
+      // Tombstone FIRST. A reconciler compares local state to remote and can't
+      // express "this used to exist", so without this a shot deleted offline
+      // just reappears on the next sync.
+      useRoundStore.getState().recordShotDeletion(shot.id, true);
       try {
-        await roundRepo.deleteShot(shot.remoteId);
+        await roundRepo.deleteShot(shot.id);
+        useRoundStore.getState().clearShotTombstones([shot.id]);
       } catch (err) {
-        console.error('[shot] delete failed', err);
+        console.warn('[shot] delete deferred to sync', err);
       }
     }
     // Deleting renumbers the remaining shots locally; push the new numbers so
@@ -1746,10 +1760,10 @@ export function HoleTrackingPage() {
   // Confirm an auto-detected shot — clears its pending-review flag locally and
   // in Supabase. Used by the per-hole verification dialog.
   const verifyShot = async (shot: LocalShot) => {
-    updateShotLocal(hole.holeNumber, shot.tempId, { verified: true });
-    if (shot.remoteId) {
+    updateShotLocal(hole.holeNumber, shot.id, { verified: true });
+    if (shot.syncedAt) {
       try {
-        await roundRepo.updateShot(shot.remoteId, { verified: true });
+        await roundRepo.updateShot(shot.id, { verified: true });
       } catch (err) {
         console.error('[verify] mark verified failed', err);
       }
@@ -2057,14 +2071,24 @@ export function HoleTrackingPage() {
 
   const finishRound = async () => {
     const score = computeTotalScore(active.holes);
-    try {
-      await roundRepo.update(active.roundId, {
-        score,
-        score_vs_par: score - active.totalPar,
-        completed_at: new Date().toISOString()
-      });
-    } catch (err) {
-      console.error('[round] finish failed', err);
+    const completion = {
+      score,
+      scoreVsPar: score - active.totalPar,
+      completedAt: new Date().toISOString()
+    };
+
+    // Push everything that hasn't landed yet, not just the score columns. A
+    // round played offline has no rows on the server at all, so the old
+    // `update()` here had nothing to update and failed silently.
+    const result = await syncRound(active, completion);
+
+    if (!result.ok) {
+      // Park the whole round before the store is cleared. This is the moment a
+      // golfer believes their round is safe; losing it here would be the worst
+      // possible failure, so the snapshot outlives the active round and the
+      // scheduler keeps retrying until the server confirms it.
+      enqueueFinishedRound(active, completion);
+      console.warn('[round] finish deferred to sync outbox', result.error);
     }
     // Tournament rounds: final push of every played hole with SUBMITTED so TM
     // locks the scorecard. Best-effort; never blocks navigation to the summary.
@@ -2220,11 +2244,20 @@ export function HoleTrackingPage() {
                 </Box>
               )}
             </Typography>
-            <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }} noWrap>
-              {`Hole ${hole.holeNumber} · Par ${displayPar ?? '—'} · ${
-                displayYards ?? '—'
-              } yds`}
-            </Typography>
+            <Stack direction="row" alignItems="center" spacing={0.75}>
+              <Typography
+                variant="subtitle1"
+                sx={{ fontWeight: 700, lineHeight: 1.2 }}
+                noWrap
+              >
+                {`Hole ${hole.holeNumber} · Par ${displayPar ?? '—'} · ${
+                  displayYards ?? '—'
+                } yds`}
+              </Typography>
+              {/* Only appears when there's something unsynced or no signal —
+                  reassurance mid-round that the data is safe. */}
+              <SyncStatusChip compact />
+            </Stack>
           </Box>
           <IconButton
             data-tour="nav"
@@ -3198,7 +3231,7 @@ export function HoleTrackingPage() {
                   .join(' ');
                 return (
                   <Box
-                    key={s.tempId}
+                    key={s.id}
                     sx={{
                       display: 'flex',
                       alignItems: 'center',
@@ -3350,7 +3383,7 @@ function ShotsCard({
                 .sort((a, b) => a.shotNumber - b.shotNumber)
                 .map((shot, idx, arr) => (
                   <ShotRow
-                    key={shot.tempId}
+                    key={shot.id}
                     shot={shot}
                     bagClubs={bagClubs}
                     canMoveUp={idx > 0}

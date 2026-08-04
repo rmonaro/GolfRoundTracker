@@ -8,12 +8,24 @@ import { AppRouter } from '@/router/AppRouter';
 import { AuthProvider } from '@/features/auth/AuthProvider';
 import { SessionHydrator } from '@/features/auth/SessionHydrator';
 import { initMapbox } from '@/features/course/mapbox';
+import { initConnectivity } from '@/services/connectivity';
+import { initPmtilesProvider } from '@/features/course/pmtilesSetup';
 import { useWatchSync } from '@/features/watch/useWatchSync';
 import { usePracticeWatchSync } from '@/features/practice/usePracticeWatchSync';
+import { useSyncScheduler } from '@/features/offline/useSyncScheduler';
 
 // Set the Mapbox access token once at bootstrap. No-op if VITE_MAPBOX_TOKEN
 // is absent — the hole layout falls back to SVG rendering in that case.
 initMapbox();
+
+// Teach Mapbox to read our own PMTiles imagery packs. Must run before any map
+// is created, and deliberately uses a provider bundled with the app rather than
+// Mapbox's CDN-hosted one, which would need network at exactly the wrong moment.
+initPmtilesProvider();
+
+// Bind network listeners once. Everything offline-aware reads from here, so it
+// must be live before the first query runs.
+initConnectivity();
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -33,6 +45,8 @@ function WatchSyncMount() {
   // Practice swing-feedback listeners — bound once at the root so swings are
   // ingested regardless of the active screen. Independent of the round sync.
   usePracticeWatchSync();
+  // Drains the offline sync outbox on reconnect / resume / retry.
+  useSyncScheduler();
   return null;
 }
 

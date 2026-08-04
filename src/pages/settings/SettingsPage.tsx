@@ -16,6 +16,9 @@ import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
 import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
 import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded';
 import { useIsAdmin } from '@/admin/hooks/useIsAdmin';
+import { useConnectivity } from '@/features/offline/useConnectivity';
+import { OfflineCoursesCard } from '@/features/offline/OfflineCoursesCard';
+import { isSimulatedOffline, setSimulatedOffline } from '@/services/connectivity';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { watchName } from '@/utils/platform';
@@ -54,6 +57,8 @@ export function SettingsPage() {
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
   const setWatchShotDetection = useSettingsStore((s) => s.setWatchShotDetection);
   const { data: isAdmin } = useIsAdmin();
+  const connectivity = useConnectivity();
+  const [simulateOffline, setSimulateOffline] = useState(isSimulatedOffline);
 
   const [firstName, setFirstName] = useState(profile?.first_name ?? '');
   const [lastName, setLastName] = useState(profile?.last_name ?? '');
@@ -279,6 +284,60 @@ export function SettingsPage() {
             </Stack>
           </CardContent>
         </Card>
+
+        <OfflineCoursesCard />
+
+        {/* Shown in dev builds AND to admins. It must be reachable on a real
+            device: Capacitor serves the production bundle, so a DEV-only gate
+            would hide this exactly where offline behaviour needs testing —
+            on-course, on the phone, with the app killed and relaunched. */}
+        {(import.meta.env.DEV || isAdmin) && (
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+            <CardContent>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+              >
+                Developer
+              </Typography>
+              <Stack mt={1} spacing={0.5}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={simulateOffline}
+                      onChange={(e) => {
+                        setSimulatedOffline(e.target.checked);
+                        setSimulateOffline(e.target.checked);
+                      }}
+                    />
+                  }
+                  label="Simulate offline"
+                />
+                {simulateOffline ? (
+                  // This setting persists across relaunches by design (you need
+                  // it to survive an app kill mid-round), so it has to be loud —
+                  // otherwise it reads as a broken app days later.
+                  <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 700 }}>
+                    Simulated offline is ON. The app will behave as if it has no
+                    signal until you turn this off, including after a restart.
+                  </Typography>
+                ) : (
+                  <Typography variant="caption" color="text.secondary">
+                    Forces the app to behave as if there's no signal, for testing
+                    offline play.
+                  </Typography>
+                )}
+                <Typography variant="caption" color="text.secondary">
+                  Network state: <strong>{connectivity.status}</strong>
+                  {connectivity.connectionType !== 'unknown' &&
+                    ` (${connectivity.connectionType})`}
+                  .
+                </Typography>
+              </Stack>
+            </CardContent>
+          </Card>
+        )}
 
         {isAdmin && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>

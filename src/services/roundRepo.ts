@@ -14,8 +14,17 @@ import type {
 import { toAppError } from './errors';
 
 export const roundRepo = {
-  async create(payload: Omit<Round, 'id'>): Promise<Round> {
-    const { data, error } = await supabase.from('rounds').insert(payload).select('*').single();
+  /**
+   * Create a round. The `id` is minted on the client (see lib/ids.ts), so this
+   * is an UPSERT rather than an insert — replaying it after a failed or queued
+   * attempt updates the same row instead of creating a second round.
+   */
+  async create(payload: Omit<Round, 'id'> & { id: string }): Promise<Round> {
+    const { data, error } = await supabase
+      .from('rounds')
+      .upsert(payload, { onConflict: 'id' })
+      .select('*')
+      .single();
     if (error) throw toAppError(error, 'Could not start round');
     return data;
   },
@@ -115,21 +124,31 @@ export const roundRepo = {
     return data ?? [];
   },
 
-  async upsertHole(hole: Omit<RoundHole, 'id'> & { id?: string }): Promise<RoundHole> {
+  // Hole ids are client-minted, so these conflict on the PRIMARY KEY, not on
+  // the (round_id, hole_number) natural key.
+  //
+  // That distinction matters: conflicting on (round_id, hole_number) while also
+  // sending `id` would make Postgres overwrite the existing row's primary key,
+  // silently orphaning every shot whose `hole_id` pointed at the old value.
+  // Conflicting on `id` keeps the key stable, and the table's
+  // `unique (round_id, hole_number)` constraint stays in place to catch a
+  // duplicate loudly rather than corrupting the graph.
+
+  async upsertHole(hole: Omit<RoundHole, 'id'> & { id: string }): Promise<RoundHole> {
     const { data, error } = await supabase
       .from('round_holes')
-      .upsert(hole, { onConflict: 'round_id,hole_number' })
+      .upsert(hole, { onConflict: 'id' })
       .select('*')
       .single();
     if (error) throw toAppError(error, 'Could not save hole');
     return data;
   },
 
-  async upsertHoles(holes: Array<Omit<RoundHole, 'id'> & { id?: string }>): Promise<RoundHole[]> {
+  async upsertHoles(holes: Array<Omit<RoundHole, 'id'> & { id: string }>): Promise<RoundHole[]> {
     if (holes.length === 0) return [];
     const { data, error } = await supabase
       .from('round_holes')
-      .upsert(holes, { onConflict: 'round_id,hole_number' })
+      .upsert(holes, { onConflict: 'id' })
       .select('*');
     if (error) throw toAppError(error, 'Could not save holes');
     return data ?? [];
@@ -146,7 +165,13 @@ export const roundRepo = {
     return data ?? [];
   },
 
+  /**
+   * Persist a shot. `id` comes from the client, making this an upsert — the
+   * same shot pushed twice (a retry, or a queued write draining after a manual
+   * save beat it) lands on one row instead of two.
+   */
   async addShot(payload: {
+    id: string;
     round_id: string;
     hole_id: string;
     shot_number: number;
@@ -172,7 +197,11 @@ export const roundRepo = {
     swing_metrics?: import('@/models').RoundSwingMetrics | null;
     watch_impact_id?: number | null;
   }): Promise<Shot> {
-    const { data, error } = await supabase.from('shots').insert(payload).select('*').single();
+    const { data, error } = await supabase
+      .from('shots')
+      .upsert(payload, { onConflict: 'id' })
+      .select('*')
+      .single();
     if (error) throw toAppError(error, 'Could not add shot');
     return data;
   },

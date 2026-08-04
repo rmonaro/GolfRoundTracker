@@ -6,7 +6,9 @@ import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/authStore';
 import { emptyHoles, useRoundStore } from '@/stores/roundStore';
 import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
-import type { Course } from '@/models';
+import type { Course, Round } from '@/models';
+import { cacheCourseInBackground, getCachedCourse } from '@/services/courseCacheRepo';
+import { newId } from '@/lib/ids';
 
 export function useCourses() {
   const userId = useAuthStore((s) => s.session?.user.id);
@@ -114,7 +116,11 @@ export function useStartRound() {
       }
 
       const startedAt = playedAt ?? new Date().toISOString();
-      const round = await roundRepo.create({
+      // Mint the round id here rather than reading it back from Postgres. This
+      // is what decouples starting a round from having a signal.
+      const roundId = newId();
+      const roundPayload = {
+        id: roundId,
         user_id: userId,
         course_id: courseId,
         course_name: course.name,
@@ -133,7 +139,7 @@ export function useStartRound() {
         tm_tournament_slug: tm?.tournamentSlug ?? null,
         tee_id: course.teeId ?? null,
         tee_name: course.teeName ?? null
-      });
+      };
 
       // Per-hole par. Prefer the OSM-sourced public.holes.par (authoritative
       // per-hole value); fall back to the course-average for any hole that
@@ -144,12 +150,22 @@ export function useStartRound() {
       const defaultPar = Math.round(course.totalPar / holesPlayed) || 4;
       const osmPars: Record<number, number> = {};
       if (courseId) {
-        const { data: osmHoles } = await supabase
-          .from('holes')
-          .select('hole_number, par')
-          .eq('course_id', courseId);
-        for (const h of osmHoles ?? []) {
-          if (h.par != null) osmPars[h.hole_number] = h.par;
+        // Cache first: without this a round started with no signal would give
+        // every hole the course-average par, which silently corrupts scoring on
+        // every par 3 and par 5 for the whole round.
+        const cached = await getCachedCourse(courseId);
+        if (cached) {
+          for (const h of cached.holes) {
+            if (h.par != null) osmPars[h.hole_number] = h.par;
+          }
+        } else {
+          const { data: osmHoles } = await supabase
+            .from('holes')
+            .select('hole_number, par')
+            .eq('course_id', courseId);
+          for (const h of osmHoles ?? []) {
+            if (h.par != null) osmPars[h.hole_number] = h.par;
+          }
         }
       }
       // Per-hole yardage from the selected tee set (migration 029), keyed by
@@ -162,27 +178,39 @@ export function useStartRound() {
         yardage: teeYardages[h.holeNumber] ?? h.yardage
       }));
 
+      // Pull the course's geometry onto the device now, while we demonstrably
+      // have signal (we just created the round). Fire-and-forget — the golfer
+      // asked to start a round, not to manage a download, so a failure here must
+      // never block or fail that.
+      cacheCourseInBackground(courseId);
+
+      // LOCAL FIRST. The store is the source of truth from this point; the
+      // server is told afterwards, best-effort. Every id involved is already
+      // minted, so the golfer can tee off and record shots whether or not the
+      // writes below ever land.
       startActive({
-        roundId: round.id,
+        roundId,
         userId,
         courseId,
-        courseName: round.course_name,
+        courseName: course.name,
         holesPlayed,
-        courseRating: round.course_rating,
-        slopeRating: round.slope_rating,
-        totalPar: round.par,
+        courseRating: course.courseRating,
+        slopeRating: course.slopeRating,
+        totalPar: course.totalPar,
         totalYardage: course.totalYardage,
-        startedAt: round.started_at,
+        startedAt,
         currentHoleIndex: 0,
         holes,
         tmRegistrationId: tm?.registrationId ?? null,
         tmRoundNumber: tm?.roundNumber ?? null,
-        tmTournamentSlug: tm?.tournamentSlug ?? null
+        tmTournamentSlug: tm?.tournamentSlug ?? null,
+        teeId: course.teeId ?? null,
+        teeName: course.teeName ?? null
       });
 
-      // Persist initial blank holes so RLS-bound queries can resolve hole ids.
       const initialHoles = holes.map((h) => ({
-        round_id: round.id,
+        id: h.holeId,
+        round_id: roundId,
         hole_number: h.holeNumber,
         par: h.par,
         yardage: h.yardage,
@@ -194,8 +222,21 @@ export function useStartRound() {
         gir: false,
         clubs_used: []
       }));
-      const persisted = await roundRepo.upsertHoles(initialHoles);
-      useRoundStore.getState().applyHoleIds(persisted);
+
+      // Push round + holes. Failure is EXPECTED offline and must not surface as
+      // "couldn't start round" — the round exists locally and these are upserts
+      // keyed on ids we already hold, so replaying them later is safe.
+      // (Phase 5 adds the drain loop that does the replaying.)
+      let round: Round | null = null;
+      try {
+        round = await roundRepo.create(roundPayload);
+        const persisted = await roundRepo.upsertHoles(initialHoles);
+        // Records that the server now has these rows, so shot saves don't
+        // re-upsert their parent hole on every stroke.
+        useRoundStore.getState().applyHoleIds(persisted);
+      } catch (err) {
+        console.warn('[start-round] remote create deferred (offline?)', err);
+      }
 
       // Tournament round: establish the TM scorecard link early. We send the
       // starting hole with a null score — enough for TM to create/resolve the
@@ -206,7 +247,9 @@ export function useStartRound() {
       if (tm) {
         try {
           await tmIntegrationRepo.pushScores({
-            round_tracking_round_id: round.id,
+            // The client-minted id, not the server echo — identical by
+            // construction, and defined even when the create above didn't land.
+            round_tracking_round_id: roundId,
             registration_id: tm.registrationId,
             tournament_slug: tm.tournamentSlug ?? undefined,
             round_number: tm.roundNumber,
@@ -218,7 +261,10 @@ export function useStartRound() {
         }
       }
 
-      return round;
+      // Fall back to the payload we built when the server never answered. The
+      // round genuinely exists — locally, with this exact id — so callers get a
+      // real Round rather than null, and offline start looks like online start.
+      return round ?? (roundPayload as Round);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['rounds', userId] });
