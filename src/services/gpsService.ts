@@ -75,6 +75,11 @@ export async function getCurrentPosition(
   return normalize(pos);
 }
 
+/** First retry delay after a watch failure; doubles up to RESTART_MAX_MS. */
+const RESTART_BASE_MS = 2_000;
+/** Cap on the retry delay, so a permanently-denied permission idles quietly. */
+const RESTART_MAX_MS = 30_000;
+
 export interface WatchOptions {
   enableHighAccuracy?: boolean;
   /** Drop fixes worse than this accuracy radius (meters). Default 25. */
@@ -98,39 +103,84 @@ export function watchPosition(
   let watchId: string | null = null;
   let cancelled = false;
   let lastEmittedMs = 0;
+  let restartTimer: ReturnType<typeof setTimeout> | null = null;
+  let restartDelayMs = RESTART_BASE_MS;
   const maxAccuracy = options?.maxAccuracyM ?? 25;
   const minInterval = options?.minIntervalMs ?? 800;
 
-  Geolocation.watchPosition(
-    {
-      enableHighAccuracy: options?.enableHighAccuracy ?? true,
-      timeout: 15_000,
-      maximumAge: 0
-    },
-    (pos, err) => {
-      if (cancelled || err || !pos) return;
-      const fix = normalize(pos);
-      if (fix.accuracyM > maxAccuracy) return;
-      const now = Date.now();
-      if (now - lastEmittedMs < minInterval) return;
-      lastEmittedMs = now;
-      onFix(fix);
+  const dropWatch = () => {
+    if (watchId) {
+      Geolocation.clearWatch({ id: watchId }).catch(() => undefined);
+      watchId = null;
     }
-  )
-    .then((id) => {
-      if (cancelled) {
-        Geolocation.clearWatch({ id }).catch(() => undefined);
-        return;
+  };
+
+  /**
+   * Re-arm after a failure, backing off so a hard error (permission revoked,
+   * location services off) can't spin.
+   *
+   * This exists because a watch that errors is DEAD — neither Capacitor nor
+   * Core Location resumes it. Swallowing the error, which is what this used to
+   * do, meant a single transient failure — or the OS tearing the watch down
+   * while the handset sat pocketed with the screen off during watch play —
+   * silently ended position updates for the rest of the round. The map's blue
+   * dot would just stop, with nothing to say why.
+   */
+  const scheduleRestart = () => {
+    if (cancelled || restartTimer) return;
+    restartTimer = setTimeout(() => {
+      restartTimer = null;
+      if (cancelled) return;
+      restartDelayMs = Math.min(restartDelayMs * 2, RESTART_MAX_MS);
+      start();
+    }, restartDelayMs);
+  };
+
+  const start = () => {
+    dropWatch();
+    Geolocation.watchPosition(
+      {
+        enableHighAccuracy: options?.enableHighAccuracy ?? true,
+        timeout: 15_000,
+        maximumAge: 0
+      },
+      (pos, err) => {
+        if (cancelled) return;
+        if (err || !pos) {
+          console.warn('[gps] watch error, re-arming', err);
+          scheduleRestart();
+          return;
+        }
+        // A delivered fix means the watch is healthy — reset the backoff so
+        // the NEXT failure retries promptly rather than at the capped delay.
+        restartDelayMs = RESTART_BASE_MS;
+        const fix = normalize(pos);
+        if (fix.accuracyM > maxAccuracy) return;
+        const now = Date.now();
+        if (now - lastEmittedMs < minInterval) return;
+        lastEmittedMs = now;
+        onFix(fix);
       }
-      watchId = id;
-    })
-    .catch(() => undefined);
+    )
+      .then((id) => {
+        if (cancelled) {
+          Geolocation.clearWatch({ id }).catch(() => undefined);
+          return;
+        }
+        watchId = id;
+      })
+      .catch((err) => {
+        console.warn('[gps] could not start watch, retrying', err);
+        scheduleRestart();
+      });
+  };
+
+  start();
 
   return () => {
     cancelled = true;
-    if (watchId) {
-      Geolocation.clearWatch({ id: watchId }).catch(() => undefined);
-    }
+    if (restartTimer) clearTimeout(restartTimer);
+    dropWatch();
   };
 }
 

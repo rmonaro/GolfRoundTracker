@@ -339,6 +339,19 @@ final class WatchSession: NSObject, ObservableObject {
     /// 30 seconds ago can't outvote a fresh one.
     private static let FIX_WINDOW_S: TimeInterval = 5
 
+    /// Assumed ground speed, in m/s, when Core Location doesn't report one
+    /// (it returns a negative `speed` when unknown). ~1.4 m/s is a walking
+    /// golfer. Used to convert a fix's AGE into how far they've likely moved
+    /// since it was taken.
+    private static let ASSUMED_SPEED_MPS: CLLocationSpeed = 1.4
+
+    /// Oldest `lastLocation` still worth treating as "where you are" when the
+    /// rolling buffer has nothing. Past this a fix isn't a position, it's a
+    /// memory — recording a shot there silently drops the marker where the
+    /// golfer USED to be, which is worse than recording no position at all
+    /// (the phone already handles a shot arriving without coordinates).
+    private static let MAX_FIX_AGE_S: TimeInterval = 15
+
     override init() {
         super.init()
         locationManager.delegate = self
@@ -351,17 +364,42 @@ final class WatchSession: NSObject, ObservableObject {
         locationAuthStatus = locationManager.authorizationStatus
     }
 
-    /// Pick the best fix from the rolling buffer (lowest horizontal
-    /// accuracy in the recent window). Falls back to `lastLocation`
-    /// when the buffer is empty, then to nil. This is what gets
-    /// recorded as the shot's start / end position.
+    /// How far off a fix is likely to be RIGHT NOW: its own accuracy radius,
+    /// plus the distance the golfer has probably covered since it was taken.
+    ///
+    /// Ranking on `horizontalAccuracy` alone ignores age, and that was putting
+    /// shots in the wrong place. Watch accuracy values cluster tightly (8m vs
+    /// 9m), so a 5-second-old fix routinely beat a fresh one that was a metre
+    /// "worse" — but 5 seconds of walking is ~7m, so the older fix was the one
+    /// well behind the ball. The typical motion (walk up to the ball, stop,
+    /// tap) means those stale fixes are always SHORT of where the golfer is.
+    @MainActor
+    private func effectiveErrorM(_ fix: CLLocation) -> CLLocationDistance {
+        let age = max(0, -fix.timestamp.timeIntervalSinceNow)
+        // Core Location reports a negative speed when it doesn't know. When it
+        // does know, trust it — standing still should NOT penalise an older
+        // fix, and that's exactly when the golfer is about to tap.
+        let speed = fix.speed >= 0 ? fix.speed : Self.ASSUMED_SPEED_MPS
+        return fix.horizontalAccuracy + age * speed
+    }
+
+    /// Pick the fix most likely to describe where the golfer is standing.
+    /// This is what gets recorded as the shot's start / end position.
     @MainActor
     private func bestRecentFix() -> CLLocation? {
         pruneRecentFixes()
-        if let best = recentFixes.min(by: { $0.horizontalAccuracy < $1.horizontalAccuracy }) {
+        if let best = recentFixes.min(by: { effectiveErrorM($0) < effectiveErrorM($1) }) {
             return best
         }
-        return lastLocation
+        // Buffer empty — GPS has produced nothing inside the window, which
+        // happens when tracking has only just started or the watch was asleep.
+        // Only fall back to `lastLocation` while it's still recent; see
+        // MAX_FIX_AGE_S for why a stale one is worse than nil.
+        if let last = lastLocation,
+           -last.timestamp.timeIntervalSinceNow <= Self.MAX_FIX_AGE_S {
+            return last
+        }
+        return nil
     }
 
     /// Trim fixes older than FIX_WINDOW_S from the buffer.

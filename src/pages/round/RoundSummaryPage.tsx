@@ -583,7 +583,8 @@ export function RoundSummaryPage() {
             startIcon={<HomeRoundedIcon />}
             onClick={() => navigate("/")}
           >
-            Close & Return Home
+            Close &,
+            ;l,g Return Home
           </Button>
           <Typography variant="caption" color="text.secondary" align="center">
             Estimated handicap only. Not an official USGA handicap.

@@ -140,7 +140,15 @@ export function HoleTrackingPage() {
       try {
         await ensureGpsPermission();
         const pt = await getCurrentPosition({ maximumAge: 30_000 });
-        if (mounted) setUserLoc({ lat: pt.lat, lng: pt.lng });
+        if (!mounted) return;
+        setUserLoc({ lat: pt.lat, lng: pt.lng });
+        // Seed the blue dot from this same one-shot. The continuous watch can
+        // take many seconds to deliver its first ACCEPTED fix (it demands a
+        // fresh one, `maximumAge: 0`), and until then the golfer opening a
+        // hole would see no dot at all — including right after returning to
+        // the phone from the watch. A cached fix up to 30s old is a fine
+        // starting point; the watch overwrites it as soon as it has better.
+        setLiveFix((prev) => prev ?? pt);
       } catch {
         // Best-effort; at-course detection is non-critical.
       }
@@ -173,6 +181,16 @@ export function HoleTrackingPage() {
   // own fix). This is what keeps the blue dot on the map at all times — it
   // never gets cleared by marking a position or recording a shot.
   const [liveFix, setLiveFix] = useState<GpsPoint | null>(null);
+  // STICKY last-known position, [lng, lat]. Once set it is never cleared —
+  // only replaced by a newer fix from any source.
+  //
+  // The dot used to be derived live from whichever source was reporting, so it
+  // VANISHED whenever they all went quiet: the watch clears its position the
+  // instant a shot is recorded, and the phone's own GPS watch can be dead after
+  // the handset has sat pocketed with the screen off. The golfer would look
+  // down mid-hole and find no dot at all. A slightly stale dot tells them where
+  // they are; no dot tells them nothing.
+  const [lastKnownPosition, setLastKnownPosition] = useState<[number, number] | null>(null);
   const [trackingError, setTrackingError] = useState<string | null>(null);
   // Club pre-selection: the user picks a club on the main screen so the next
   // shot opens with it already chosen. Resets when the hole changes (see effect
@@ -758,6 +776,38 @@ export function HoleTrackingPage() {
     const stop = watchPosition((fix) => setLiveFix(fix), { maxAccuracyM: 100 });
     return stop;
   }, [gpsEnabled]);
+
+  // Freshest position available right now, from whichever source is reporting.
+  // Priority: this phone's auto-track fix (most accurate, actively tracking) →
+  // the WATCH's reported position (so the phone mirrors the watch during a
+  // watch-driven shot) → the always-on phone watch.
+  const autoTrackFix = autoTrackEnabled ? autoTrack.latestFix : null;
+  const positionCandidate: [number, number] | null = autoTrackFix
+    ? [autoTrackFix.lng, autoTrackFix.lat]
+    : watchTracking.active &&
+        watchTracking.currentLat != null &&
+        watchTracking.currentLng != null
+      ? [watchTracking.currentLng, watchTracking.currentLat]
+      : liveFix
+        ? [liveFix.lng, liveFix.lat]
+        : null;
+
+  // Promote any real fix into the sticky position. Depends on the primitives
+  // rather than the array, which is a fresh object every render and would
+  // otherwise re-fire this effect forever.
+  const candidateLng = positionCandidate?.[0] ?? null;
+  const candidateLat = positionCandidate?.[1] ?? null;
+  useEffect(() => {
+    if (candidateLng == null || candidateLat == null) return;
+    // Keep the previous array when the coordinates haven't moved: the marker
+    // effect downstream keys off identity, so a fresh array would re-run it on
+    // every GPS tick for no visible change.
+    setLastKnownPosition((prev) =>
+      prev && prev[0] === candidateLng && prev[1] === candidateLat
+        ? prev
+        : [candidateLng, candidateLat]
+    );
+  }, [candidateLng, candidateLat]);
 
   // Distance from ball to pin, in yards. On shot 1 this equals the full hole
   // yardage; on later shots it's full minus what the player has already
@@ -1587,22 +1637,11 @@ export function HoleTrackingPage() {
           showYardageMarkers={showYardageMarkers}
           pinOverride={pinOverride}
           maxAimDistanceFromBallM={maxAimDistanceFromBallM}
-          // Live "you are here" dot, shown at all times while GPS is on.
-          // Priority: phone auto-track fix (active tracking on this device) →
-          // the WATCH-reported position (so the phone mirrors the watch) →
-          // the always-on `liveFix`. Marking a spot / recording a shot never
-          // clears it, because `liveFix` keeps updating independently.
-          currentLocation={
-            autoTrackEnabled && autoTrack.latestFix
-              ? [autoTrack.latestFix.lng, autoTrack.latestFix.lat]
-              : watchTracking.active &&
-                  watchTracking.currentLat != null &&
-                  watchTracking.currentLng != null
-                ? [watchTracking.currentLng, watchTracking.currentLat]
-                : liveFix
-                  ? [liveFix.lng, liveFix.lat]
-                  : null
-          }
+          // Live "you are here" dot. Reads the STICKY position rather than the
+          // live candidate so it survives every source going quiet at once —
+          // see `lastKnownPosition`. Recording a shot, ending a watch tracking
+          // session, or the phone's GPS watch dying no longer blanks the dot.
+          currentLocation={lastKnownPosition}
           // Reset the cached aim drag whenever the player edits par or
           // yardage. The handle re-anchors at the new defaults so the
           // aim distance reflects the corrected hole length instead of
