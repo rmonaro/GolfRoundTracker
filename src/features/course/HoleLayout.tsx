@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
-import { Box, Typography } from '@mui/material';
+import { Box, CircularProgress, Typography } from '@mui/material';
 import type { HoleLayoutData } from '@/services/holesRepo';
 import type { BagClub, CourseHole, HoleFeature, Lie, LngLat, TargetResult, TargetType } from '@/models';
 import {
@@ -911,6 +911,16 @@ export function HoleLayout({
   // NB: this gates the GL map as a whole, not Mapbox-hosted imagery — with a
   // pack it renders our own tiles on an empty style.
   const useMapbox = tokenAvailable && !mapErrored && (isOnline || mapEverLoaded || usingPack);
+
+  // The imagery tier resolves ASYNCHRONOUSLY — it reads the pack out of
+  // IndexedDB, which for a 45 MB archive is not instant. Until it lands we
+  // don't yet know whether this hole has a downloaded map, and rendering the
+  // SVG in the meantime is what produced the flash of bare polygons before the
+  // satellite view appeared. Hold a neutral placeholder for that moment instead.
+  //
+  // Scoped to `!useMapbox` deliberately: online, Mapbox wins no matter how the
+  // tier resolves, so the map must still build immediately with no placeholder.
+  const decidingImagery = !imagery.ready && !useMapbox;
 
   // Give the map another chance rather than leaving it on the SVG for the rest
   // of the round: when signal returns, and when the imagery tier changes (a
@@ -2394,6 +2404,17 @@ export function HoleLayout({
   // Explicit min-height so percentage-height collapses don't leave Mapbox with
   // a 0×0 canvas at construction time. Matches HoleLayoutCard's wrapper.
   const minHeight = compact ? 160 : 240;
+
+  // ----- Still deciding which imagery to draw -----
+  // Same background the map itself starts on, so when the satellite layer
+  // appears it replaces this without a visible step.
+  if (decidingImagery) {
+    return (
+      <Box className={className} sx={{ ...emptyBoxSx, minHeight }}>
+        <CircularProgress size={20} sx={{ color: 'rgba(255,255,255,0.5)' }} />
+      </Box>
+    );
+  }
 
   // ----- SVG fallback path -----
   if (!useMapbox) {

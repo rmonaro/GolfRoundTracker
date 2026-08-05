@@ -8,6 +8,7 @@ import { emptyHoles, useRoundStore } from '@/stores/roundStore';
 import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
 import type { Course, Round } from '@/models';
 import { cacheCourseInBackground, getCachedCourse } from '@/services/courseCacheRepo';
+import { downloadPackInBackground } from '@/services/coursePackRepo';
 import { newId } from '@/lib/ids';
 
 export function useCourses() {
@@ -178,11 +179,19 @@ export function useStartRound() {
         yardage: teeYardages[h.holeNumber] ?? h.yardage
       }));
 
-      // Pull the course's geometry onto the device now, while we demonstrably
-      // have signal (we just created the round). Fire-and-forget — the golfer
-      // asked to start a round, not to manage a download, so a failure here must
-      // never block or fail that.
+      // Pull the course onto the device now, while we demonstrably have signal
+      // (we just created the round). Fire-and-forget — the golfer asked to start
+      // a round, not to manage a download, so a failure here must never block or
+      // fail that.
+      //
+      // Two separate payloads, and both matter:
+      //   • geometry (~145 KB) — pars, yardages, hole shapes. Keeps scoring and
+      //     distance-to-pin working with no signal.
+      //   • satellite imagery (~3-45 MB) — without it the map drops to the
+      //     schematic SVG, and the aerial is what golfers actually pick a line
+      //     from. Skipped automatically when it's already on the device.
       cacheCourseInBackground(courseId);
+      downloadPackInBackground(courseId, course.name);
 
       // LOCAL FIRST. The store is the source of truth from this point; the
       // server is told afterwards, best-effort. Every id involved is already

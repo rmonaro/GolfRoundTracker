@@ -51,6 +51,8 @@ import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { cacheCourseInBackground } from '@/services/courseCacheRepo';
+import { downloadPackInBackground } from '@/services/coursePackRepo';
 import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
@@ -84,6 +86,7 @@ import { roundRepo } from '@/services/roundRepo';
 import { newId } from '@/lib/ids';
 import { enqueueFinishedRound, syncRound } from '@/services/roundSync';
 import { SyncStatusChip } from '@/features/offline/SyncStatusChip';
+import { PackDownloadChip } from '@/features/offline/PackDownloadChip';
 import { bagRepo } from '@/services/bagRepo';
 import { courseRepo } from '@/services/courseRepo';
 import { holesRepo } from '@/services/holesRepo';
@@ -192,6 +195,20 @@ export function HoleTrackingPage() {
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
   const roundTourCompleted = useSettingsStore((s) => s.roundTourCompleted);
   const setRoundTourCompleted = useSettingsStore((s) => s.setRoundTourCompleted);
+
+  // Second chance at the offline course download. `useStartRound` fires both
+  // of these when the round is created, but that's a single attempt: if signal
+  // was weak in the car park it fails silently and the golfer walks out with no
+  // maps — exactly the case this exists to prevent. Retrying on every entry to
+  // the round screen makes it self-healing, and also covers resumed rounds and
+  // any round started before these downloads existed.
+  //
+  // Both calls are cheap no-ops once the data is on the device.
+  useEffect(() => {
+    if (!active?.courseId) return;
+    cacheCourseInBackground(active.courseId);
+    downloadPackInBackground(active.courseId, active.courseName ?? null);
+  }, [active?.courseId, active?.courseName]);
 
   // At-course detection. Skipped entirely when GPS is disabled.
   const courseQuery = useQuery({
@@ -2257,6 +2274,9 @@ export function HoleTrackingPage() {
               {/* Only appears when there's something unsynced or no signal —
                   reassurance mid-round that the data is safe. */}
               <SyncStatusChip compact />
+              {/* Only appears while the course's imagery is downloading, so the
+                  golfer can see the map will be there before signal drops. */}
+              <PackDownloadChip courseId={active.courseId} />
             </Stack>
           </Box>
           <IconButton

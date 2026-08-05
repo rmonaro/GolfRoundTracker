@@ -12,6 +12,7 @@
 
 import { get, set, del, keys, createStore } from 'idb-keyval';
 import { supabase } from '@/lib/supabase';
+import { isUsablyOnline } from './connectivity';
 import { toAppError } from './errors';
 
 const store = createStore('grt-course-packs', 'packs');
@@ -190,4 +191,99 @@ export function isPackStale(
 ): boolean {
   if (!local || !remote?.generatedAt || !local.generatedAt) return false;
   return remote.generatedAt > local.generatedAt;
+}
+
+/**
+ * Courses whose pack is being fetched right now, so a second trigger (starting
+ * a round again, or resuming one) doesn't run a duplicate multi-megabyte
+ * download alongside the first.
+ */
+const inFlight = new Set<string>();
+
+/** True while a background pack download for this course is running. */
+export function isPackDownloading(courseId: string): boolean {
+  return inFlight.has(courseId);
+}
+
+export interface PackDownloadState {
+  courseId: string;
+  courseName: string | null;
+  /** 0..1. Stays at 0 when the server reports no content-length. */
+  fraction: number;
+  /** Expected total, for showing "12.4 MB" alongside the bar. */
+  sizeBytes: number | null;
+}
+
+/**
+ * Progress of the current background pack download, for UI to display.
+ *
+ * A module-level value plus listeners rather than a store: this is written from
+ * a plain service with no React in scope, and read via `useSyncExternalStore`.
+ * The identity only changes when progress actually changes, which is what makes
+ * it safe as a `getSnapshot` result.
+ */
+let downloadState: PackDownloadState | null = null;
+const downloadListeners = new Set<() => void>();
+
+export function subscribePackDownload(listener: () => void): () => void {
+  downloadListeners.add(listener);
+  return () => downloadListeners.delete(listener);
+}
+
+export function getPackDownload(): PackDownloadState | null {
+  return downloadState;
+}
+
+function setDownloadState(next: PackDownloadState | null) {
+  downloadState = next;
+  for (const l of downloadListeners) l();
+}
+
+/**
+ * Pull this course's satellite imagery onto the device in the background.
+ *
+ * Called when a round starts, alongside the geometry cache. Geometry alone
+ * (~145 KB) keeps scoring and distances working with no signal, but the MAP
+ * falls back to the schematic SVG — and the satellite view is what golfers
+ * actually read a hole from. This is what makes losing signal mid-round a
+ * non-event rather than a downgrade.
+ *
+ * Fire-and-forget by design, mirroring `cacheCourseInBackground`: the golfer
+ * asked to start a round, not to manage a download, so nothing here may block
+ * or fail that. Skips silently when a current pack is already on the device,
+ * when the course has no imagery built yet, or when there's no usable signal.
+ *
+ * NOTE ON DATA: packs currently run ~3–45 MB. This deliberately does NOT wait
+ * for Wi-Fi — the whole scenario is a golfer in a car park on cellular, so a
+ * Wi-Fi-only rule would skip exactly when it's needed.
+ */
+export function downloadPackInBackground(
+  courseId: string | null | undefined,
+  courseName: string | null
+): void {
+  if (!courseId || inFlight.has(courseId)) return;
+  inFlight.add(courseId);
+  void (async () => {
+    try {
+      if (!isUsablyOnline()) return;
+      const local = await getPackMeta(courseId);
+      const remote = await getRemotePackInfo(courseId).catch(() => null);
+      // No imagery tiled for this course yet — nothing to do, and not an error.
+      if (!remote) return;
+      // Already have it, and the server hasn't re-tiled since.
+      if (local && !isPackStale(local, remote)) return;
+      setDownloadState({ courseId, courseName, fraction: 0, sizeBytes: remote.sizeBytes });
+      await downloadPack(courseId, courseName, remote, (fraction) =>
+        setDownloadState({ courseId, courseName, fraction, sizeBytes: remote.sizeBytes })
+      );
+    } catch (err) {
+      console.warn('[coursePack] background download failed', err);
+    } finally {
+      inFlight.delete(courseId);
+      // Clear on success AND on failure — a bar frozen at 60% because the
+      // connection dropped is worse than no bar, and the round screen retries
+      // on its next mount anyway.
+      setDownloadState(null);
+    }
+  })();
 }

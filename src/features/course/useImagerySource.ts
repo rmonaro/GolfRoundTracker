@@ -121,7 +121,14 @@ export function useImagerySource(courseId: string | null | undefined): ImagerySo
 
       // Nothing usable — resolve to Mapbox so the caller can make the SVG call.
       if (!cancelled) setResolved({ ...MAPBOX, ready: true });
-    })();
+    })().catch((err) => {
+      // This MUST resolve to something. `HoleLayout` holds a placeholder while
+      // `ready` is false to avoid flashing the SVG before a downloaded map
+      // appears — so an unresolved tier would spin forever instead of falling
+      // back. Mapbox-with-ready lets the caller decide map or SVG as usual.
+      console.warn('[imagery] tier resolution failed, falling back', err);
+      if (!cancelled) setResolved({ ...MAPBOX, ready: true });
+    });
 
     return () => {
       cancelled = true;
