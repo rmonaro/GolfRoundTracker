@@ -43,6 +43,12 @@ export function MobileShell() {
   // viewport is exactly the device dimensions (no rubber-band scroll on iOS).
   const fullScreen = location.pathname.startsWith('/round/play');
 
+  // Routes that supply their OWN bottom bar in place of the app nav — Settings
+  // swaps in its section tabs (Profile / Settings / Courses). The body's bottom
+  // padding is deliberately kept: the replacement bar occupies the same strip,
+  // so the reserved space is still needed.
+  const ownsBottomBar = location.pathname.startsWith('/settings');
+
   // iOS PWA scroll lock. position: fixed + anchoring body to all four
   // viewport edges (top/right/bottom/left: 0) removes the document from the
   // scrollable layer AND reliably extends body to the full screen including
@@ -114,7 +120,7 @@ export function MobileShell() {
       >
         <Outlet />
       </Box>
-      {!fullScreen && (
+      {!fullScreen && !ownsBottomBar && (
         <Paper
           elevation={8}
           sx={{
