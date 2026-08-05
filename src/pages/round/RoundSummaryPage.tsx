@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -17,37 +17,42 @@ import {
   DialogContent,
   DialogTitle,
   IconButton,
-  TextField
-} from '@mui/material';
-import HomeRoundedIcon from '@mui/icons-material/HomeRounded';
-import EditRoundedIcon from '@mui/icons-material/EditRounded';
-import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
-import CloseRoundedIcon from '@mui/icons-material/CloseRounded';
-import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
-import BarChartRoundedIcon from '@mui/icons-material/BarChartRounded';
-import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
-import GpsFixedRoundedIcon from '@mui/icons-material/GpsFixedRounded';
-import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
-import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
-import MapRoundedIcon from '@mui/icons-material/MapRounded';
-import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
-import { Navigate, useNavigate, useParams } from 'react-router-dom';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
-import dayjs from 'dayjs';
-import { PageHeader } from '@/components/layout/PageHeader';
-import { StatCard } from '@/components/ui/StatCard';
-import { useRoundDetails } from '@/features/stats/useRounds';
-import { detailRoundStats } from '@/features/stats/computeStats';
-import { calculateDifferential, isAbsurdDifferential } from '@/utils/handicap';
-import { roundRepo } from '@/services/roundRepo';
-import { useRoundStore } from '@/stores/roundStore';
-import { useBagStore } from '@/stores/bagStore';
-import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
-import { useAuthStore } from '@/stores/authStore';
-import { toAppError } from '@/services/errors';
-import { pct, scoreVsPar, durationLabel, fullName } from '@/utils/format';
-import { Scorecard } from '@/components/Scorecard';
-import { AddShotSheet, type ShotEditDraft } from '@/features/round/AddShotSheet';
+  TextField,
+} from "@mui/material";
+import HomeRoundedIcon from "@mui/icons-material/HomeRounded";
+import EditRoundedIcon from "@mui/icons-material/EditRounded";
+import DeleteOutlineRoundedIcon from "@mui/icons-material/DeleteOutlineRounded";
+import CloseRoundedIcon from "@mui/icons-material/CloseRounded";
+import PlayArrowRoundedIcon from "@mui/icons-material/PlayArrowRounded";
+import BarChartRoundedIcon from "@mui/icons-material/BarChartRounded";
+import SportsGolfRoundedIcon from "@mui/icons-material/SportsGolfRounded";
+import GpsFixedRoundedIcon from "@mui/icons-material/GpsFixedRounded";
+import FlagRoundedIcon from "@mui/icons-material/FlagRounded";
+import EmojiEventsRoundedIcon from "@mui/icons-material/EmojiEventsRounded";
+import MapRoundedIcon from "@mui/icons-material/MapRounded";
+import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
+import { HoleLayoutCard } from "@/features/course/HoleLayoutCard";
+import { Navigate, useNavigate, useParams } from "react-router-dom";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import dayjs from "dayjs";
+import { PageHeader } from "@/components/layout/PageHeader";
+import { StatCard } from "@/components/ui/StatCard";
+import { useRoundDetails } from "@/features/stats/useRounds";
+import { detailRoundStats } from "@/features/stats/computeStats";
+import { calculateDifferential, isAbsurdDifferential } from "@/utils/handicap";
+import { roundRepo } from "@/services/roundRepo";
+import { useRoundStore } from "@/stores/roundStore";
+import { useTmRoundSync } from "@/features/tournaments/useTmRoundSync";
+import { useBagStore } from "@/stores/bagStore";
+import { abbreviateClubName } from "@/features/bag/abbreviateClubName";
+import { useAuthStore } from "@/stores/authStore";
+import { toAppError } from "@/services/errors";
+import { pct, scoreVsPar, durationLabel, fullName } from "@/utils/format";
+import { Scorecard } from "@/components/Scorecard";
+import {
+  AddShotSheet,
+  type ShotEditDraft,
+} from "@/features/round/AddShotSheet";
 import {
   STROKE_PENALTY_TYPES,
   type Round,
@@ -57,8 +62,8 @@ import {
   type Lie,
   type PenaltyType,
   type TargetResult,
-  type TargetType
-} from '@/models';
+  type TargetType,
+} from "@/models";
 
 /** Shape of a shot row as it flows through HolesTab. Mirrors the
  *  Supabase ShotRow but typed as plain interface so the parent doesn't
@@ -94,7 +99,17 @@ export function RoundSummaryPage() {
   const pageQueryClient = useQueryClient();
   const [editOpen, setEditOpen] = useState(false);
   const [verifyingAll, setVerifyingAll] = useState(false);
-  const [tab, setTab] = useState<'overview' | 'holes' | 'game'>('overview');
+  const [tab, setTab] = useState<"overview" | "holes" | "game">("overview");
+  // Closing the round out from here — the summary is reachable mid-round via
+  // "peek at stats", so this is where a golfer decides they're finished.
+  const [confirmComplete, setConfirmComplete] = useState(false);
+  const [completing, setCompleting] = useState(false);
+  const [completeError, setCompleteError] = useState<string | null>(null);
+  const { isTournamentRound, finalizeRound } = useTmRoundSync();
+  // Both values above describe the ACTIVE round, not necessarily the one on
+  // screen — this page also opens past rounds from history. Everything that
+  // touches them has to be gated on the two being the same round.
+  const activeRoundId = useRoundStore((s) => s.active?.roundId ?? null);
 
   useEffect(() => {
     if (!detail.data?.round) return;
@@ -113,7 +128,9 @@ export function RoundSummaryPage() {
         const livePenalty = holeShots.filter(
           (sh) =>
             sh.penalty_type != null &&
-            (STROKE_PENALTY_TYPES as readonly string[]).includes(sh.penalty_type)
+            (STROKE_PENALTY_TYPES as readonly string[]).includes(
+              sh.penalty_type,
+            ),
         ).length;
         const holeScore = holeShots.length + livePenalty;
         totalScore += holeScore;
@@ -129,11 +146,17 @@ export function RoundSummaryPage() {
         round.score_vs_par !== scoreVsPar
       ) {
         roundRepo
-          .update(round.id, { score: totalScore, par: totalPar, score_vs_par: scoreVsPar })
+          .update(round.id, {
+            score: totalScore,
+            par: totalPar,
+            score_vs_par: scoreVsPar,
+          })
           .then(() =>
-            pageQueryClient.invalidateQueries({ queryKey: ['rounds', userId] })
+            pageQueryClient.invalidateQueries({ queryKey: ["rounds", userId] }),
           )
-          .catch((err) => console.error('[summary] could not persist round score', err));
+          .catch((err) =>
+            console.error("[summary] could not persist round score", err),
+          );
       }
 
       // Self-heal the handicap differential off the same authoritative score:
@@ -141,23 +164,35 @@ export function RoundSummaryPage() {
       //   2) Stored value is out of the USGA-reasonable range (e.g. -226 from an
       //      earlier bug) → overwrite, or clear to null when even the fresh
       //      compute can't produce a sane number.
-      const computed = calculateDifferential(totalScore, round.course_rating, round.slope_rating);
+      const computed = calculateDifferential(
+        totalScore,
+        round.course_rating,
+        round.slope_rating,
+      );
       const stored = round.handicap_differential;
       const storedIsAbsurd = isAbsurdDifferential(stored);
       if (computed != null && (stored == null || storedIsAbsurd)) {
         roundRepo
           .update(round.id, { handicap_differential: computed })
           .catch((err) =>
-            console.error('[summary] could not persist differential', err)
+            console.error("[summary] could not persist differential", err),
           );
       } else if (storedIsAbsurd && computed == null) {
         roundRepo
           .update(round.id, { handicap_differential: null })
           .catch((err) =>
-            console.error('[summary] could not clear bad differential', err)
+            console.error("[summary] could not clear bad differential", err),
           );
       }
-      reset();
+      // Clear the in-progress round from the local store — but ONLY when the
+      // round being viewed IS that round. Without the id check, opening any
+      // past round's summary from history wiped the active round mid-play,
+      // taking with it every hole and shot the store held.
+      //
+      // Read via getState() rather than subscribing: this effect must not
+      // re-run just because `active` changed (it changes as a RESULT of the
+      // reset below).
+      if (round.id === useRoundStore.getState().active?.roundId) reset();
     }
   }, [detail.data, reset, pageQueryClient, userId]);
 
@@ -165,13 +200,19 @@ export function RoundSummaryPage() {
 
   if (detail.isLoading || !detail.data) {
     return (
-      <Box sx={{ display: 'grid', placeItems: 'center', height: '60dvh' }}>
+      <Box sx={{ display: "grid", placeItems: "center", height: "60dvh" }}>
         <CircularProgress />
       </Box>
     );
   }
 
   const { round, holes: rawHoles, shots } = detail.data;
+
+  // Is the round on screen the one currently being played? Drives both the
+  // tournament handling below and, indirectly, whether finishing here should
+  // finalize anything in TM.
+  const isActiveRound = round.id === activeRoundId;
+  const submitsToTournament = isTournamentRound && isActiveRound;
 
   // Round-summary verification backstop: auto-detected shots the golfer never
   // confirmed per-hole surface here. "Verify all" clears the whole round; to
@@ -182,11 +223,15 @@ export function RoundSummaryPage() {
     setVerifyingAll(true);
     try {
       await Promise.all(
-        unverifiedShots.map((s) => roundRepo.updateShot(s.id, { verified: true }))
+        unverifiedShots.map((s) =>
+          roundRepo.updateShot(s.id, { verified: true }),
+        ),
       );
-      pageQueryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      pageQueryClient.invalidateQueries({
+        queryKey: ["round-detail", roundId],
+      });
     } catch (err) {
-      console.error('[verify] round verify-all failed', err);
+      console.error("[verify] round verify-all failed", err);
     } finally {
       setVerifyingAll(false);
     }
@@ -204,24 +249,77 @@ export function RoundSummaryPage() {
     const livePutts = holeShots.filter((s) => {
       if (!s.club_id) return false;
       const c = bag.find((b) => b.clubId === s.club_id);
-      return c?.category === 'putter';
+      return c?.category === "putter";
     }).length;
     const livePenalty = holeShots.filter(
       (s) =>
         s.penalty_type != null &&
-        (STROKE_PENALTY_TYPES as readonly string[]).includes(s.penalty_type)
+        (STROKE_PENALTY_TYPES as readonly string[]).includes(s.penalty_type),
     ).length;
     return {
       ...h,
       strokes: liveStrokes,
       putts: livePutts,
-      penalty_strokes: livePenalty
+      penalty_strokes: livePenalty,
     };
   });
   const stats = detailRoundStats(round, holes, shots);
+
+  // Close the round out. Mirrors HoleTrackingPage's auto-finish (which fires
+  // when the last putt drops) so a round ended early from here is indistinguishable
+  // from one played to the 18th.
+  //
+  // Scores come from `stats`, i.e. derived from the shot rows, NOT from the
+  // round_holes.strokes cache — same basis the headline above shows, so what
+  // the golfer confirms is exactly what gets stored.
+  const completeRound = async () => {
+    if (completing) return;
+    setCompleting(true);
+    setCompleteError(null);
+    try {
+      await roundRepo.update(round.id, {
+        score: stats.totalScore,
+        par: stats.totalPar,
+        score_vs_par: stats.totalScore - stats.totalPar,
+        completed_at: new Date().toISOString(),
+      });
+      // Pushes every played hole as SUBMITTED, which LOCKS the scorecard in TM.
+      //
+      // Gated on `submitsToTournament` because finalizeRound() reads the ACTIVE
+      // round straight from the store — completing an older round from history
+      // would otherwise submit the round currently being played instead.
+      //
+      // Best-effort and separately caught: if TM is unreachable the round is
+      // still complete locally, and failing the whole action would misreport
+      // what was actually saved.
+      if (submitsToTournament) {
+        try {
+          await finalizeRound();
+        } catch (err) {
+          console.error("[summary] TM finalize failed", err);
+        }
+      }
+      setConfirmComplete(false);
+      // Refetch flips `round.completed_at`, which is what drives the page into
+      // its completed presentation AND clears the active round via the effect
+      // above — rather than duplicating that logic here.
+      pageQueryClient.invalidateQueries({
+        queryKey: ["round-detail", roundId],
+      });
+      pageQueryClient.invalidateQueries({ queryKey: ["rounds", userId] });
+    } catch (err) {
+      setCompleteError(toAppError(err).message);
+    } finally {
+      setCompleting(false);
+    }
+  };
+
   const front = holes.filter((h) => h.hole_number <= 9);
   const back = holes.filter((h) => h.hole_number > 9);
-  const frontTotal = front.reduce((s, h) => s + h.strokes + h.penalty_strokes, 0);
+  const frontTotal = front.reduce(
+    (s, h) => s + h.strokes + h.penalty_strokes,
+    0,
+  );
   const frontPar = front.reduce((s, h) => s + h.par, 0);
   const backTotal = back.reduce((s, h) => s + h.strokes + h.penalty_strokes, 0);
   const backPar = back.reduce((s, h) => s + h.par, 0);
@@ -230,7 +328,7 @@ export function RoundSummaryPage() {
     <Box>
       <PageHeader
         title="Round Summary"
-        subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
+        subtitle={`${round.course_name} · ${dayjs(round.started_at).format("MMM D, YYYY")}`}
         back="/round"
       />
 
@@ -240,25 +338,26 @@ export function RoundSummaryPage() {
           <Card
             elevation={0}
             sx={{
-              bgcolor: 'rgba(251,191,36,0.12)',
+              bgcolor: "rgba(251,191,36,0.12)",
               border: 1,
-              borderColor: 'rgba(251,191,36,0.5)',
-              borderRadius: '5px'
+              borderColor: "rgba(251,191,36,0.5)",
+              borderRadius: "5px",
             }}
           >
             <CardContent
               sx={{
-                display: 'flex',
-                alignItems: 'center',
+                display: "flex",
+                alignItems: "center",
                 gap: 1.5,
                 py: 1.5,
-                '&:last-child': { pb: 1.5 }
+                "&:last-child": { pb: 1.5 },
               }}
             >
               <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography sx={{ fontWeight: 800, fontSize: '0.9rem' }}>
-                  {unverifiedShots.length}{' '}
-                  {unverifiedShots.length === 1 ? 'shot needs' : 'shots need'} review
+                <Typography sx={{ fontWeight: 800, fontSize: "0.9rem" }}>
+                  {unverifiedShots.length}{" "}
+                  {unverifiedShots.length === 1 ? "shot needs" : "shots need"}{" "}
+                  review
                 </Typography>
                 <Typography variant="caption" color="text.secondary">
                   Auto-detected from your watch. Open a hole to edit, or confirm
@@ -271,13 +370,13 @@ export function RoundSummaryPage() {
                 disabled={verifyingAll}
                 onClick={() => void verifyAllRound()}
                 sx={{
-                  textTransform: 'none',
+                  textTransform: "none",
                   fontWeight: 700,
-                  borderRadius: '6px',
-                  whiteSpace: 'nowrap'
+                  borderRadius: "6px",
+                  whiteSpace: "nowrap",
                 }}
               >
-                {verifyingAll ? 'Verifying…' : 'Verify all'}
+                {verifyingAll ? "Verifying…" : "Verify all"}
               </Button>
             </CardContent>
           </Card>
@@ -294,22 +393,22 @@ export function RoundSummaryPage() {
           variant="fullWidth"
           sx={{
             minHeight: 40,
-            bgcolor: 'background.paper',
-            borderRadius: '5px',
+            bgcolor: "background.paper",
+            borderRadius: "5px",
             border: 1,
-            borderColor: 'divider',
-            '& .MuiTabs-indicator': { display: 'none' },
-            '& .MuiTab-root': {
+            borderColor: "divider",
+            "& .MuiTabs-indicator": { display: "none" },
+            "& .MuiTab-root": {
               minHeight: 40,
-              textTransform: 'none',
+              textTransform: "none",
               fontWeight: 700,
-              borderRadius: '5px',
-              color: 'text.secondary'
+              borderRadius: "5px",
+              color: "text.secondary",
             },
-            '& .Mui-selected': {
-              bgcolor: 'rgba(22,163,74,0.18)',
-              color: 'common.white'
-            }
+            "& .Mui-selected": {
+              bgcolor: "rgba(22,163,74,0.18)",
+              color: "common.white",
+            },
           }}
         >
           <Tab label="Overview" value="overview" />
@@ -317,101 +416,182 @@ export function RoundSummaryPage() {
         </Tabs>
       </Box>
 
-      {tab === 'overview' && (
-      <Stack spacing={2} px={2} pb={4} mt={2}>
-        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-          <CardContent>
-            <Stack direction="row" justifyContent="space-between" alignItems="center">
-              <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
-                Final Score
-              </Typography>
-              <Button
-                size="small"
-                startIcon={<EditRoundedIcon />}
-                onClick={() => setEditOpen(true)}
-                sx={{ textTransform: 'none' }}
+      {tab === "overview" && (
+        <Stack spacing={2} px={2} pb={4} mt={2}>
+          <Card
+            elevation={0}
+            sx={{ bgcolor: "background.paper", borderRadius: "5px" }}
+          >
+            <CardContent>
+              <Stack
+                direction="row"
+                justifyContent="space-between"
+                alignItems="center"
               >
-                Edit
-              </Button>
-            </Stack>
-            <Stack direction="row" alignItems="baseline" spacing={2} mt={0.5}>
-              {/* Headline = score-to-par (E / +N / -N). The raw stroke
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ textTransform: "uppercase", letterSpacing: 0.6 }}
+                >
+                  {/* "Final" would be a lie while the round is still open — this
+                    page is reachable mid-round from the tracking screen. */}
+                  {round.completed_at ? "Final Score" : "Score So Far"}
+                </Typography>
+                <Button
+                  size="small"
+                  startIcon={<EditRoundedIcon />}
+                  onClick={() => setEditOpen(true)}
+                  sx={{ textTransform: "none" }}
+                >
+                  Edit
+                </Button>
+              </Stack>
+              <Stack direction="row" alignItems="baseline" spacing={2} mt={0.5}>
+                {/* Headline = score-to-par (E / +N / -N). The raw stroke
                   total is still surfaced as a secondary chip below so the
                   number isn't lost. */}
-              <Typography variant="h2" color="primary" sx={{ fontWeight: 800 }}>
-                {scoreVsPar(stats.totalScore, stats.totalPar)}
-              </Typography>
-              <Typography variant="h5" sx={{ fontWeight: 700 }}>
-                {stats.totalScore}
-              </Typography>
-              <Typography variant="body2" color="text.secondary">
-                par {stats.totalPar}
-              </Typography>
-            </Stack>
-            <Stack direction="row" spacing={1} mt={1}>
-              <Chip label={`${round.holes_played} holes`} size="small" />
-              <Chip label={durationLabel(round.started_at, round.completed_at)} size="small" />
-              <Chip label={`${stats.clubsUsed.size} clubs used`} size="small" />
-            </Stack>
-          </CardContent>
-        </Card>
-
-        <Scorecard
-          playerName={fullName(profile?.first_name, profile?.last_name)}
-          handicap={round.handicap_differential != null ? Math.round(round.handicap_differential) : null}
-          holes={holes}
-        />
-
-        <Box
-          sx={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(2, 1fr)',
-            gap: 1.5
-          }}
-        >
-          <StatCard label="Putts" value={stats.putts} />
-          <StatCard label="GIR" value={`${stats.greensInRegulation}/${round.holes_played}`} />
-          <StatCard label="Fairways Hit" value={`${stats.fairwaysHitPct}%`} accent="success" />
-          <StatCard label="Sand Shots" value={stats.sandShots} />
-          <StatCard label="Miss Left" value={`${stats.missLeftPct}%`} />
-          <StatCard label="Miss Right" value={`${stats.missRightPct}%`} />
-          <StatCard label="Penalties" value={stats.penaltyCount} accent="warning" />
-          <StatCard label="Round Time" value={durationLabel(round.started_at, round.completed_at)} />
-        </Box>
-
-        {stats.clubsUsed.size > 0 && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-            <CardContent>
-              <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
-                Clubs Used
-              </Typography>
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75, mt: 1 }}>
-                {[...stats.clubsUsed].map((clubId) => {
-                  const club = bag.find((c) => c.clubId === clubId);
-                  return (
-                    <Chip key={clubId} label={club ? club.customName || club.name : 'Club'} size="small" />
-                  );
-                })}
-              </Box>
+                <Typography
+                  variant="h2"
+                  color="primary"
+                  sx={{ fontWeight: 800 }}
+                >
+                  {scoreVsPar(stats.totalScore, stats.totalPar)}
+                </Typography>
+                <Typography variant="h5" sx={{ fontWeight: 700 }}>
+                  {stats.totalScore}
+                </Typography>
+                <Typography variant="body2" color="text.secondary">
+                  par {stats.totalPar}
+                </Typography>
+              </Stack>
+              <Stack direction="row" spacing={1} mt={1}>
+                <Chip label={`${round.holes_played} holes`} size="small" />
+                <Chip
+                  label={durationLabel(round.started_at, round.completed_at)}
+                  size="small"
+                />
+                <Chip
+                  label={`${stats.clubsUsed.size} clubs used`}
+                  size="small"
+                />
+              </Stack>
             </CardContent>
           </Card>
-        )}
 
-        <Button
-          variant="contained"
-          size="large"
-          startIcon={<HomeRoundedIcon />}
-          onClick={() => navigate('/')}
-        >
-          Done
-        </Button>
-        <Typography variant="caption" color="text.secondary" align="center">
-          Estimated handicap only. Not an official USGA handicap.
-        </Typography>
-      </Stack>
+          <Scorecard
+            playerName={fullName(profile?.first_name, profile?.last_name)}
+            handicap={
+              round.handicap_differential != null
+                ? Math.round(round.handicap_differential)
+                : null
+            }
+            holes={holes}
+          />
+
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "repeat(2, 1fr)",
+              gap: 1.5,
+            }}
+          >
+            <StatCard label="Putts" value={stats.putts} />
+            <StatCard
+              label="GIR"
+              value={`${stats.greensInRegulation}/${round.holes_played}`}
+            />
+            <StatCard
+              label="Fairways Hit"
+              value={`${stats.fairwaysHitPct}%`}
+              accent="success"
+            />
+            <StatCard label="Sand Shots" value={stats.sandShots} />
+            <StatCard label="Miss Left" value={`${stats.missLeftPct}%`} />
+            <StatCard label="Miss Right" value={`${stats.missRightPct}%`} />
+            <StatCard
+              label="Penalties"
+              value={stats.penaltyCount}
+              accent="warning"
+            />
+            <StatCard
+              label="Round Time"
+              value={durationLabel(round.started_at, round.completed_at)}
+            />
+          </Box>
+
+          {stats.clubsUsed.size > 0 && (
+            <Card
+              elevation={0}
+              sx={{ bgcolor: "background.paper", borderRadius: "5px" }}
+            >
+              <CardContent>
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ textTransform: "uppercase", letterSpacing: 0.6 }}
+                >
+                  Clubs Used
+                </Typography>
+                <Box
+                  sx={{ display: "flex", flexWrap: "wrap", gap: 0.75, mt: 1 }}
+                >
+                  {[...stats.clubsUsed].map((clubId) => {
+                    const club = bag.find((c) => c.clubId === clubId);
+                    return (
+                      <Chip
+                        key={clubId}
+                        label={club ? club.customName || club.name : "Club"}
+                        size="small"
+                      />
+                    );
+                  })}
+                </Box>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Only while the round is still open. Once `completed_at` is set it
+            disappears on the next refetch, so its absence doubles as the
+            confirmation that the round actually closed. */}
+          {!round.completed_at && (
+            <>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                align="center"
+              >
+                {`Clicking Round Completed will saves ${stats.totalScore} strokes over ${round.holes_played} ${
+                  round.holes_played === 1 ? "hole" : "holes"
+                } and closes this round out.`}
+              </Typography>
+              <Button
+                variant="contained"
+                size="large"
+                startIcon={<CheckCircleRoundedIcon />}
+                onClick={() => setConfirmComplete(true)}
+              >
+                Round Completed
+              </Button>
+            </>
+          )}
+
+          <Button
+            // Secondary while the round is still open so "Round Completed" reads
+            // as the primary action; the only button once it's closed out.
+            variant={round.completed_at ? "contained" : "outlined"}
+            size="large"
+            startIcon={<HomeRoundedIcon />}
+            onClick={() => navigate("/")}
+          >
+            Close & Return Home
+          </Button>
+          <Typography variant="caption" color="text.secondary" align="center">
+            Estimated handicap only. Not an official USGA handicap.
+          </Typography>
+        </Stack>
       )}
 
-      {tab === 'holes' && (
+      {tab === "holes" && (
         <HolesTab
           roundId={round.id}
           courseId={round.course_id}
@@ -427,6 +607,66 @@ export function RoundSummaryPage() {
         round={round}
         holes={holes}
       />
+
+      <Dialog
+        open={confirmComplete}
+        // Not dismissable mid-write: closing while the update is in flight
+        // would leave the golfer with no idea whether it landed.
+        onClose={() => !completing && setConfirmComplete(false)}
+        fullWidth
+        maxWidth="xs"
+      >
+        <DialogTitle>Complete this round?</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            {`Clicking Round Complete will save ${stats.totalScore} strokes (${scoreVsPar(
+              stats.totalScore,
+              stats.totalPar,
+            )}) over ${round.holes_played} ${
+              round.holes_played === 1 ? "hole" : "holes"
+            } and marks the round complete.`}
+          </Typography>
+
+          {round.holes_played < 18 && (
+            <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+              {`You've played ${round.holes_played} of 18 holes — the round will be recorded as it stands.`}
+            </Typography>
+          )}
+          {submitsToTournament && (
+            <Alert severity="warning" sx={{ mt: 1.5 }}>
+              This submits your scorecard to the tournament, which locks it.
+              Later changes won&apos;t be sent.
+            </Alert>
+          )}
+          {completeError && (
+            <Alert severity="error" sx={{ mt: 1.5 }}>
+              {completeError}
+            </Alert>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => setConfirmComplete(false)}
+            disabled={completing}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="contained"
+            onClick={() => void completeRound()}
+            disabled={completing}
+            startIcon={
+              completing ? (
+                <CircularProgress size={16} color="inherit" />
+              ) : (
+                <CheckCircleRoundedIcon />
+              )
+            }
+          >
+            {completing ? "Saving…" : "Complete round"}
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 }
@@ -449,10 +689,15 @@ interface HoleDraft {
   putts: string;
 }
 
-function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) {
+function EditRoundDialog({
+  open,
+  onClose,
+  round,
+  holes,
+}: EditRoundDialogProps) {
   const queryClient = useQueryClient();
   const userId = useAuthStore((s) => s.session?.user.id);
-  const [datePlayed, setDatePlayed] = useState<string>('');
+  const [datePlayed, setDatePlayed] = useState<string>("");
   const [drafts, setDrafts] = useState<HoleDraft[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -471,17 +716,19 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
         const existing = holes.find((h) => h.hole_number === num);
         return {
           holeNumber: num,
-          par: existing ? String(existing.par) : '4',
-          strokes: existing ? String(existing.strokes) : '0',
-          putts: existing ? String(existing.putts) : '0'
+          par: existing ? String(existing.par) : "4",
+          strokes: existing ? String(existing.strokes) : "0",
+          putts: existing ? String(existing.putts) : "0",
         };
-      })
+      }),
     );
     setError(null);
   }, [open, round, holes]);
 
   const updateDraft = (idx: number, patch: Partial<HoleDraft>) => {
-    setDrafts((prev) => prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)));
+    setDrafts((prev) =>
+      prev.map((d, i) => (i === idx ? { ...d, ...patch } : d)),
+    );
   };
 
   const totals = useMemo(() => {
@@ -496,7 +743,7 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
 
   const save = useMutation({
     mutationFn: async () => {
-      if (!userId) throw new Error('Not authenticated');
+      if (!userId) throw new Error("Not authenticated");
       // Validate. We catch the common foot-guns: putts > strokes, par out of
       // range. Backend has no constraint on these so client-side is the only
       // gate.
@@ -514,7 +761,9 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
           throw new Error(`Hole ${d.holeNumber}: putts must be 0–10.`);
         }
         if (putts > strokes) {
-          throw new Error(`Hole ${d.holeNumber}: putts can't exceed total strokes.`);
+          throw new Error(
+            `Hole ${d.holeNumber}: putts can't exceed total strokes.`,
+          );
         }
       }
 
@@ -533,7 +782,7 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
         score_vs_par: totalStrokes - totalPar,
         // Invalidate the cached differential — useRoundDetails recomputes
         // it on next mount when null, which is what we want post-edit.
-        handicap_differential: null
+        handicap_differential: null,
       });
 
       // Upsert each hole. round_id + hole_number is the conflict key. Keep
@@ -553,19 +802,19 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
           sand: existing?.sand ?? false,
           gir: existing?.gir ?? false,
           clubs_used: existing?.clubs_used ?? [],
-          yardage: existing?.yardage ?? null
+          yardage: existing?.yardage ?? null,
         };
       });
       await roundRepo.upsertHoles(upserts);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['round-detail', round.id] });
-      queryClient.invalidateQueries({ queryKey: ['rounds', userId] });
+      queryClient.invalidateQueries({ queryKey: ["round-detail", round.id] });
+      queryClient.invalidateQueries({ queryKey: ["rounds", userId] });
       onClose();
     },
     onError: (err) => {
       setError(toAppError(err).message);
-    }
+    },
   });
 
   const onSubmit = () => {
@@ -583,9 +832,16 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
       fullWidth
       maxWidth="sm"
       scroll="paper"
-      PaperProps={{ sx: { borderRadius: '5px' } }}
+      PaperProps={{ sx: { borderRadius: "5px" } }}
     >
-      <DialogTitle sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', pr: 1 }}>
+      <DialogTitle
+        sx={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          pr: 1,
+        }}
+      >
         Edit Round
         <IconButton onClick={onClose} disabled={save.isPending} size="small">
           <CloseRoundedIcon />
@@ -607,29 +863,45 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
             <Typography
               variant="caption"
               color="text.secondary"
-              sx={{ textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: 700 }}
+              sx={{
+                textTransform: "uppercase",
+                letterSpacing: 0.6,
+                fontWeight: 700,
+              }}
             >
               Scorecard
             </Typography>
 
             <Box
               sx={{
-                display: 'grid',
-                gridTemplateColumns: '40px 1fr 1fr 1fr',
+                display: "grid",
+                gridTemplateColumns: "40px 1fr 1fr 1fr",
                 columnGap: 1,
                 rowGap: 0.5,
-                alignItems: 'center',
-                mt: 1
+                alignItems: "center",
+                mt: 1,
               }}
             >
               <Box />
-              <Typography variant="caption" color="text.secondary" align="center">
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                align="center"
+              >
                 Par
               </Typography>
-              <Typography variant="caption" color="text.secondary" align="center">
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                align="center"
+              >
                 Strokes
               </Typography>
-              <Typography variant="caption" color="text.secondary" align="center">
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                align="center"
+              >
                 Putts
               </Typography>
 
@@ -647,7 +919,7 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
               direction="row"
               justifyContent="flex-end"
               spacing={2}
-              sx={{ mt: 1.5, pt: 1, borderTop: 1, borderColor: 'divider' }}
+              sx={{ mt: 1.5, pt: 1, borderTop: 1, borderColor: "divider" }}
             >
               <Typography variant="body2" color="text.secondary">
                 Par {totals.par}
@@ -655,7 +927,11 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
               <Typography variant="body2" sx={{ fontWeight: 700 }}>
                 Total {totals.strokes}
               </Typography>
-              <Typography variant="body2" color="primary" sx={{ fontWeight: 700 }}>
+              <Typography
+                variant="body2"
+                color="primary"
+                sx={{ fontWeight: 700 }}
+              >
                 {scoreVsPar(totals.strokes, totals.par)}
               </Typography>
             </Stack>
@@ -668,8 +944,12 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
         <Button onClick={onClose} disabled={save.isPending}>
           Cancel
         </Button>
-        <Button variant="contained" onClick={onSubmit} disabled={save.isPending}>
-          {save.isPending ? 'Saving…' : 'Save'}
+        <Button
+          variant="contained"
+          onClick={onSubmit}
+          disabled={save.isPending}
+        >
+          {save.isPending ? "Saving…" : "Save"}
         </Button>
       </DialogActions>
     </Dialog>
@@ -679,7 +959,7 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
 function HoleEditRow({
   draft,
   onChange,
-  disabled
+  disabled,
 }: {
   draft: HoleDraft;
   onChange: (patch: Partial<HoleDraft>) => void;
@@ -687,7 +967,7 @@ function HoleEditRow({
 }) {
   return (
     <>
-      <Typography variant="body2" sx={{ fontWeight: 700, textAlign: 'center' }}>
+      <Typography variant="body2" sx={{ fontWeight: 700, textAlign: "center" }}>
         {draft.holeNumber}
       </Typography>
       <NumberCell
@@ -720,7 +1000,7 @@ function NumberCell({
   onChange,
   disabled,
   min,
-  max
+  max,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -731,15 +1011,19 @@ function NumberCell({
   return (
     <TextField
       value={value}
-      onChange={(e) => onChange(e.target.value.replace(/[^\d]/g, ''))}
+      onChange={(e) => onChange(e.target.value.replace(/[^\d]/g, ""))}
       type="number"
       size="small"
       disabled={disabled}
       inputProps={{
-        inputMode: 'numeric',
+        inputMode: "numeric",
         min,
         max,
-        style: { textAlign: 'center', padding: '6px 0', fontVariantNumeric: 'tabular-nums' }
+        style: {
+          textAlign: "center",
+          padding: "6px 0",
+          fontVariantNumeric: "tabular-nums",
+        },
       }}
     />
   );
@@ -749,8 +1033,8 @@ function NumberCell({
 function isoToDateInput(iso: string): string {
   const d = new Date(iso);
   const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
   return `${y}-${m}-${day}`;
 }
 
@@ -762,33 +1046,63 @@ function isoToDateInput(iso: string): string {
  */
 function dateInputToIso(s: string): string {
   if (!s) return new Date().toISOString();
-  const [y, m, d] = s.split('-').map(Number);
+  const [y, m, d] = s.split("-").map(Number);
   if (!y || !m || !d) return new Date().toISOString();
   return new Date(y, m - 1, d, 12, 0, 0, 0).toISOString();
 }
 
 interface ScoreCardProps {
-  holes: Array<{ hole_number: number; par: number; strokes: number; penalty_strokes: number }>;
+  holes: Array<{
+    hole_number: number;
+    par: number;
+    strokes: number;
+    penalty_strokes: number;
+  }>;
   frontTotal: number;
   frontPar: number;
   backTotal: number;
   backPar: number;
 }
 
-function ScoreCard({ holes, frontTotal, frontPar, backTotal, backPar }: ScoreCardProps) {
+function ScoreCard({
+  holes,
+  frontTotal,
+  frontPar,
+  backTotal,
+  backPar,
+}: ScoreCardProps) {
   const front = holes.filter((h) => h.hole_number <= 9);
   const back = holes.filter((h) => h.hole_number > 9);
 
   return (
-    <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+    <Card
+      elevation={0}
+      sx={{ bgcolor: "background.paper", borderRadius: "5px" }}
+    >
       <CardContent>
-        <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+        <Typography
+          variant="caption"
+          color="text.secondary"
+          sx={{ textTransform: "uppercase", letterSpacing: 0.6 }}
+        >
           Scorecard
         </Typography>
-        <Box sx={{ overflowX: 'auto', mt: 1 }}>
-          <NineRow label="Front 9" holes={front} totalLabel="OUT" total={frontTotal} parTotal={frontPar} />
+        <Box sx={{ overflowX: "auto", mt: 1 }}>
+          <NineRow
+            label="Front 9"
+            holes={front}
+            totalLabel="OUT"
+            total={frontTotal}
+            parTotal={frontPar}
+          />
           {back.length > 0 && (
-            <NineRow label="Back 9" holes={back} totalLabel="IN" total={backTotal} parTotal={backPar} />
+            <NineRow
+              label="Back 9"
+              holes={back}
+              totalLabel="IN"
+              total={backTotal}
+              parTotal={backPar}
+            />
           )}
         </Box>
       </CardContent>
@@ -801,10 +1115,15 @@ function NineRow({
   holes,
   totalLabel,
   total,
-  parTotal
+  parTotal,
 }: {
   label: string;
-  holes: Array<{ hole_number: number; par: number; strokes: number; penalty_strokes: number }>;
+  holes: Array<{
+    hole_number: number;
+    par: number;
+    strokes: number;
+    penalty_strokes: number;
+  }>;
   totalLabel: string;
   total: number;
   parTotal: number;
@@ -816,60 +1135,90 @@ function NineRow({
       </Typography>
       <Box
         sx={{
-          display: 'grid',
+          display: "grid",
           gridTemplateColumns: `repeat(${holes.length}, minmax(36px, 1fr)) 60px`,
           gap: 0.5,
           mt: 0.5,
-          fontVariantNumeric: 'tabular-nums'
+          fontVariantNumeric: "tabular-nums",
         }}
       >
         {holes.map((h) => (
-          <Box key={`hole-${h.hole_number}`} sx={{ textAlign: 'center', fontSize: 12, color: 'text.secondary' }}>
+          <Box
+            key={`hole-${h.hole_number}`}
+            sx={{ textAlign: "center", fontSize: 12, color: "text.secondary" }}
+          >
             {h.hole_number}
           </Box>
         ))}
-        <Box sx={{ textAlign: 'center', fontSize: 12, color: 'text.secondary' }}>{totalLabel}</Box>
+        <Box
+          sx={{ textAlign: "center", fontSize: 12, color: "text.secondary" }}
+        >
+          {totalLabel}
+        </Box>
         {holes.map((h) => (
-          <Box key={`par-${h.hole_number}`} sx={{ textAlign: 'center', fontSize: 12, color: 'text.secondary' }}>
+          <Box
+            key={`par-${h.hole_number}`}
+            sx={{ textAlign: "center", fontSize: 12, color: "text.secondary" }}
+          >
             {h.par}
           </Box>
         ))}
-        <Box sx={{ textAlign: 'center', fontSize: 12, color: 'text.secondary' }}>{parTotal}</Box>
+        <Box
+          sx={{ textAlign: "center", fontSize: 12, color: "text.secondary" }}
+        >
+          {parTotal}
+        </Box>
         {holes.map((h) => {
           const holeScore = h.strokes + h.penalty_strokes;
           return (
             <Box
               key={`s-${h.hole_number}`}
               sx={{
-                textAlign: 'center',
+                textAlign: "center",
                 py: 0.5,
                 borderRadius: 1,
                 fontWeight: 700,
                 bgcolor: scoreColor(holeScore, h.par),
-                color: 'common.white'
+                color: "common.white",
               }}
             >
-              {holeScore || '-'}
+              {holeScore || "-"}
             </Box>
           );
         })}
-        <Box sx={{ textAlign: 'center', py: 0.5, fontWeight: 700 }}>{total || '-'}</Box>
+        <Box sx={{ textAlign: "center", py: 0.5, fontWeight: 700 }}>
+          {total || "-"}
+        </Box>
       </Box>
-      <Typography variant="caption" color="text.secondary" mt={0.5} display="block">
-        Hits {pct(holes.filter((h) => h.strokes + h.penalty_strokes > 0 && h.strokes + h.penalty_strokes <= h.par).length, holes.length)}% to par
+      <Typography
+        variant="caption"
+        color="text.secondary"
+        mt={0.5}
+        display="block"
+      >
+        Hits{" "}
+        {pct(
+          holes.filter(
+            (h) =>
+              h.strokes + h.penalty_strokes > 0 &&
+              h.strokes + h.penalty_strokes <= h.par,
+          ).length,
+          holes.length,
+        )}
+        % to par
       </Typography>
     </Box>
   );
 }
 
 function scoreColor(strokes: number, par: number): string {
-  if (strokes === 0) return 'rgba(255,255,255,0.08)';
+  if (strokes === 0) return "rgba(255,255,255,0.08)";
   const diff = strokes - par;
-  if (diff <= -2) return '#1976d2';
-  if (diff === -1) return '#2e7d32';
-  if (diff === 0) return '#4caf50';
-  if (diff === 1) return '#ef6c00';
-  return '#c62828';
+  if (diff <= -2) return "#1976d2";
+  if (diff === -1) return "#2e7d32";
+  if (diff === 0) return "#4caf50";
+  if (diff === 1) return "#ef6c00";
+  return "#c62828";
 }
 
 // ---------------------------------------------------------------------------
@@ -880,27 +1229,27 @@ function scoreColor(strokes: number, par: number): string {
 // shows 100%, other categories 0%), and a 4-card Hole Stats grid.
 // ---------------------------------------------------------------------------
 
-type HoleCategory = 'birdiePlus' | 'par' | 'bogey' | 'doublePlus';
+type HoleCategory = "birdiePlus" | "par" | "bogey" | "doublePlus";
 const CATEGORY_COLORS: Record<HoleCategory, string> = {
-  birdiePlus: '#3b82f6',
-  par: '#6b7280',
-  bogey: '#ef6c00',
-  doublePlus: '#c62828'
+  birdiePlus: "#3b82f6",
+  par: "#6b7280",
+  bogey: "#ef6c00",
+  doublePlus: "#c62828",
 };
 const CATEGORY_LABELS: Record<HoleCategory, string> = {
-  birdiePlus: 'Birdie+',
-  par: 'Par',
-  bogey: 'Bogey',
-  doublePlus: 'Double+'
+  birdiePlus: "Birdie+",
+  par: "Par",
+  bogey: "Bogey",
+  doublePlus: "Double+",
 };
 
 function categoryFor(score: number, par: number): HoleCategory | null {
   if (score === 0) return null;
   const diff = score - par;
-  if (diff <= -1) return 'birdiePlus';
-  if (diff === 0) return 'par';
-  if (diff === 1) return 'bogey';
-  return 'doublePlus';
+  if (diff <= -1) return "birdiePlus";
+  if (diff === 0) return "par";
+  if (diff === 1) return "bogey";
+  return "doublePlus";
 }
 
 function HolesTab({
@@ -908,7 +1257,7 @@ function HolesTab({
   courseId,
   holes,
   shots,
-  bag
+  bag,
 }: {
   roundId: string;
   courseId: string | null;
@@ -937,9 +1286,9 @@ function HolesTab({
     if (!deletingShot) return;
     try {
       await roundRepo.deleteShot(deletingShot.id);
-      queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      queryClient.invalidateQueries({ queryKey: ["round-detail", roundId] });
     } catch (err) {
-      console.error('[summary] shot delete failed', err);
+      console.error("[summary] shot delete failed", err);
     }
     setDeletingShot(null);
   };
@@ -959,7 +1308,7 @@ function HolesTab({
       startLng: editingShot.start_lng ?? null,
       endLat: editingShot.end_lat ?? null,
       endLng: editingShot.end_lng ?? null,
-      calculatedDistance: editingShot.calculated_distance ?? null
+      calculatedDistance: editingShot.calculated_distance ?? null,
     };
   }, [editingShot]);
 
@@ -976,7 +1325,7 @@ function HolesTab({
     targetResult: TargetResult;
     lie: Lie | null;
     penaltyType: PenaltyType | null;
-    derivedShotResult: import('@/models').ShotResult;
+    derivedShotResult: import("@/models").ShotResult;
     notes: string | null;
     startLat: number | null;
     startLng: number | null;
@@ -1000,19 +1349,19 @@ function HolesTab({
         start_lng: payload.startLng,
         end_lat: payload.endLat,
         end_lng: payload.endLng,
-        calculated_distance: payload.calculatedDistance
+        calculated_distance: payload.calculatedDistance,
       });
       // Refresh the summary data so the edited row re-renders with the
       // new values + any downstream cards (Scorecard, stats) recompute.
-      queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+      queryClient.invalidateQueries({ queryKey: ["round-detail", roundId] });
       setEditingShot(null);
     } catch (err) {
-      console.error('[summary] shot edit failed', err);
+      console.error("[summary] shot edit failed", err);
     }
   };
   const sorted = useMemo(
     () => [...holes].sort((a, b) => a.hole_number - b.hole_number),
-    [holes]
+    [holes],
   );
 
   // Unique clubs used per hole, in the order they were first hit. Looks
@@ -1046,12 +1395,12 @@ function HolesTab({
 
   const nameForClubId = (id: string): string => {
     const c = bag.find((b) => b.clubId === id);
-    return c ? c.customName || c.name : 'Club';
+    return c ? c.customName || c.name : "Club";
   };
   // Default to the first played hole; fall back to hole 1.
   const firstPlayedIdx = sorted.findIndex((h) => h.strokes > 0);
   const [selectedHoleNumber, setSelectedHoleNumber] = useState<number>(
-    sorted[firstPlayedIdx >= 0 ? firstPlayedIdx : 0]?.hole_number ?? 1
+    sorted[firstPlayedIdx >= 0 ? firstPlayedIdx : 0]?.hole_number ?? 1,
   );
 
   const selected =
@@ -1076,11 +1425,11 @@ function HolesTab({
       {/* Horizontal hole strip — tap a card to switch the detail view. */}
       <Box
         sx={{
-          display: 'flex',
+          display: "flex",
           gap: 1,
-          overflowX: 'auto',
+          overflowX: "auto",
           pb: 1,
-          WebkitOverflowScrolling: 'touch'
+          WebkitOverflowScrolling: "touch",
         }}
       >
         {sorted.map((h) => {
@@ -1095,32 +1444,37 @@ function HolesTab({
                 minWidth: 64,
                 px: 1,
                 py: 0.75,
-                borderRadius: '5px',
-                bgcolor: isSelected ? 'rgba(22,163,74,0.22)' : 'background.paper',
+                borderRadius: "5px",
+                bgcolor: isSelected
+                  ? "rgba(22,163,74,0.22)"
+                  : "background.paper",
                 border: 1,
-                borderColor: isSelected ? '#16a34a' : 'divider',
-                textAlign: 'center',
-                cursor: 'pointer',
-                flexShrink: 0
+                borderColor: isSelected ? "#16a34a" : "divider",
+                textAlign: "center",
+                cursor: "pointer",
+                flexShrink: 0,
               }}
             >
               <Typography
                 variant="caption"
                 color="text.secondary"
-                sx={{ display: 'block', lineHeight: 1 }}
+                sx={{ display: "block", lineHeight: 1 }}
               >
                 Hole
               </Typography>
-              <Typography variant="h6" sx={{ fontWeight: 800, lineHeight: 1.1 }}>
+              <Typography
+                variant="h6"
+                sx={{ fontWeight: 800, lineHeight: 1.1 }}
+              >
                 {h.hole_number}
               </Typography>
               <Typography
                 variant="caption"
                 color="text.secondary"
-                sx={{ display: 'block', lineHeight: 1 }}
+                sx={{ display: "block", lineHeight: 1 }}
               >
-                Par {h.par || '—'}
-                {hScore > 0 ? ` · ${hScore}` : ''}
+                Par {h.par || "—"}
+                {hScore > 0 ? ` · ${hScore}` : ""}
               </Typography>
             </Box>
           );
@@ -1130,28 +1484,35 @@ function HolesTab({
       {/* Hole header — number / par on the left, score on right. Score is
           rendered as a plain integer (no decimal) since a single round
           can only yield a whole-stroke total per hole. */}
-      <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+      <Card
+        elevation={0}
+        sx={{ bgcolor: "background.paper", borderRadius: "5px" }}
+      >
         <CardContent>
-          <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
+          <Stack
+            direction="row"
+            justifyContent="space-between"
+            alignItems="flex-start"
+          >
             <Box>
               <Typography variant="h5" sx={{ fontWeight: 800 }}>
                 Hole {selected.hole_number}
               </Typography>
               <Typography variant="body2" color="text.secondary">
-                Par {selected.par || '—'}
+                Par {selected.par || "—"}
               </Typography>
             </Box>
             <Box textAlign="right">
               <Typography variant="h4" sx={{ fontWeight: 800 }}>
-                {played ? score : '—'}
+                {played ? score : "—"}
               </Typography>
               {played && (
                 <Typography
                   variant="body2"
                   sx={{ fontWeight: 700 }}
-                  color={diff <= 0 ? 'primary' : 'warning.main'}
+                  color={diff <= 0 ? "primary" : "warning.main"}
                 >
-                  {diff === 0 ? 'E' : diff > 0 ? `+${diff}` : `${diff}`}
+                  {diff === 0 ? "E" : diff > 0 ? `+${diff}` : `${diff}`}
                 </Typography>
               )}
             </Box>
@@ -1170,7 +1531,11 @@ function HolesTab({
           size="small"
           startIcon={<MapRoundedIcon />}
           onClick={() => setMapHoleNumber(selected.hole_number)}
-          sx={{ borderRadius: '5px', textTransform: 'none', alignSelf: 'flex-start' }}
+          sx={{
+            borderRadius: "5px",
+            textTransform: "none",
+            alignSelf: "flex-start",
+          }}
         >
           View map
         </Button>
@@ -1187,19 +1552,19 @@ function HolesTab({
       </Stack>
       <Box
         sx={{
-          display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
-          gap: 1.5
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: 1.5,
         }}
       >
         <HoleStatCard
           icon={<SportsGolfRoundedIcon fontSize="small" />}
-          value={played ? String(selected.putts) : '—'}
+          value={played ? String(selected.putts) : "—"}
           label="Putts"
         />
         <HoleStatCard
           icon={<GpsFixedRoundedIcon fontSize="small" />}
-          value={played ? (selected.gir ? 'Yes' : 'No') : '—'}
+          value={played ? (selected.gir ? "Yes" : "No") : "—"}
           label="GIR"
         />
         <HoleStatCard
@@ -1212,7 +1577,10 @@ function HolesTab({
       {/* Clubs Used — every distinct club that contributed a shot on this
           hole, in the order it was first hit. Pulled from the shots list
           filtered by hole_id. */}
-      <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+      <Card
+        elevation={0}
+        sx={{ bgcolor: "background.paper", borderRadius: "5px" }}
+      >
         <CardContent>
           <Stack direction="row" alignItems="center" spacing={1} mb={1}>
             <SportsGolfRoundedIcon fontSize="small" color="primary" />
@@ -1230,7 +1598,7 @@ function HolesTab({
               );
             }
             return (
-              <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.75 }}>
+              <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75 }}>
                 {clubIds.map((id) => (
                   <Chip key={id} label={nameForClubId(id)} size="small" />
                 ))}
@@ -1244,7 +1612,10 @@ function HolesTab({
           shows shot #, club, distance, outcome (target_result + lie), and
           any penalty / notes. Sourced from the shots list filtered by
           hole_id (see shotsByHole above). */}
-      <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+      <Card
+        elevation={0}
+        sx={{ bgcolor: "background.paper", borderRadius: "5px" }}
+      >
         <CardContent>
           <Stack direction="row" alignItems="center" spacing={1} mb={1}>
             <FlagRoundedIcon fontSize="small" color="primary" />
@@ -1264,9 +1635,15 @@ function HolesTab({
             return (
               <Stack spacing={1}>
                 {list.map((s) => {
-                  const clubLabel = s.club_id ? nameForClubId(s.club_id) : 'No club';
+                  const clubLabel = s.club_id
+                    ? nameForClubId(s.club_id)
+                    : "No club";
                   const dist = formatShotDistance(s.distance, s.distance_unit);
-                  const outcome = formatShotOutcome(s.target_type, s.target_result, s.lie);
+                  const outcome = formatShotOutcome(
+                    s.target_type,
+                    s.target_result,
+                    s.lie,
+                  );
                   const penalty = formatPenalty(s.penalty_type);
                   return (
                     <Box
@@ -1275,55 +1652,64 @@ function HolesTab({
                       tabIndex={0}
                       onClick={() => setEditingShot(s)}
                       onKeyDown={(e) => {
-                        if (e.key === 'Enter' || e.key === ' ') {
+                        if (e.key === "Enter" || e.key === " ") {
                           e.preventDefault();
                           setEditingShot(s);
                         }
                       }}
                       sx={{
-                        display: 'grid',
+                        display: "grid",
                         // 5 columns: shot#, body, distance, edit icon,
                         // delete icon. Edit + delete are visible
                         // affordances; the row's body still triggers
                         // edit-on-tap. The trash icon has its own
                         // click handler with stopPropagation so it
                         // doesn't bubble to the row click.
-                        gridTemplateColumns: '32px 1fr auto 24px 24px',
-                        alignItems: 'center',
+                        gridTemplateColumns: "32px 1fr auto 24px 24px",
+                        alignItems: "center",
                         columnGap: 1,
                         rowGap: 0.25,
                         py: 0.75,
                         px: 0.5,
                         borderBottom: 1,
-                        borderColor: 'divider',
-                        borderRadius: '5px',
-                        cursor: 'pointer',
-                        '&:hover': {
-                          bgcolor: 'rgba(255,255,255,0.04)',
-                          '& .shot-edit-icon': { opacity: 1 }
+                        borderColor: "divider",
+                        borderRadius: "5px",
+                        cursor: "pointer",
+                        "&:hover": {
+                          bgcolor: "rgba(255,255,255,0.04)",
+                          "& .shot-edit-icon": { opacity: 1 },
                         },
-                        '&:active': { bgcolor: 'rgba(255,255,255,0.06)' },
-                        '&:last-of-type': { borderBottom: 'none' }
+                        "&:active": { bgcolor: "rgba(255,255,255,0.06)" },
+                        "&:last-of-type": { borderBottom: "none" },
                       }}
                     >
                       <Typography
                         variant="caption"
-                        sx={{ fontWeight: 800, color: 'text.secondary' }}
+                        sx={{ fontWeight: 800, color: "text.secondary" }}
                       >
                         #{s.shot_number}
                       </Typography>
                       <Box sx={{ minWidth: 0 }}>
-                        <Typography variant="body2" sx={{ fontWeight: 700 }} noWrap>
+                        <Typography
+                          variant="body2"
+                          sx={{ fontWeight: 700 }}
+                          noWrap
+                        >
                           {clubLabel}
                         </Typography>
-                        <Typography variant="caption" color="text.secondary" noWrap>
-                          {[outcome, penalty].filter(Boolean).join(' · ') || '—'}
-                          {s.notes ? ` · ${s.notes}` : ''}
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          noWrap
+                        >
+                          {[outcome, penalty].filter(Boolean).join(" · ") ||
+                            "—"}
+                          {s.notes ? ` · ${s.notes}` : ""}
                         </Typography>
                       </Box>
                       <Typography
                         variant="body2"
-                        sx={{ fontWeight: 700, textAlign: 'right' }}
+                        sx={{ fontWeight: 700, textAlign: "right" }}
                       >
                         {dist}
                       </Typography>
@@ -1331,13 +1717,13 @@ function HolesTab({
                         className="shot-edit-icon"
                         sx={{
                           fontSize: 18,
-                          color: 'text.secondary',
+                          color: "text.secondary",
                           // 60% opacity baseline so the affordance is
                           // visible at a glance on phone (no hover) but
                           // not loud enough to compete with the shot
                           // content. Lifts to full on hover.
                           opacity: 0.6,
-                          transition: 'opacity 120ms ease'
+                          transition: "opacity 120ms ease",
                         }}
                       />
                       <Box
@@ -1350,24 +1736,24 @@ function HolesTab({
                           setDeletingShot(s);
                         }}
                         onKeyDown={(e) => {
-                          if (e.key === 'Enter' || e.key === ' ') {
+                          if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             e.stopPropagation();
                             setDeletingShot(s);
                           }
                         }}
                         sx={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          cursor: 'pointer',
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          cursor: "pointer",
                           opacity: 0.6,
-                          transition: 'opacity 120ms ease',
-                          '&:hover': { opacity: 1 }
+                          transition: "opacity 120ms ease",
+                          "&:hover": { opacity: 1 },
                         }}
                       >
                         <DeleteOutlineRoundedIcon
-                          sx={{ fontSize: 18, color: 'error.light' }}
+                          sx={{ fontSize: 18, color: "error.light" }}
                         />
                       </Box>
                     </Box>
@@ -1394,13 +1780,13 @@ function HolesTab({
         onClose={() => setDeletingShot(null)}
         fullWidth
         maxWidth="xs"
-        PaperProps={{ sx: { borderRadius: '5px' } }}
+        PaperProps={{ sx: { borderRadius: "5px" } }}
       >
         <DialogTitle>Delete shot?</DialogTitle>
         <DialogContent>
           <Typography variant="body2">
-            Remove shot #{deletingShot?.shot_number} from this hole.
-            This cannot be undone.
+            Remove shot #{deletingShot?.shot_number} from this hole. This cannot
+            be undone.
           </Typography>
         </DialogContent>
         <DialogActions>
@@ -1442,7 +1828,7 @@ function HoleMapDialog({
   shots,
   holes,
   bag,
-  onClose
+  onClose,
 }: {
   open: boolean;
   roundId: string;
@@ -1490,14 +1876,14 @@ function HoleMapDialog({
   // shot row that needs updating on drag-end.
   const orderedShots = useMemo(
     () => allShotsForHole.filter((s) => s.end_lat != null && s.end_lng != null),
-    [allShotsForHole]
+    [allShotsForHole],
   );
 
   // Shots on this hole missing GPS coords. Next-tap-while-editing
   // pins a position onto the FIRST of these in shot-number order.
   const unmappedShots = useMemo(
     () => allShotsForHole.filter((s) => s.end_lat == null || s.end_lng == null),
-    [allShotsForHole]
+    [allShotsForHole],
   );
 
   const shotEndPoints = useMemo<Array<[number, number]>>(
@@ -1507,7 +1893,7 @@ function HoleMapDialog({
         if (opt) return opt;
         return [s.end_lng as number, s.end_lat as number];
       }),
-    [orderedShots, optimisticPositions]
+    [orderedShots, optimisticPositions],
   );
 
   // Per-dot info-box labels (# / club / distance), aligned 1:1 with
@@ -1515,19 +1901,24 @@ function HoleMapDialog({
   const shotLabels = useMemo(
     () =>
       orderedShots.map((s) => {
-        const club = s.club_id ? bag.find((c) => c.clubId === s.club_id) ?? null : null;
+        const club = s.club_id
+          ? (bag.find((c) => c.clubId === s.club_id) ?? null)
+          : null;
         const clubName = club
-          ? abbreviateClubName(club.customName?.trim() || club.name, club.category)
+          ? abbreviateClubName(
+              club.customName?.trim() || club.name,
+              club.category,
+            )
           : null;
         const distance =
           s.distance == null
             ? null
-            : s.distance_unit === 'feet'
+            : s.distance_unit === "feet"
               ? `${Math.round(s.distance)}ft`
               : `${Math.round(s.distance)}y`;
         return { club: clubName, distance };
       }),
-    [orderedShots, bag]
+    [orderedShots, bag],
   );
 
   // Drag-end handler. Looks up the shot by index, recomputes the
@@ -1567,11 +1958,11 @@ function HoleMapDialog({
         await roundRepo.updateShot(s.id, {
           end_lat: lat,
           end_lng: lng,
-          calculated_distance: calculated
+          calculated_distance: calculated,
         });
-        queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+        queryClient.invalidateQueries({ queryKey: ["round-detail", roundId] });
       } catch (err) {
-        console.error('[summary] shot reposition failed', err);
+        console.error("[summary] shot reposition failed", err);
       }
     };
   }, [editMode, orderedShots, queryClient, roundId]);
@@ -1594,11 +1985,11 @@ function HoleMapDialog({
         await roundRepo.updateShot(target.id, {
           end_lat: data.end[1],
           end_lng: data.end[0],
-          calculated_distance: data.calculatedDistanceM
+          calculated_distance: data.calculatedDistanceM,
         });
-        queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
+        queryClient.invalidateQueries({ queryKey: ["round-detail", roundId] });
       } catch (err) {
-        console.error('[summary] add shot position failed', err);
+        console.error("[summary] add shot position failed", err);
       }
     };
   }, [editMode, unmappedShots, queryClient, roundId]);
@@ -1608,7 +1999,7 @@ function HoleMapDialog({
       open={open}
       onClose={onClose}
       fullScreen
-      PaperProps={{ sx: { bgcolor: 'background.default' } }}
+      PaperProps={{ sx: { bgcolor: "background.default" } }}
     >
       <Stack
         direction="row"
@@ -1616,22 +2007,22 @@ function HoleMapDialog({
         justifyContent="space-between"
         sx={{
           // Clear the iOS status bar / time the same way PageHeader does.
-          pt: 'calc(env(safe-area-inset-top) + 8px)',
+          pt: "calc(env(safe-area-inset-top) + 8px)",
           px: 2,
-          pb: 1
+          pb: 1,
         }}
       >
         <Box>
           <Typography variant="h6" sx={{ fontWeight: 800 }}>
-            Hole {holeNumber ?? '—'} map
+            Hole {holeNumber ?? "—"} map
           </Typography>
           {hole && (
             <Typography variant="caption" color="text.secondary">
-              Par {hole.par} · {shotEndPoints.length}{' '}
-              {shotEndPoints.length === 1 ? 'tracked shot' : 'tracked shots'}
+              Par {hole.par} · {shotEndPoints.length}{" "}
+              {shotEndPoints.length === 1 ? "tracked shot" : "tracked shots"}
               {unmappedShots.length > 0
                 ? ` · ${unmappedShots.length} untracked`
-                : ''}
+                : ""}
             </Typography>
           )}
         </Box>
@@ -1647,9 +2038,9 @@ function HoleMapDialog({
               startIcon={<PlayArrowRoundedIcon />}
               onClick={() => setRecapToken((t) => t + 1)}
               sx={{
-                borderRadius: '5px',
-                textTransform: 'none',
-                minWidth: 64
+                borderRadius: "5px",
+                textTransform: "none",
+                minWidth: 64,
               }}
             >
               Recap
@@ -1663,16 +2054,16 @@ function HoleMapDialog({
               still gets the tap-to-add affordance. */}
           {(orderedShots.length > 0 || unmappedShots.length > 0) && (
             <Button
-              variant={editMode ? 'contained' : 'outlined'}
+              variant={editMode ? "contained" : "outlined"}
               size="small"
               onClick={() => setEditMode((v) => !v)}
               sx={{
-                borderRadius: '5px',
-                textTransform: 'none',
-                minWidth: 64
+                borderRadius: "5px",
+                textTransform: "none",
+                minWidth: 64,
               }}
             >
-              {editMode ? 'Done' : 'Edit'}
+              {editMode ? "Done" : "Edit"}
             </Button>
           )}
           <IconButton onClick={onClose} aria-label="close map">
@@ -1685,9 +2076,14 @@ function HoleMapDialog({
           <Typography variant="caption" color="text.secondary">
             Drag any numbered dot to move it.
             {unmappedShots.length > 0 && (
-              <> Tap anywhere on the map to set the position for shot #
+              <>
+                {" "}
+                Tap anywhere on the map to set the position for shot #
                 {unmappedShots[0].shot_number}
-                {unmappedShots.length > 1 ? ` (+${unmappedShots.length - 1} more)` : ''}.
+                {unmappedShots.length > 1
+                  ? ` (+${unmappedShots.length - 1} more)`
+                  : ""}
+                .
               </>
             )}
           </Typography>
@@ -1723,10 +2119,10 @@ function HoleMapDialog({
 // Pretty-prints distance + unit; returns "—" when distance isn't set.
 function formatShotDistance(
   distance: number | null,
-  unit: string | null | undefined
+  unit: string | null | undefined,
 ): string {
-  if (distance == null) return '—';
-  const u = unit === 'feet' ? 'ft' : 'yds';
+  if (distance == null) return "—";
+  const u = unit === "feet" ? "ft" : "yds";
   return `${distance} ${u}`;
 }
 
@@ -1736,47 +2132,52 @@ function formatShotDistance(
 function formatShotOutcome(
   targetType: string | null,
   targetResult: string | null,
-  lie: string | null
+  lie: string | null,
 ): string {
   // Putts use their own vocabulary — "Made", "Missed", or directional miss.
-  if (targetType === 'putt') {
-    if (targetResult === 'made') return 'Made putt';
-    if (!targetResult) return 'Putt';
+  if (targetType === "putt") {
+    if (targetResult === "made") return "Made putt";
+    if (!targetResult) return "Putt";
     return `Putt ${capitalize(targetResult)}`;
   }
   // Non-putts: hit/miss vs the target, with the lie tacked on if it's
   // something noteworthy.
-  let outcome = '';
-  if (targetResult === 'hit') {
-    outcome = targetType === 'green' ? 'Green' : targetType === 'fairway' ? 'Fairway' : 'Hit';
+  let outcome = "";
+  if (targetResult === "hit") {
+    outcome =
+      targetType === "green"
+        ? "Green"
+        : targetType === "fairway"
+          ? "Fairway"
+          : "Hit";
   } else if (targetResult) {
     outcome = `Missed ${targetResult}`;
   }
   // Lie suffix: only call it out if it diverges from "the obvious"
   // (green/fairway for a hit shot — already implied above).
   const liesToCallOut: Record<string, string> = {
-    rough: 'rough',
-    bunker: 'bunker',
-    fringe: 'fringe',
-    penalty: 'penalty',
-    green: 'green'
+    rough: "rough",
+    bunker: "bunker",
+    fringe: "fringe",
+    penalty: "penalty",
+    green: "green",
   };
   const lieLabel = lie ? liesToCallOut[lie] : null;
   if (lieLabel && lieLabel !== outcome.toLowerCase()) {
     outcome = outcome ? `${outcome} (${lieLabel})` : capitalize(lieLabel);
   }
-  return outcome || '—';
+  return outcome || "—";
 }
 
 function formatPenalty(penalty: string | null): string {
-  if (!penalty) return '';
+  if (!penalty) return "";
   const labels: Record<string, string> = {
-    ob: 'OB',
-    water: 'Water',
-    lost_ball: 'Lost ball',
-    unplayable: 'Unplayable',
-    wrong_ball: 'Wrong ball',
-    bunker: 'Bunker'
+    ob: "OB",
+    water: "Water",
+    lost_ball: "Lost ball",
+    unplayable: "Unplayable",
+    wrong_ball: "Wrong ball",
+    bunker: "Bunker",
   };
   return labels[penalty] ?? penalty;
 }
@@ -1786,19 +2187,24 @@ function capitalize(s: string): string {
 }
 
 function fairwayDisplay(par: number, result: string | null): string {
-  if (par < 4) return '—';
-  if (result === 'hit') return '100%';
-  if (result === 'left' || result === 'right' || result === 'short' || result === 'long') {
-    return '0%';
+  if (par < 4) return "—";
+  if (result === "hit") return "100%";
+  if (
+    result === "left" ||
+    result === "right" ||
+    result === "short" ||
+    result === "long"
+  ) {
+    return "0%";
   }
-  return '—';
+  return "—";
 }
 
 function DistributionRow({
   label,
   color,
   pct,
-  count
+  count,
 }: {
   label: string;
   color: string;
@@ -1811,12 +2217,12 @@ function DistributionRow({
         sx={{
           width: 10,
           height: 10,
-          borderRadius: '50%',
+          borderRadius: "50%",
           bgcolor: color,
-          flexShrink: 0
+          flexShrink: 0,
         }}
       />
-      <Typography variant="body2" sx={{ width: 70, color: 'text.secondary' }}>
+      <Typography variant="body2" sx={{ width: 70, color: "text.secondary" }}>
         {label}
       </Typography>
       <LinearProgress
@@ -1825,21 +2231,21 @@ function DistributionRow({
         sx={{
           flex: 1,
           height: 6,
-          borderRadius: '5px',
-          bgcolor: 'rgba(255,255,255,0.08)',
-          '& .MuiLinearProgress-bar': { bgcolor: color, borderRadius: '5px' }
+          borderRadius: "5px",
+          bgcolor: "rgba(255,255,255,0.08)",
+          "& .MuiLinearProgress-bar": { bgcolor: color, borderRadius: "5px" },
         }}
       />
       <Typography
         variant="body2"
-        sx={{ width: 36, textAlign: 'right', fontWeight: 700 }}
+        sx={{ width: 36, textAlign: "right", fontWeight: 700 }}
       >
         {count}
       </Typography>
       <Typography
         variant="caption"
         color="text.secondary"
-        sx={{ width: 46, textAlign: 'right' }}
+        sx={{ width: 46, textAlign: "right" }}
       >
         {pct.toFixed(1)}%
       </Typography>
@@ -1850,25 +2256,28 @@ function DistributionRow({
 function HoleStatCard({
   icon,
   value,
-  label
+  label,
 }: {
   icon: React.ReactNode;
   value: string;
   label: string;
 }) {
   return (
-    <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-      <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+    <Card
+      elevation={0}
+      sx={{ bgcolor: "background.paper", borderRadius: "5px" }}
+    >
+      <CardContent sx={{ py: 1.5, "&:last-child": { pb: 1.5 } }}>
         <Stack direction="row" alignItems="center" spacing={1.25}>
           <Box
             sx={{
               width: 32,
               height: 32,
-              borderRadius: '50%',
-              display: 'grid',
-              placeItems: 'center',
-              bgcolor: 'rgba(22,163,74,0.18)',
-              color: '#16a34a'
+              borderRadius: "50%",
+              display: "grid",
+              placeItems: "center",
+              bgcolor: "rgba(22,163,74,0.18)",
+              color: "#16a34a",
             }}
           >
             {icon}
