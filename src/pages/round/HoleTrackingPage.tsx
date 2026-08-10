@@ -224,7 +224,15 @@ export function HoleTrackingPage() {
       try {
         await ensureGpsPermission();
         const pt = await getCurrentPosition({ maximumAge: 30_000 });
-        if (mounted) setUserLoc({ lat: pt.lat, lng: pt.lng });
+        if (!mounted) return;
+        setUserLoc({ lat: pt.lat, lng: pt.lng });
+        // Seed the blue dot from this same one-shot. The continuous watch can
+        // take many seconds to deliver its first ACCEPTED fix (it demands a
+        // fresh one, `maximumAge: 0`), and until then the golfer opening a
+        // hole would see no dot at all — including right after returning to
+        // the phone from the watch. A cached fix up to 30s old is a fine
+        // starting point; the watch overwrites it as soon as it has better.
+        setLiveFix((prev) => prev ?? pt);
       } catch {
         // Best-effort; at-course detection is non-critical.
       }
