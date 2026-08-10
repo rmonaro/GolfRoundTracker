@@ -12,6 +12,8 @@ import { recommendClub } from '@/features/course/HoleLayout';
 import { watchBridge, type WatchRoundState } from '@/services/watchBridge';
 import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { isUsablyOnline } from '@/services/connectivity';
+import { getCachedCourse } from '@/services/courseCacheRepo';
 
 /**
  * Subscribe the watch to the current round. Activates WCSession on mount and
@@ -52,23 +54,43 @@ export function useWatchSync() {
     enabled: !!active?.courseId,
     staleTime: 1000 * 60 * 30,
     queryFn: async () => {
+      // `enabled` guarantees this, but narrow it explicitly — courseId is
+      // nullable on the round, and the cache lookup is strict about it.
+      const courseId = active?.courseId;
+      if (!courseId) return {} as Record<number, HoleMeta>;
+
+      const toMeta = (
+        rows: Array<Record<string, unknown>>
+      ): Record<number, HoleMeta> => {
+        const map: Record<number, HoleMeta> = {};
+        for (const r of rows) {
+          map[r.hole_number as number] = {
+            par: (r.par as number | null) ?? null,
+            centerlineM: (r.centerline_distance_m as number | null) ?? null,
+            greenLat: (r.green_lat as number | null) ?? null,
+            greenLng: (r.green_lng as number | null) ?? null,
+            pinLat: (r.pin_lat as number | null) ?? null,
+            pinLng: (r.pin_lng as number | null) ?? null
+          };
+        }
+        return map;
+      };
+
+      // Offline: the downloaded course carries full hole rows, which is a
+      // superset of the columns selected below. Without this the watch loses
+      // every distance the moment the phone drops signal — even though the
+      // watch computes distances from its OWN GPS and only needs these coords.
+      if (!isUsablyOnline()) {
+        const cached = await getCachedCourse(courseId);
+        if (cached) return toMeta(cached.holes as unknown as Array<Record<string, unknown>>);
+      }
+
       const { data, error } = await supabase
         .from('holes')
         .select('hole_number, par, centerline_distance_m, green_lat, green_lng, pin_lat, pin_lng')
-        .eq('course_id', active!.courseId);
+        .eq('course_id', courseId);
       if (error) throw error;
-      const map: Record<number, HoleMeta> = {};
-      for (const r of data ?? []) {
-        map[r.hole_number as number] = {
-          par: (r.par as number | null) ?? null,
-          centerlineM: (r.centerline_distance_m as number | null) ?? null,
-          greenLat: (r.green_lat as number | null) ?? null,
-          greenLng: (r.green_lng as number | null) ?? null,
-          pinLat: (r.pin_lat as number | null) ?? null,
-          pinLng: (r.pin_lng as number | null) ?? null
-        };
-      }
-      return map;
+      return toMeta((data ?? []) as Array<Record<string, unknown>>);
     }
   });
 

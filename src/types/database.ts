@@ -102,6 +102,21 @@ export interface CourseRow {
   verified: boolean | null;
   verified_by: string | null;
   verified_at: string | null;
+  // Offline satellite imagery pack (migration 032). Generated per course by
+  // tools/tiler; null means no pack, and the map falls back to online Mapbox —
+  // which is also how non-US courses keep working until NAIP-equivalent imagery
+  // exists for their region.
+  tiles_url: string | null;
+  tiles_generated_at: string | null;
+  /** Zoom range baked into the pack; set as minzoom/maxzoom on the source so
+   *  the client never requests a tile the file doesn't contain. */
+  tiles_min_zoom: number | null;
+  tiles_max_zoom: number | null;
+  tiles_size_bytes: number | null;
+  imagery_source: string | null;
+  /** Required credit line, rendered on the map (NAIP asks for USDA credit). */
+  imagery_attribution: string | null;
+  imagery_captured_at: string | null;
 }
 
 export type TeeGender = 'male' | 'female';

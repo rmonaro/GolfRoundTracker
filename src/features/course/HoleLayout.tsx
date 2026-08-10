@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
-import { Box, Typography } from '@mui/material';
+import { Box, CircularProgress, Typography } from '@mui/material';
 import type { HoleLayoutData } from '@/services/holesRepo';
 import type { BagClub, CourseHole, HoleFeature, Lie, LngLat, TargetResult, TargetType } from '@/models';
 import {
@@ -10,6 +10,9 @@ import {
   type ProjectedBounds
 } from './projectHoleCoords';
 import { hasMapbox, mapboxgl } from './mapbox';
+import { useConnectivity } from '@/features/offline/useConnectivity';
+import { useImagerySource } from './useImagerySource';
+import { TILE_SIZE as PMTILES_TILE_SIZE } from './pmtilesProvider';
 import { formatDistance } from './distance';
 
 interface HoleLayoutProps {
@@ -199,6 +202,32 @@ interface HoleLayoutProps {
 // -------------------- Shared style tokens --------------------
 
 // Mapbox fills sit on top of satellite imagery, so they're semi-transparent.
+const IMAGERY_SOURCE_ID = 'grt-imagery';
+const IMAGERY_LAYER_ID = 'grt-imagery-layer';
+
+/**
+ * A valid but empty Mapbox style.
+ *
+ * Used when our own PMTiles imagery supplies the basemap. Starting from
+ * `satellite-v9` instead would fetch a style document and tiles from
+ * mapbox.com — pointless online (we're about to cover them) and fatal offline.
+ */
+function emptyStyle(): mapboxgl.StyleSpecification {
+  return {
+    version: 8,
+    sources: {},
+    layers: [
+      {
+        id: 'bg',
+        type: 'background',
+        // Dark green rather than black: a tile that hasn't loaded yet reads as
+        // "grass we haven't drawn" instead of a hole in the map.
+        paint: { 'background-color': '#1b2a1f' }
+      }
+    ]
+  } as unknown as mapboxgl.StyleSpecification;
+}
+
 // The same fill color powers the (opaque) SVG fallback so the two render
 // paths feel visually consistent.
 const FEATURE_STYLE: Record<
@@ -851,9 +880,59 @@ export function HoleLayout({
   //   - No Mapbox token in env       → use SVG path (server didn't fail; user didn't pay)
   //   - Mapbox init throws / errors   → flip mapErrored, fall back to SVG
   //   - Otherwise                     → render Mapbox
+  //   - Offline and the map never loaded → SVG (see below)
   const tokenAvailable = hasMapbox();
   const [mapErrored, setMapErrored] = useState(false);
-  const useMapbox = tokenAvailable && !mapErrored;
+  const { isOnline } = useConnectivity();
+  // Whether Mapbox ever got as far as a successful load in this component's
+  // life. Both the style and the tiles come from mapbox.com, so with no signal
+  // the map comes up blank and only falls back after a request fails — going
+  // straight to the SVG render is faster and never shows a broken map.
+  //
+  // Once loaded we DON'T tear it down if signal drops: the tiles for the
+  // current view are already in memory, and a working satellite view beats a
+  // schematic even if panning stops fetching.
+  const [mapEverLoaded, setMapEverLoaded] = useState(false);
+
+  // Which satellite imagery to draw: a downloaded pack, the same pack streamed
+  // from Storage, or Mapbox. Resolving this BEFORE the map is built matters —
+  // the style differs per tier, and switching after the fact means a full
+  // re-init and a visible flash.
+  const imagery = useImagerySource(layout.hole.course_id);
+
+  // A pack renders from bytes already on the device, so it needs NO network —
+  // that is the entire point of downloading one. It therefore must not be gated
+  // on connectivity the way Mapbox is. Without this, a golfer who had saved the
+  // course still dropped to the schematic SVG the moment the component mounted
+  // with no signal (a fresh round, or moving to the next hole), which is
+  // precisely the case the download exists to cover.
+  const usingPack = imagery.ready && imagery.kind !== 'mapbox';
+
+  // NB: this gates the GL map as a whole, not Mapbox-hosted imagery — with a
+  // pack it renders our own tiles on an empty style.
+  const useMapbox = tokenAvailable && !mapErrored && (isOnline || mapEverLoaded || usingPack);
+
+  // The imagery tier resolves ASYNCHRONOUSLY — it reads the pack out of
+  // IndexedDB, which for a 45 MB archive is not instant. Until it lands we
+  // don't yet know whether this hole has a downloaded map, and rendering the
+  // SVG in the meantime is what produced the flash of bare polygons before the
+  // satellite view appeared. Hold a neutral placeholder for that moment instead.
+  //
+  // Scoped to `!useMapbox` deliberately: online, Mapbox wins no matter how the
+  // tier resolves, so the map must still build immediately with no placeholder.
+  const decidingImagery = !imagery.ready && !useMapbox;
+
+  // Give the map another chance rather than leaving it on the SVG for the rest
+  // of the round: when signal returns, and when the imagery tier changes (a
+  // finished download is a different basemap and deserves a fresh attempt —
+  // otherwise an error against Mapbox permanently disqualifies the pack).
+  useEffect(() => {
+    if (isOnline && mapErrored) setMapErrored(false);
+  }, [isOnline, mapErrored]);
+
+  useEffect(() => {
+    setMapErrored(false);
+  }, [imagery.kind, imagery.url]);
 
   const svgRender = useMemo(() => {
     if (useMapbox) return null;
@@ -941,7 +1020,17 @@ export function HoleLayout({
     try {
       map = new mapboxgl.Map({
         container: containerRef.current,
-        style: 'mapbox://styles/mapbox/satellite-v9',
+        // Mapbox satellite whenever the connection is usable — it out-resolves
+        // our packs and keeps serving real tiles past their max zoom. Our own
+        // imagery (downloaded pack, or that pack read by range from Storage on
+        // a degraded connection) takes over when Mapbox can't be reached.
+        // `emptyStyle` gives us a blank canvas to attach the PMTiles raster
+        // layer to — loading the Mapbox satellite style first would fetch tiles
+        // we're not going to show, and would fail outright with no signal.
+        style:
+          imagery.kind === 'mapbox'
+            ? 'mapbox://styles/mapbox/satellite-v9'
+            : emptyStyle(),
         center: [centerLng, centerLat],
         zoom: 16.5,
         bearing,
@@ -982,8 +1071,53 @@ export function HoleLayout({
 
     map.on('error', (e) => {
       console.warn('[mapbox] runtime error', e);
+      // A pack covers the course bbox and nothing else, so panning to its edge
+      // MISSES tiles by design and fires one error event per miss. Those are
+      // expected, not a broken map — and `mapErrored` is sticky while offline
+      // (it clears on reconnect), so treating them as fatal stripped the
+      // imagery for the remainder of the round after a single edge tile.
+      //
+      // Errors carrying no `sourceId` are style/init failures and stay fatal.
+      // So does ANY error on the Mapbox tier: that's how a course with no pack
+      // detects it can't reach mapbox.com and drops to the SVG.
+      const isTileError = !!(e as unknown as { sourceId?: string }).sourceId;
+      if (isTileError && usingPack) return;
       setMapErrored(true);
     });
+
+    // Records that tiles actually arrived, which is what lets the map survive a
+    // later loss of signal instead of dropping to the SVG mid-round.
+    map.on('load', () => setMapEverLoaded(true));
+
+    // With our own imagery the style starts blank, so the basemap is a raster
+    // layer over the PMTiles archive. Added before every other layer so the
+    // hole features, markers and aim line still draw on top.
+    if (imagery.kind !== 'mapbox' && imagery.url && imagery.provider) {
+      map.on('style.load', () => {
+        try {
+          map.addSource(IMAGERY_SOURCE_ID, {
+            type: 'raster',
+            url: imagery.url as string,
+            provider: imagery.provider as string,
+            // 256, not the Mapbox default of 512 — see TILE_SIZE.
+            tileSize: PMTILES_TILE_SIZE,
+            ...(imagery.minZoom != null ? { minzoom: imagery.minZoom } : {}),
+            ...(imagery.maxZoom != null ? { maxzoom: imagery.maxZoom } : {})
+          } as unknown as mapboxgl.SourceSpecification);
+          map.addLayer({
+            id: IMAGERY_LAYER_ID,
+            type: 'raster',
+            source: IMAGERY_SOURCE_ID,
+            paint: { 'raster-fade-duration': 0 }
+          });
+        } catch (err) {
+          // Falling back is better than a blank map: flipping mapErrored sends
+          // the render down the SVG path, which needs no imagery at all.
+          console.warn('[pmtiles] imagery layer failed', err);
+          setMapErrored(true);
+        }
+      });
+    }
 
     // Group features by feature_type so we can register one source per type.
     // Bounds are kept TIGHT — just tee + green — so fitBounds zooms to frame
@@ -2018,7 +2152,13 @@ export function HoleLayout({
     // across renders within a mode via the ref above.
     onShotEndPointMoved != null,
     interactive,
-    recenterRef
+    recenterRef,
+    // Rebuild when the imagery tier changes — a pack finishing its download, or
+    // signal returning, both mean a different basemap.
+    imagery.kind,
+    imagery.url,
+    // Read inside the error handler to decide whether a tile miss is fatal.
+    usingPack
   ]);
 
   // Landing-point marker — add/move/remove imperatively on the live map so a
@@ -2265,6 +2405,17 @@ export function HoleLayout({
   // a 0×0 canvas at construction time. Matches HoleLayoutCard's wrapper.
   const minHeight = compact ? 160 : 240;
 
+  // ----- Still deciding which imagery to draw -----
+  // Same background the map itself starts on, so when the satellite layer
+  // appears it replaces this without a visible step.
+  if (decidingImagery) {
+    return (
+      <Box className={className} sx={{ ...emptyBoxSx, minHeight }}>
+        <CircularProgress size={20} sx={{ color: 'rgba(255,255,255,0.5)' }} />
+      </Box>
+    );
+  }
+
   // ----- SVG fallback path -----
   if (!useMapbox) {
     if (!svgRender) {
@@ -2287,7 +2438,32 @@ export function HoleLayout({
       ref={containerRef}
       className={className}
       sx={{ ...containerSx, position: 'relative', minHeight }}
-    />
+    >
+      {/* Imagery credit. NAIP is public domain but asks for USDA attribution,
+          and the licence is only ours to rely on if we honour that. Rendered
+          only for our own packs — Mapbox draws its own attribution. */}
+      {imagery.attribution && imagery.kind !== 'mapbox' && (
+        <Box
+          component="span"
+          sx={{
+            position: 'absolute',
+            right: 4,
+            bottom: 2,
+            zIndex: 1,
+            px: 0.5,
+            fontSize: '0.55rem',
+            lineHeight: 1.6,
+            color: 'rgba(255,255,255,0.75)',
+            bgcolor: 'rgba(0,0,0,0.35)',
+            borderRadius: 0.5,
+            pointerEvents: 'none',
+            userSelect: 'none'
+          }}
+        >
+          {imagery.attribution}
+        </Box>
+      )}
+    </Box>
   );
 }
 
@@ -2357,13 +2533,27 @@ function buildSvgRender(layout: HoleLayoutData, compact: boolean) {
 
   if (!Number.isFinite(bounds.minX)) return null;
 
-  // Asymmetric padding mirrors the Mapbox fitBounds framing: the hole anchors
-  // toward the top of the viewport, with extra space below + right to clear
-  // the bottom buttons and the floating stats column.
-  const padTop = compact ? 10 : 16;
-  const padBottom = compact ? 90 : 140;
-  const padLeft = compact ? 8 : 16;
-  const padRight = compact ? 70 : 100;
+  // Thin SYMMETRIC margin, matching what the Mapbox path actually does:
+  // `cameraForBounds` is given { top: 10, bottom: 10, left: 10, right: 10 },
+  // so the hole is centred with a small edge margin. (This used to apply
+  // asymmetric padding "to mirror the Mapbox framing" — but that framing had
+  // since become symmetric, so the fallback was mirroring a design that no
+  // longer existed.)
+  //
+  // PROPORTIONAL, because this viewBox is in projected METRES while Mapbox's
+  // padding is in screen pixels. Pixel-magnitude constants meant adding 100 m
+  // to the right of a fairway only ~50 m wide, which rendered the hole in the
+  // left quarter of the screen. One fraction of the hole's own extent, applied
+  // on all four sides, keeps it centred at any hole length.
+  const spanX = bounds.maxX - bounds.minX;
+  const spanY = bounds.maxY - bounds.minY;
+  // Both axes off the SAME span, so a long thin hole doesn't get wildly
+  // different margins horizontally and vertically.
+  const pad = Math.max(spanX, spanY, 1) * (compact ? 0.03 : 0.04);
+  const padTop = pad;
+  const padBottom = pad;
+  const padLeft = pad;
+  const padRight = pad;
   const minX = bounds.minX - padLeft;
   const minY = bounds.minY - padTop;
   const width = bounds.maxX - bounds.minX + padLeft + padRight;

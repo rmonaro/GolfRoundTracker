@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
+  BottomNavigation,
+  BottomNavigationAction,
   Box,
   Button,
   Card,
@@ -7,15 +9,22 @@ import {
   Divider,
   FormControlLabel,
   MenuItem,
+  Paper,
   Stack,
   Switch,
   TextField,
   Typography
 } from '@mui/material';
+import PersonRoundedIcon from '@mui/icons-material/PersonRounded';
+import TuneRoundedIcon from '@mui/icons-material/TuneRounded';
+import CloudDownloadRoundedIcon from '@mui/icons-material/CloudDownloadRounded';
 import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
 import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
 import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded';
 import { useIsAdmin } from '@/admin/hooks/useIsAdmin';
+import { useConnectivity } from '@/features/offline/useConnectivity';
+import { OfflineCoursesCard } from '@/features/offline/OfflineCoursesCard';
+import { isSimulatedOffline, setSimulatedOffline } from '@/services/connectivity';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { watchName } from '@/utils/platform';
@@ -54,6 +63,9 @@ export function SettingsPage() {
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
   const setWatchShotDetection = useSettingsStore((s) => s.setWatchShotDetection);
   const { data: isAdmin } = useIsAdmin();
+  const connectivity = useConnectivity();
+  const [simulateOffline, setSimulateOffline] = useState(isSimulatedOffline);
+  const [tab, setTab] = useState<'profile' | 'settings' | 'courses'>('profile');
 
   const [firstName, setFirstName] = useState(profile?.first_name ?? '');
   const [lastName, setLastName] = useState(profile?.last_name ?? '');
@@ -112,10 +124,15 @@ export function SettingsPage() {
 
   return (
     <Box>
-      <PageHeader title="Settings" />
+      {/* `back` takes an explicit path rather than navigate(-1): Settings is
+          reachable from the bottom nav on any tab, so history could send the
+          user somewhere unrelated. The dashboard is always the right target. */}
+      <PageHeader title="Settings" back="/" />
+
       <Stack
         spacing={2}
         px={2}
+        pt={2}
         pb={4}
         sx={{
           // Unify input + button corners with the cards on this page.
@@ -125,6 +142,8 @@ export function SettingsPage() {
           '& .MuiButtonBase-root.MuiButton-root': { borderRadius: '5px' }
         }}
       >
+        {tab === 'profile' && (
+        <>
         <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
@@ -197,6 +216,28 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
+        <Divider />
+
+        {/* Account-level action, so it sits with the account details rather
+            than among the app preferences. */}
+        <Button
+          variant="text"
+          color="error"
+          startIcon={<LogoutRoundedIcon />}
+          onClick={onSignOut}
+          sx={{ minHeight: 56 }}
+        >
+          Log Out
+        </Button>
+
+        <Typography variant="caption" color="text.secondary" align="center">
+          Estimated handicap only. Not an official USGA handicap.
+        </Typography>
+        </>
+        )}
+
+        {tab === 'settings' && (
+        <>
         <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
           <CardContent>
             <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
@@ -280,6 +321,60 @@ export function SettingsPage() {
           </CardContent>
         </Card>
 
+        {/* ADMIN ONLY. It must stay reachable on a real device — Capacitor
+            serves the production bundle, so a DEV-only gate would hide this
+            exactly where offline behaviour needs testing: on-course, on the
+            phone, with the app killed and relaunched. Trade-off: a developer
+            running locally without an admin account no longer sees this, and
+            has to clear a stuck flag via `window.__grtClearOffline()`. */}
+        {isAdmin && (
+          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+            <CardContent>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+              >
+                Developer
+              </Typography>
+              <Stack mt={1} spacing={0.5}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={simulateOffline}
+                      onChange={(e) => {
+                        setSimulatedOffline(e.target.checked);
+                        setSimulateOffline(e.target.checked);
+                      }}
+                    />
+                  }
+                  label="Simulate offline"
+                />
+                {simulateOffline ? (
+                  // This setting persists across relaunches by design (you need
+                  // it to survive an app kill mid-round), so it has to be loud —
+                  // otherwise it reads as a broken app days later.
+                  <Typography variant="caption" sx={{ color: 'warning.main', fontWeight: 700 }}>
+                    Simulated offline is ON. The app will behave as if it has no
+                    signal until you turn this off, including after a restart.
+                  </Typography>
+                ) : (
+                  <Typography variant="caption" color="text.secondary">
+                    Forces the app to behave as if there's no signal, for testing
+                    offline play.
+                  </Typography>
+                )}
+                <Typography variant="caption" color="text.secondary">
+                  Network state: <strong>{connectivity.status}</strong>
+                  {connectivity.connectionType !== 'unknown' &&
+                    ` (${connectivity.connectionType})`}
+                  .
+                </Typography>
+              </Stack>
+            </CardContent>
+          </Card>
+        )}
+
         {isAdmin && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
@@ -303,23 +398,74 @@ export function SettingsPage() {
             </CardContent>
           </Card>
         )}
+        </>
+        )}
 
-        <Divider />
-
-        <Button
-          variant="text"
-          color="error"
-          startIcon={<LogoutRoundedIcon />}
-          onClick={onSignOut}
-          sx={{ minHeight: 56 }}
-        >
-          Log Out
-        </Button>
-
-        <Typography variant="caption" color="text.secondary" align="center">
-          Estimated handicap only. Not an official USGA handicap.
-        </Typography>
+        {tab === 'courses' && <OfflineCoursesCard />}
       </Stack>
+
+      {/* Section switcher, rendered IN PLACE OF the app's bottom nav —
+          `MobileShell` hides its own nav for /settings (see `ownsBottomBar`)
+          so these two never stack. Styling deliberately mirrors the nav it
+          replaces: same Paper surface, same 80px row, same safe-area padding,
+          so switching sections feels like the nav rather than a second bar. */}
+      <Paper
+        elevation={8}
+        sx={{
+          position: 'fixed',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          borderTop: 1,
+          borderColor: 'divider',
+          bgcolor: 'background.paper',
+          paddingBottom: 'env(safe-area-inset-bottom)',
+          zIndex: 10
+        }}
+      >
+        <BottomNavigation
+          value={tab}
+          // Admin is a LINK, not a section — selecting it would leave the bar
+          // highlighting a panel that renders nothing. Navigate away instead
+          // and leave `tab` untouched, so coming back lands where you left.
+          onChange={(_, v) => (v === 'admin' ? navigate('/admin') : setTab(v))}
+          showLabels
+          sx={{
+            height: 80,
+            paddingTop: '10px',
+            alignItems: 'flex-start',
+            bgcolor: 'transparent'
+          }}
+        >
+          <BottomNavigationAction
+            value="profile"
+            label="Profile"
+            icon={<PersonRoundedIcon />}
+            sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
+          />
+          <BottomNavigationAction
+            value="settings"
+            label="Settings"
+            icon={<TuneRoundedIcon />}
+            sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
+          />
+          <BottomNavigationAction
+            value="courses"
+            label="Courses"
+            icon={<CloudDownloadRoundedIcon />}
+            sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
+          />
+          {/* BottomNavigation skips non-element children, so `false` is safe. */}
+          {isAdmin && (
+            <BottomNavigationAction
+              value="admin"
+              label="Admin"
+              icon={<AdminPanelSettingsRoundedIcon />}
+              sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
+            />
+          )}
+        </BottomNavigation>
+      </Paper>
     </Box>
   );
 }

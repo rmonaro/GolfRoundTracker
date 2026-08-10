@@ -7,6 +7,8 @@ import type {
   LngLat
 } from '@/models';
 import { toAppError } from './errors';
+import { isUsablyOnline } from './connectivity';
+import { getCachedCourse, type CachedCourse } from './courseCacheRepo';
 
 export interface HoleLayoutData {
   hole: CourseHole;
@@ -69,6 +71,79 @@ function minSqDistToHole(c: LngLat, anchors: LngLat[], cosLat: number): number {
   return best;
 }
 
+/**
+ * Assign a course's features to ONE hole by nearest-hole centroid.
+ *
+ * Extracted so the network path and the offline-cache path can't diverge — both
+ * must produce byte-identical layouts, or a hole would render differently
+ * depending on signal.
+ *
+ * We deliberately ignore the stored `hole_id`. The OSM sync assigns features by
+ * "first hole whose (60m-expanded) bbox contains the centroid", but adjacent
+ * holes' bboxes overlap, so a feature often lands on the wrong hole (or none) —
+ * leaving some holes with zero features, which made tap-to-record always fall
+ * back to 'rough'. Nearest-hole assignment is overlap-proof and fixes
+ * already-synced courses without a re-sync.
+ */
+export function assignFeaturesToHole(
+  hole: CourseHole,
+  allHoles: Array<{
+    id: string;
+    tee_lng: number | null;
+    tee_lat: number | null;
+    green_lng: number | null;
+    green_lat: number | null;
+    centerline: Array<[number, number]> | null;
+  }>,
+  allFeatures: HoleFeature[]
+): HoleFeature[] {
+  const cosLat = Math.cos(((hole.green_lat ?? hole.tee_lat ?? 0) * Math.PI) / 180);
+  const holeAnchorList = allHoles.map((h) => ({
+    id: h.id,
+    anchors: holeAnchors(h)
+  }));
+
+  return allFeatures.filter((f) => {
+    const c = centroidOf(flattenFeatureCoords(f.coords));
+    if (!c) return false;
+    let bestId: string | null = null;
+    let bestDist = Infinity;
+    for (const h of holeAnchorList) {
+      if (h.anchors.length === 0) continue;
+      const d = minSqDistToHole(c, h.anchors, cosLat);
+      if (d < bestDist) {
+        bestDist = d;
+        bestId = h.id;
+      }
+    }
+    return bestId === hole.id;
+  });
+}
+
+/**
+ * Build the same `{ data, courseStatus }` shape `getLayout` returns, but from a
+ * downloaded course. Mirrors the network path's short-circuits exactly so an
+ * offline course renders identically to an online one.
+ */
+function layoutFromCache(
+  cached: CachedCourse,
+  holeNumber: number
+): { data: HoleLayoutData | null; courseStatus: CourseOsmStatus | null } {
+  const courseStatus = cached.osmStatus;
+  if (courseStatus === 'skip' || courseStatus === 'no_coverage') {
+    return { data: null, courseStatus };
+  }
+  const hole = cached.holes.find((h) => h.hole_number === holeNumber);
+  if (!hole) return { data: null, courseStatus };
+
+  const features = assignFeaturesToHole(
+    hole,
+    cached.holes as Parameters<typeof assignFeaturesToHole>[1],
+    cached.features
+  );
+  return { data: { hole, features }, courseStatus };
+}
+
 export const holesRepo = {
   /**
    * Fetch the static hole + all assigned features for rendering. Also returns the
@@ -78,6 +153,17 @@ export const holesRepo = {
     courseId: string,
     holeNumber: number
   ): Promise<{ data: HoleLayoutData | null; courseStatus: CourseOsmStatus | null }> {
+    // Offline (or online-but-unusable): serve from the downloaded course. This
+    // is the whole point of the cache — distance-to-pin and the hole render need
+    // coordinates, not connectivity.
+    if (!isUsablyOnline()) {
+      const cached = await getCachedCourse(courseId);
+      if (cached) return layoutFromCache(cached, holeNumber);
+      // No cache and no signal — fall through and let the request fail
+      // normally, so the caller shows its existing error/pending state rather
+      // than a silent blank.
+    }
+
     const { data: course, error: courseErr } = await supabase
       .from('courses')
       .select('osm_status')
@@ -120,28 +206,11 @@ export const holesRepo = {
       .eq('course_id', courseId);
     if (holesErr) throw toAppError(holesErr, 'Could not load course holes');
 
-    const cosLat = Math.cos(((hole.green_lat ?? hole.tee_lat ?? 0) * Math.PI) / 180);
-    const holeAnchorList = (allHoles ?? []).map((h) => ({
-      id: h.id as string,
-      anchors: holeAnchors(h)
-    }));
-
-    const features = (allFeatures ?? []).filter((f) => {
-      const c = centroidOf(flattenFeatureCoords(f.coords));
-      if (!c) return false;
-      // Pick the hole whose geometry is closest to this feature's centroid.
-      let bestId: string | null = null;
-      let bestDist = Infinity;
-      for (const h of holeAnchorList) {
-        if (h.anchors.length === 0) continue;
-        const d = minSqDistToHole(c, h.anchors, cosLat);
-        if (d < bestDist) {
-          bestDist = d;
-          bestId = h.id;
-        }
-      }
-      return bestId === hole.id;
-    }) as HoleFeature[];
+    const features = assignFeaturesToHole(
+      hole as CourseHole,
+      (allHoles ?? []) as Parameters<typeof assignFeaturesToHole>[1],
+      (allFeatures ?? []) as HoleFeature[]
+    );
 
     return {
       data: { hole: hole as CourseHole, features },

@@ -45,6 +45,7 @@ import { useRoundDetails } from '@/features/stats/useRounds';
 import { detailRoundStats } from '@/features/stats/computeStats';
 import { calculateDifferential, isAbsurdDifferential } from '@/utils/handicap';
 import { roundRepo } from '@/services/roundRepo';
+import { newId } from '@/lib/ids';
 import { useRoundStore } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
@@ -621,7 +622,9 @@ function EditRoundDialog({ open, onClose, round, holes }: EditRoundDialogProps) 
       const upserts = drafts.map((d) => {
         const existing = holes.find((h) => h.hole_number === d.holeNumber);
         return {
-          ...(existing ? { id: existing.id } : {}),
+          // Conflict target is the PK now, so every row needs an id: reuse the
+          // existing one, or mint one for a hole the server hasn't seen.
+          id: existing?.id ?? newId(),
           round_id: round.id,
           hole_number: d.holeNumber,
           par: Number(d.par),
@@ -1105,6 +1108,7 @@ function HolesTab({
     const list = holeShotsSorted(addContext.holeId);
     try {
       await roundRepo.addShot({
+        id: newId(),
         round_id: roundId,
         hole_id: addContext.holeId,
         // Append at the end; the reorder controls move it into position.
@@ -2058,6 +2062,7 @@ function HoleMapDialog({
         const yards = Math.round(data.calculatedDistanceM * 1.0936133);
         try {
           await roundRepo.addShot({
+            id: newId(),
             round_id: roundId,
             hole_id: hole.id,
             // Append at the end; reorder in the shot list to fix the sequence.

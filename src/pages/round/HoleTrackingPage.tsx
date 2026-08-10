@@ -51,6 +51,8 @@ import { useNavigate, Navigate } from 'react-router-dom';
 import { useRoundStore, type LocalHole, type LocalShot } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { useSettingsStore } from '@/stores/settingsStore';
+import { cacheCourseInBackground } from '@/services/courseCacheRepo';
+import { downloadPackInBackground } from '@/services/coursePackRepo';
 import { useWatchHintsStore } from '@/stores/watchHintsStore';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAutosaveHole } from '@/features/round/useAutosaveHole';
@@ -81,6 +83,10 @@ import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeCompletedTotals, computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
 import { roundRepo } from '@/services/roundRepo';
+import { newId } from '@/lib/ids';
+import { enqueueFinishedRound, syncRound } from '@/services/roundSync';
+import { SyncStatusChip } from '@/features/offline/SyncStatusChip';
+import { PackDownloadChip } from '@/features/offline/PackDownloadChip';
 import { bagRepo } from '@/services/bagRepo';
 import { courseRepo } from '@/services/courseRepo';
 import { holesRepo } from '@/services/holesRepo';
@@ -175,12 +181,17 @@ export function HoleTrackingPage() {
     startLng: number | null;
     currentLat: number | null;
     currentLng: number | null;
+    /** When currentLat/Lng last arrived, so the blue dot can compare the
+     *  watch's freshness against the phone's own fixes instead of treating the
+     *  watch as a last resort. */
+    currentAt: number | null;
   }>({
     active: false,
     startLat: null,
     startLng: null,
     currentLat: null,
-    currentLng: null
+    currentLng: null,
+    currentAt: null
   });
   // GPS shot tracking — capture start on tap, stop captures end + opens
   // AddShotSheet pre-filled with the calculated distance.
@@ -189,6 +200,20 @@ export function HoleTrackingPage() {
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
   const roundTourCompleted = useSettingsStore((s) => s.roundTourCompleted);
   const setRoundTourCompleted = useSettingsStore((s) => s.setRoundTourCompleted);
+
+  // Second chance at the offline course download. `useStartRound` fires both
+  // of these when the round is created, but that's a single attempt: if signal
+  // was weak in the car park it fails silently and the golfer walks out with no
+  // maps — exactly the case this exists to prevent. Retrying on every entry to
+  // the round screen makes it self-healing, and also covers resumed rounds and
+  // any round started before these downloads existed.
+  //
+  // Both calls are cheap no-ops once the data is on the device.
+  useEffect(() => {
+    if (!active?.courseId) return;
+    cacheCourseInBackground(active.courseId);
+    downloadPackInBackground(active.courseId, active.courseName ?? null);
+  }, [active?.courseId, active?.courseName]);
 
   // At-course detection. Skipped entirely when GPS is disabled.
   const courseQuery = useQuery({
@@ -204,7 +229,15 @@ export function HoleTrackingPage() {
       try {
         await ensureGpsPermission();
         const pt = await getCurrentPosition({ maximumAge: 30_000 });
-        if (mounted) setUserLoc({ lat: pt.lat, lng: pt.lng });
+        if (!mounted) return;
+        setUserLoc({ lat: pt.lat, lng: pt.lng });
+        // Seed the blue dot from this same one-shot. The continuous watch can
+        // take many seconds to deliver its first ACCEPTED fix (it demands a
+        // fresh one, `maximumAge: 0`), and until then the golfer opening a
+        // hole would see no dot at all — including right after returning to
+        // the phone from the watch. A cached fix up to 30s old is a fine
+        // starting point; the watch overwrites it as soon as it has better.
+        setLiveFix((prev) => prev ?? pt);
       } catch {
         // Best-effort; at-course detection is non-critical.
       }
@@ -908,27 +941,49 @@ export function HoleTrackingPage() {
   // + state so the map re-renders on change but stale sources can't erase it.
   const [dotPos, setDotPos] = useState<[number, number] | null>(null);
   useEffect(() => {
-    const fixes = [autoTrack.latestFix, liveFix].filter(
-      (f): f is GpsPoint => f != null
-    );
-    if (fixes.length > 0) {
-      const best = fixes.reduce((x, y) => (y.timestamp >= x.timestamp ? y : x));
-      setDotPos([best.lng, best.lat]);
-    } else if (
-      watchTracking.active &&
-      watchTracking.currentLat != null &&
-      watchTracking.currentLng != null
-    ) {
-      setDotPos([watchTracking.currentLng, watchTracking.currentLat]);
+    // The WATCH is a first-class source here, not a last resort.
+    //
+    // It used to be consulted only when the phone had no fix at all, so a phone
+    // fix from ten minutes ago — the handset asleep in a pocket, its watcher
+    // long since quiet — beat the watch's current position. The dot then sat
+    // where the golfer used to be while the watch knew exactly where they were.
+    // Ranking every source by recency fixes that; the watch is usually the
+    // freshest during play, because it's the device actually being carried.
+    const candidates: Array<{ lng: number; lat: number; at: number }> = [];
+    if (autoTrack.latestFix) {
+      candidates.push({
+        lng: autoTrack.latestFix.lng,
+        lat: autoTrack.latestFix.lat,
+        at: autoTrack.latestFix.timestamp
+      });
     }
+    if (liveFix) {
+      candidates.push({ lng: liveFix.lng, lat: liveFix.lat, at: liveFix.timestamp });
+    }
+    if (
+      watchTracking.currentLat != null &&
+      watchTracking.currentLng != null &&
+      watchTracking.currentAt != null
+    ) {
+      candidates.push({
+        lng: watchTracking.currentLng,
+        lat: watchTracking.currentLat,
+        at: watchTracking.currentAt
+      });
+    }
+    if (candidates.length === 0) return;
+    const best = candidates.reduce((x, y) => (y.at >= x.at ? y : x));
+    setDotPos((prev) =>
+      prev && prev[0] === best.lng && prev[1] === best.lat ? prev : [best.lng, best.lat]
+    );
     // Intentionally no `else setDotPos(null)` — keep the last known position so
     // the dot never disappears mid-round when every source briefly goes quiet.
   }, [
     autoTrack.latestFix,
     liveFix,
-    watchTracking.active,
     watchTracking.currentLat,
-    watchTracking.currentLng
+    watchTracking.currentLng,
+    watchTracking.currentAt
   ]);
 
   // Always-on live-location watch. Runs whenever GPS is enabled — including
@@ -1291,7 +1346,7 @@ export function HoleTrackingPage() {
 
     if (editingShot) {
       // EDIT path — update the existing shot in place.
-      updateShotLocal(hole.holeNumber, editingShot.tempId, {
+      updateShotLocal(hole.holeNumber, editingShot.id, {
         clubId,
         shotResult: derivedShotResult,
         targetType,
@@ -1314,9 +1369,9 @@ export function HoleTrackingPage() {
       setEditingShot(null);
       syncHole(hole.holeNumber);
 
-      if (editingShot.remoteId) {
+      if (editingShot.syncedAt) {
         try {
-          await roundRepo.updateShot(editingShot.remoteId, {
+          await roundRepo.updateShot(editingShot.id, {
             club_id: clubId,
             shot_result: derivedShotResult,
             target_type: targetType,
@@ -1365,9 +1420,11 @@ export function HoleTrackingPage() {
     // Append at the end. A shot logged out of order is moved into position with
     // the up/down reorder controls in the shots list, so add is always append.
     const nextNum = (freshHole?.shots.length ?? hole.shots.length ?? 0) + 1;
-    const tempId = `tmp_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    // Real UUID, minted here: this IS the shots.id primary key, so the row can
+    // be written now or hours later from a queue and still land on one row.
+    const shotId = newId();
     addShotLocal(hole.holeNumber, {
-      tempId,
+      id: shotId,
       shotNumber: nextNum,
       clubId,
       shotResult: derivedShotResult,
@@ -1398,9 +1455,16 @@ export function HoleTrackingPage() {
     syncHole(hole.holeNumber);
 
     try {
-      // Ensure the hole row exists so we have a holeId to point the shot at.
-      if (!hole.holeId) {
-        const saved = await roundRepo.upsertHole({
+      // The hole id is minted locally, so there's no round-trip to wait on —
+      // this used to bail out entirely when the server hadn't named the hole
+      // yet, which is precisely why a shot couldn't be recorded offline.
+      //
+      // Only upsert the parent when the server hasn't confirmed it. Doing it on
+      // every shot would add a round-trip per stroke; the row is normally
+      // created at round start and maintained by useAutosaveHole.
+      if (!hole.syncedAt) {
+        const savedHole = await roundRepo.upsertHole({
+          id: hole.holeId,
           round_id: active.roundId,
           hole_number: hole.holeNumber,
           par: hole.par,
@@ -1413,16 +1477,13 @@ export function HoleTrackingPage() {
           gir: hole.gir,
           clubs_used: hole.clubsUsed
         });
-        useRoundStore.getState().applyHoleIds([saved]);
+        useRoundStore.getState().applyHoleIds([savedHole]);
       }
-      const holeId = useRoundStore
-        .getState()
-        .active?.holes.find((h) => h.holeNumber === hole.holeNumber)?.holeId;
-      if (!holeId) return;
 
-      const persisted = await roundRepo.addShot({
+      await roundRepo.addShot({
+        id: shotId,
         round_id: active.roundId,
-        hole_id: holeId,
+        hole_id: hole.holeId,
         shot_number: nextNum,
         club_id: clubId,
         shot_result: derivedShotResult,
@@ -1443,7 +1504,7 @@ export function HoleTrackingPage() {
         swing_metrics: swingMetrics,
         watch_impact_id: watchImpactId
       });
-      markShotSynced(hole.holeNumber, tempId, persisted.id);
+      markShotSynced(hole.holeNumber, shotId);
 
       // Auto-record typical yardage the first time a non-putter club is
       // used. The recommender depends on `typicalDistanceYards` to suggest
@@ -1520,7 +1581,13 @@ export function HoleTrackingPage() {
     // mapped features first; only fall back to the target-type lie guess /
     // optimistic 'hit' result when features aren't loaded or the point matched
     // no polygon. The golfer still reviews this before verifying.
-    const inferred = inferShotAt(shot.endLat, shot.endLng);
+    // Only classifiable when the shot actually landed somewhere we know about.
+    // A positionless shot (no GPS at the strike) still records — it just can't
+    // be inferred, so it falls back to the target-type guess below.
+    const inferred =
+      shot.endLat != null && shot.endLng != null
+        ? inferShotAt(shot.endLat, shot.endLng)
+        : { targetResult: null, lie: null };
     const tResult: import('@/models').TargetResult = inferred.targetResult ?? 'hit';
     const lie: import('@/models').Lie | null =
       // The swing motion refines the lie the GPS point couldn't: a putt is on
@@ -1534,7 +1601,10 @@ export function HoleTrackingPage() {
     void onSubmitShot({
       clubId: autoClubId,
       clubCategory: club?.category ?? null,
-      distance: Math.round(shot.distanceM * 1.0936133),
+      // Null when the shot couldn't be measured (no fix at one or both ends).
+      // The stroke still counts; the golfer can fill the yardage in on review.
+      distance:
+        shot.distanceM != null ? Math.round(shot.distanceM * 1.0936133) : null,
       distanceUnit: 'yards',
       targetType: tType,
       targetResult: tResult,
@@ -1589,9 +1659,12 @@ export function HoleTrackingPage() {
     const flushed = autoTrack.hasPendingShot()
       ? autoTrack.resolvePendingShot({ lat: endLat, lng: endLng })
       : null;
-    const ballStart = flushed
-      ? { lat: flushed.startLat, lng: flushed.startLng }
-      : msg.startLat != null && msg.startLng != null
+    const ballStart =
+      // A flushed shot can now carry a null start (struck with no fix), so fall
+      // through to the watch's position / tee rather than trusting it blindly.
+      flushed && flushed.startLat != null && flushed.startLng != null
+        ? { lat: flushed.startLat, lng: flushed.startLng }
+        : msg.startLat != null && msg.startLng != null
         ? { lat: msg.startLat, lng: msg.startLng }
         : autoTrackInitialBallPos ??
           (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
@@ -1620,6 +1693,16 @@ export function HoleTrackingPage() {
     const distanceYds =
       calculatedDistanceM != null ? Math.round(calculatedDistanceM * 1.0936133) : null;
 
+    // Same idempotency guard `autoCommitShot` uses. Registering here too means
+    // one strike can't be recorded twice by the two paths (or by a re-delivered
+    // watch message). Only fires when this exact strike is already saved, so it
+    // can't swallow a real shot.
+    const flushedImpactId = flushed?.meta?.watchImpactId ?? null;
+    if (flushedImpactId != null) {
+      if (committedImpactIdsRef.current.has(flushedImpactId)) return;
+      committedImpactIdsRef.current.add(flushedImpactId);
+    }
+
     void onSubmitShot({
       clubId: autoClubId,
       clubCategory: club?.category ?? null,
@@ -1636,7 +1719,18 @@ export function HoleTrackingPage() {
       endLat,
       endLng,
       calculatedDistance: calculatedDistanceM,
-      verified: false
+      verified: false,
+      // Carry the motion data from the strike that OPENED this shot. This path
+      // takes over whenever the WATCH closes a shot — Add Shot, Stop, and every
+      // putt — and it was passing only `meta.clubId`, silently discarding the
+      // swing metrics and heart rate the same `meta` was holding. That is why
+      // metrics appeared on the first shot (committed via the impact path) and
+      // on none of the ones closed from the watch afterwards.
+      swingType: flushed?.meta?.swingType ?? null,
+      swingMetrics: flushed?.meta?.swingMetrics ?? null,
+      // Also the idempotency key, so this shot and a later auto-commit of the
+      // same strike can't both land.
+      watchImpactId: flushed?.meta?.watchImpactId ?? null
     });
 
     watchShotSummaryIdRef.current += 1;
@@ -1703,10 +1797,10 @@ export function HoleTrackingPage() {
     if (!fresh) return;
     await Promise.all(
       fresh.shots
-        .filter((sh) => sh.remoteId)
+        .filter((sh) => sh.syncedAt)
         .map((sh) =>
           roundRepo
-            .updateShot(sh.remoteId!, { shot_number: sh.shotNumber })
+            .updateShot(sh.id, { shot_number: sh.shotNumber })
             .catch((err) => console.warn('[shot] shot_number persist failed', err))
         )
     );
@@ -1720,22 +1814,27 @@ export function HoleTrackingPage() {
     const sorted = [...(fresh?.shots ?? hole.shots)].sort(
       (a, b) => a.shotNumber - b.shotNumber
     );
-    const idx = sorted.findIndex((s) => s.tempId === shot.tempId);
+    const idx = sorted.findIndex((s) => s.id === shot.id);
     const toIndex = idx + dir;
     if (idx < 0 || toIndex < 0 || toIndex >= sorted.length) return;
-    moveShotLocal(hole.holeNumber, shot.tempId, toIndex);
+    moveShotLocal(hole.holeNumber, shot.id, toIndex);
     syncHole(hole.holeNumber);
     void persistShotNumbers(hole.holeNumber);
   };
 
   const onDeleteShot = async (shot: LocalShot) => {
-    removeShotLocal(hole.holeNumber, shot.tempId);
+    removeShotLocal(hole.holeNumber, shot.id);
     syncHole(hole.holeNumber);
-    if (shot.remoteId) {
+    if (shot.syncedAt) {
+      // Tombstone FIRST. A reconciler compares local state to remote and can't
+      // express "this used to exist", so without this a shot deleted offline
+      // just reappears on the next sync.
+      useRoundStore.getState().recordShotDeletion(shot.id, true);
       try {
-        await roundRepo.deleteShot(shot.remoteId);
+        await roundRepo.deleteShot(shot.id);
+        useRoundStore.getState().clearShotTombstones([shot.id]);
       } catch (err) {
-        console.error('[shot] delete failed', err);
+        console.warn('[shot] delete deferred to sync', err);
       }
     }
     // Deleting renumbers the remaining shots locally; push the new numbers so
@@ -1746,10 +1845,10 @@ export function HoleTrackingPage() {
   // Confirm an auto-detected shot — clears its pending-review flag locally and
   // in Supabase. Used by the per-hole verification dialog.
   const verifyShot = async (shot: LocalShot) => {
-    updateShotLocal(hole.holeNumber, shot.tempId, { verified: true });
-    if (shot.remoteId) {
+    updateShotLocal(hole.holeNumber, shot.id, { verified: true });
+    if (shot.syncedAt) {
       try {
-        await roundRepo.updateShot(shot.remoteId, { verified: true });
+        await roundRepo.updateShot(shot.id, { verified: true });
       } catch (err) {
         console.error('[verify] mark verified failed', err);
       }
@@ -1860,15 +1959,21 @@ export function HoleTrackingPage() {
                 startLat: null,
                 startLng: null,
                 currentLat: null,
-                currentLng: null
+                currentLng: null,
+                currentAt: null
               };
             }
+            const gotPosition = msg.currentLat != null && msg.currentLng != null;
             return {
               active: true,
               startLat: msg.startLat ?? prev.startLat,
               startLng: msg.startLng ?? prev.startLng,
               currentLat: msg.currentLat ?? prev.currentLat,
-              currentLng: msg.currentLng ?? prev.currentLng
+              currentLng: msg.currentLng ?? prev.currentLng,
+              // Only restamp when this message actually carried a position —
+              // otherwise a positionless keepalive would make a stale watch
+              // coordinate look freshly measured.
+              currentAt: gotPosition ? Date.now() : prev.currentAt
             };
           });
           return;
@@ -1961,7 +2066,8 @@ export function HoleTrackingPage() {
             startLat: null,
             startLng: null,
             currentLat: null,
-            currentLng: null
+            currentLng: null,
+            currentAt: null
           });
           // Lie auto-fill mirrors AddShotSheet's logic. GPS pair flows
           // through so the next aim line + lastShotEndDistFromGreen reads
@@ -2057,14 +2163,24 @@ export function HoleTrackingPage() {
 
   const finishRound = async () => {
     const score = computeTotalScore(active.holes);
-    try {
-      await roundRepo.update(active.roundId, {
-        score,
-        score_vs_par: score - active.totalPar,
-        completed_at: new Date().toISOString()
-      });
-    } catch (err) {
-      console.error('[round] finish failed', err);
+    const completion = {
+      score,
+      scoreVsPar: score - active.totalPar,
+      completedAt: new Date().toISOString()
+    };
+
+    // Push everything that hasn't landed yet, not just the score columns. A
+    // round played offline has no rows on the server at all, so the old
+    // `update()` here had nothing to update and failed silently.
+    const result = await syncRound(active, completion);
+
+    if (!result.ok) {
+      // Park the whole round before the store is cleared. This is the moment a
+      // golfer believes their round is safe; losing it here would be the worst
+      // possible failure, so the snapshot outlives the active round and the
+      // scheduler keeps retrying until the server confirms it.
+      enqueueFinishedRound(active, completion);
+      console.warn('[round] finish deferred to sync outbox', result.error);
     }
     // Tournament rounds: final push of every played hole with SUBMITTED so TM
     // locks the scorecard. Best-effort; never blocks navigation to the summary.
@@ -2220,11 +2336,23 @@ export function HoleTrackingPage() {
                 </Box>
               )}
             </Typography>
-            <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }} noWrap>
-              {`Hole ${hole.holeNumber} · Par ${displayPar ?? '—'} · ${
-                displayYards ?? '—'
-              } yds`}
-            </Typography>
+            <Stack direction="row" alignItems="center" spacing={0.75}>
+              <Typography
+                variant="subtitle1"
+                sx={{ fontWeight: 700, lineHeight: 1.2 }}
+                noWrap
+              >
+                {`Hole ${hole.holeNumber} · Par ${displayPar ?? '—'} · ${
+                  displayYards ?? '—'
+                } yds`}
+              </Typography>
+              {/* Only appears when there's something unsynced or no signal —
+                  reassurance mid-round that the data is safe. */}
+              <SyncStatusChip compact />
+              {/* Only appears while the course's imagery is downloading, so the
+                  golfer can see the map will be there before signal drops. */}
+              <PackDownloadChip courseId={active.courseId} />
+            </Stack>
           </Box>
           <IconButton
             data-tour="nav"
@@ -3105,6 +3233,14 @@ export function HoleTrackingPage() {
             borderTopLeftRadius: 16,
             borderTopRightRadius: 16,
             maxHeight: '85dvh',
+            // The drawer caps at 85dvh but nothing inside it could scroll, so a
+            // hole with more than a few shots simply CLIPPED the rest — the
+            // later shots were unreachable. This makes the Paper the scroller.
+            overflowY: 'auto',
+            // The round screen locks the document (position: fixed) for the
+            // map, so without containment an overscroll at the list's end
+            // chains to a body that can't scroll and the gesture just dies.
+            overscrollBehavior: 'contain',
             bgcolor: 'background.default'
           }
         }}
@@ -3198,7 +3334,7 @@ export function HoleTrackingPage() {
                   .join(' ');
                 return (
                   <Box
-                    key={s.tempId}
+                    key={s.id}
                     sx={{
                       display: 'flex',
                       alignItems: 'center',
@@ -3350,7 +3486,7 @@ function ShotsCard({
                 .sort((a, b) => a.shotNumber - b.shotNumber)
                 .map((shot, idx, arr) => (
                   <ShotRow
-                    key={shot.tempId}
+                    key={shot.id}
                     shot={shot}
                     bagClubs={bagClubs}
                     canMoveUp={idx > 0}
