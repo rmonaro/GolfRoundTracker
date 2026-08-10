@@ -26,6 +26,7 @@ export type {
   CourseRow as Course,
   CourseTeeRow as CourseTee,
   RoundRow as Round,
+  RoundInsert,
   RoundHoleRow as RoundHole,
   ShotRow as Shot,
   HoleRow as CourseHole,

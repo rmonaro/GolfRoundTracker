@@ -53,6 +53,44 @@ export interface TmLinkResult {
   registrations: Array<{ id: string; tournament_id: string; status: string }>;
 }
 
+// --- Scorer mode (docs/SCORER_MODE.md) -------------------------------------
+
+/** One of the 2-4 players in a tee group the signed-in user is scoring. */
+export interface TmAssignedPlayer {
+  registration_id: string;
+  first_name: string;
+  last_name: string;
+  email: string | null;
+  /**
+   * Null when this player has never opened GRT. They can still be tracked —
+   * the round is attributed by registration_id and claimed by the athlete
+   * later, by email.
+   */
+  grt_athlete_id: string | null;
+  registration_status: string;
+  division: { id: string; name: string } | null;
+  position: number;
+  scorecard: TmRoundScorecard | null;
+}
+
+/** A tee group the signed-in user has been assigned to score. */
+export interface TmScorerAssignment {
+  tee_group_id: string;
+  tee_group_name: string | null;
+  round_number: number;
+  tee_time: string | null;
+  starting_hole: number | null;
+  can_start: boolean;
+  can_start_reason: CanStartReason;
+  tournament: TmTournamentInfo;
+  players: TmAssignedPlayer[];
+}
+
+export interface TmScorerAssignments {
+  scorer: { email: string | null; grt_user_id: string | null };
+  assignments: TmScorerAssignment[];
+}
+
 // --- Outbound push payloads (client → edge fn → TM) ------------------------
 
 export interface TmScoreHole {

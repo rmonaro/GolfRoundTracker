@@ -5,6 +5,7 @@ import type {
   TmLinkResult,
   TmScorePush,
   TmScorecardResult,
+  TmScorerAssignments,
   TmShotsPush
 } from './types';
 
@@ -46,6 +47,15 @@ export const tmIntegrationRepo = {
   /** Explicitly link the signed-in user to their TM registrations by email. */
   link(): Promise<TmLinkResult> {
     return callTm<TmLinkResult>('link');
+  },
+
+  /**
+   * Tee groups the signed-in user was assigned to SCORE, with their players.
+   * The edge function caches the result in `tm_scorer_assignments`, which is
+   * both the offline fallback and the data a scorer push is authorized against.
+   */
+  getScorerAssignments(): Promise<TmScorerAssignments> {
+    return callTm<TmScorerAssignments>('scorer_assignments');
   },
 
   /** Push hole scores (drives TM's live leaderboard). SUBMITTED locks the round. */

@@ -423,14 +423,35 @@ scorer-owned with `pending_athlete_email` set.
 
 ## Phasing
 
-| Phase | Scope | Independently shippable |
-| ----- | ----- | ----------------------- |
-| 1 | TM: migration, scorer API, `TeeTimesTab` UI, `/integration/scorers/assignments` | Yes — admins can assign, nothing consumes it yet |
-| 2 | GRT: migration 034, edge-function actions + ownership gate + `grt_athlete_id` fix | Yes — no UI |
-| 3 | GRT: multi-round store + `roundSync` loop (+ persist migration v2) | Yes — behavior-neutral for existing users, needs careful testing |
+| Phase | Scope | Status |
+| ----- | ----- | ------ |
+| 1 | TM: migration, scorer API, `TeeTimesTab` UI, `/integration/scorers/assignments` | **Built** — TM commit `3a4d41f` |
+| 2 | GRT: migration 034, edge-function action + push authorization + attribution fix | **Built** |
+| 3 | GRT: multi-round store + `roundSync` loop (+ persist migration v2) | Next — behavior-neutral for existing users, needs careful testing |
 | 4 | GRT: scorer UI — assignments list, group page, quick entry, map tap | **First user-visible milestone** |
-| 5 | Ownership transfer, claim, athlete confirm/dispute | Yes |
-| 6 | Precedence (athlete wins), offline hardening for N rounds, field test | Yes |
+| 5 | Ownership transfer, claim, athlete confirm/dispute | |
+| 6 | Precedence (athlete wins), offline hardening for N rounds, field test | |
+
+### Deploy order (both phases)
+
+1. Apply TM migration `…20260810120000_tee_group_scorers.sql`, **then** deploy TM.
+   `GET /api/pairings` embeds `scorers:tee_group_scorers(...)`; code-first is a
+   broken tee sheet.
+2. Apply GRT migration `034_scorer_mode.sql`, **then**
+   `supabase functions deploy tm-integration --no-verify-jwt`. The function
+   selects `rounds.scoring_mode` / `scored_by_user_id`; without them the query
+   errors and pushes silently fall back to the old ownership path.
+
+### Carried into Phase 3/4 (not yet done)
+
+- **Marker rounds must be excluded from the scorer's own history, stats and
+  handicap** (`roundRepo` list queries, the stats aggregations, `PastRoundsPage`).
+  Nothing creates a `MARKER` round before Phase 4, so this is inert until then —
+  but it stops being optional the moment scorer mode records anything.
+- `ActiveRound` gains `scoredByUserId` / `scoringMode` / `athleteName` /
+  `registrationId`, and `roundSync.roundPayload` starts sending the scorer-mode
+  columns for marker rounds. Until then those columns are written only by the
+  edge function.
 
 Phase 3 is the one to be most careful with: it touches a persisted store that
 live rounds depend on, and a bad migration loses somebody's afternoon.

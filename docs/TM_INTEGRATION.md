@@ -210,3 +210,29 @@ every leaderboard row).
   the caller's session/profile — clients can't query/attribute another user.
 - Deploy: `supabase functions deploy tm-integration --no-verify-jwt`, then
   `supabase secrets set TM_BASE_URL=… INTEGRATION_API_KEY=…`. Apply migration 021.
+
+## Scorer mode (migration 034)
+
+An assigned scorekeeper records rounds for the 2–4 players in a tee group. Full
+design in `docs/SCORER_MODE.md`; the pieces that touch this integration:
+
+- **New action** `{ action: 'scorer_assignments' }` →
+  `GET {TM}/api/integration/scorers/assignments`. Returns the tee groups this
+  user was assigned to score and their players. Cached in
+  `public.tm_scorer_assignments` — both the offline fallback and the data a
+  scorer push is authorized against.
+- **Push authorization** is no longer "do you own this?" but "who does this
+  belong to?" — `resolvePushAuth` classifies each `/scores` and `/shots` push as
+  `SELF` or `SCORER` and returns the athlete id to attribute it to.
+- **Attribution is the sharp edge.** A `SCORER` push carries the *athlete's*
+  `grt_athlete_id`, or omits the field entirely when that player has never
+  opened GRT. Stamping the caller's id (what the pre-scorer-mode code did
+  unconditionally) would resolve to the scorer's own registration on the TM side
+  and land a player's strokes on the wrong leaderboard row.
+- Scores and shots still go through the **existing** `/scores` and `/shots`
+  endpoints — they already resolve by `registration_id`, so TM needed no change.
+
+**Deploy order: apply migration 034 before deploying the edge function.** The
+function selects `rounds.scoring_mode` / `scored_by_user_id`; without those
+columns the query errors and every push silently falls back to the old
+`tm_links` path.

@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import type {
   Round,
+  RoundInsert,
   RoundHole,
   Shot,
   FairwayResult,
@@ -19,7 +20,7 @@ export const roundRepo = {
    * is an UPSERT rather than an insert — replaying it after a failed or queued
    * attempt updates the same row instead of creating a second round.
    */
-  async create(payload: Omit<Round, 'id'> & { id: string }): Promise<Round> {
+  async create(payload: RoundInsert): Promise<Round> {
     const { data, error } = await supabase
       .from('rounds')
       .upsert(payload, { onConflict: 'id' })
