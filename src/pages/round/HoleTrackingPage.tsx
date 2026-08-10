@@ -181,12 +181,17 @@ export function HoleTrackingPage() {
     startLng: number | null;
     currentLat: number | null;
     currentLng: number | null;
+    /** When currentLat/Lng last arrived, so the blue dot can compare the
+     *  watch's freshness against the phone's own fixes instead of treating the
+     *  watch as a last resort. */
+    currentAt: number | null;
   }>({
     active: false,
     startLat: null,
     startLng: null,
     currentLat: null,
-    currentLng: null
+    currentLng: null,
+    currentAt: null
   });
   // GPS shot tracking — capture start on tap, stop captures end + opens
   // AddShotSheet pre-filled with the calculated distance.
@@ -936,27 +941,49 @@ export function HoleTrackingPage() {
   // + state so the map re-renders on change but stale sources can't erase it.
   const [dotPos, setDotPos] = useState<[number, number] | null>(null);
   useEffect(() => {
-    const fixes = [autoTrack.latestFix, liveFix].filter(
-      (f): f is GpsPoint => f != null
-    );
-    if (fixes.length > 0) {
-      const best = fixes.reduce((x, y) => (y.timestamp >= x.timestamp ? y : x));
-      setDotPos([best.lng, best.lat]);
-    } else if (
-      watchTracking.active &&
-      watchTracking.currentLat != null &&
-      watchTracking.currentLng != null
-    ) {
-      setDotPos([watchTracking.currentLng, watchTracking.currentLat]);
+    // The WATCH is a first-class source here, not a last resort.
+    //
+    // It used to be consulted only when the phone had no fix at all, so a phone
+    // fix from ten minutes ago — the handset asleep in a pocket, its watcher
+    // long since quiet — beat the watch's current position. The dot then sat
+    // where the golfer used to be while the watch knew exactly where they were.
+    // Ranking every source by recency fixes that; the watch is usually the
+    // freshest during play, because it's the device actually being carried.
+    const candidates: Array<{ lng: number; lat: number; at: number }> = [];
+    if (autoTrack.latestFix) {
+      candidates.push({
+        lng: autoTrack.latestFix.lng,
+        lat: autoTrack.latestFix.lat,
+        at: autoTrack.latestFix.timestamp
+      });
     }
+    if (liveFix) {
+      candidates.push({ lng: liveFix.lng, lat: liveFix.lat, at: liveFix.timestamp });
+    }
+    if (
+      watchTracking.currentLat != null &&
+      watchTracking.currentLng != null &&
+      watchTracking.currentAt != null
+    ) {
+      candidates.push({
+        lng: watchTracking.currentLng,
+        lat: watchTracking.currentLat,
+        at: watchTracking.currentAt
+      });
+    }
+    if (candidates.length === 0) return;
+    const best = candidates.reduce((x, y) => (y.at >= x.at ? y : x));
+    setDotPos((prev) =>
+      prev && prev[0] === best.lng && prev[1] === best.lat ? prev : [best.lng, best.lat]
+    );
     // Intentionally no `else setDotPos(null)` — keep the last known position so
     // the dot never disappears mid-round when every source briefly goes quiet.
   }, [
     autoTrack.latestFix,
     liveFix,
-    watchTracking.active,
     watchTracking.currentLat,
-    watchTracking.currentLng
+    watchTracking.currentLng,
+    watchTracking.currentAt
   ]);
 
   // Always-on live-location watch. Runs whenever GPS is enabled — including
@@ -1666,6 +1693,16 @@ export function HoleTrackingPage() {
     const distanceYds =
       calculatedDistanceM != null ? Math.round(calculatedDistanceM * 1.0936133) : null;
 
+    // Same idempotency guard `autoCommitShot` uses. Registering here too means
+    // one strike can't be recorded twice by the two paths (or by a re-delivered
+    // watch message). Only fires when this exact strike is already saved, so it
+    // can't swallow a real shot.
+    const flushedImpactId = flushed?.meta?.watchImpactId ?? null;
+    if (flushedImpactId != null) {
+      if (committedImpactIdsRef.current.has(flushedImpactId)) return;
+      committedImpactIdsRef.current.add(flushedImpactId);
+    }
+
     void onSubmitShot({
       clubId: autoClubId,
       clubCategory: club?.category ?? null,
@@ -1682,7 +1719,18 @@ export function HoleTrackingPage() {
       endLat,
       endLng,
       calculatedDistance: calculatedDistanceM,
-      verified: false
+      verified: false,
+      // Carry the motion data from the strike that OPENED this shot. This path
+      // takes over whenever the WATCH closes a shot — Add Shot, Stop, and every
+      // putt — and it was passing only `meta.clubId`, silently discarding the
+      // swing metrics and heart rate the same `meta` was holding. That is why
+      // metrics appeared on the first shot (committed via the impact path) and
+      // on none of the ones closed from the watch afterwards.
+      swingType: flushed?.meta?.swingType ?? null,
+      swingMetrics: flushed?.meta?.swingMetrics ?? null,
+      // Also the idempotency key, so this shot and a later auto-commit of the
+      // same strike can't both land.
+      watchImpactId: flushed?.meta?.watchImpactId ?? null
     });
 
     watchShotSummaryIdRef.current += 1;
@@ -1911,15 +1959,21 @@ export function HoleTrackingPage() {
                 startLat: null,
                 startLng: null,
                 currentLat: null,
-                currentLng: null
+                currentLng: null,
+                currentAt: null
               };
             }
+            const gotPosition = msg.currentLat != null && msg.currentLng != null;
             return {
               active: true,
               startLat: msg.startLat ?? prev.startLat,
               startLng: msg.startLng ?? prev.startLng,
               currentLat: msg.currentLat ?? prev.currentLat,
-              currentLng: msg.currentLng ?? prev.currentLng
+              currentLng: msg.currentLng ?? prev.currentLng,
+              // Only restamp when this message actually carried a position —
+              // otherwise a positionless keepalive would make a stale watch
+              // coordinate look freshly measured.
+              currentAt: gotPosition ? Date.now() : prev.currentAt
             };
           });
           return;
@@ -2012,7 +2066,8 @@ export function HoleTrackingPage() {
             startLat: null,
             startLng: null,
             currentLat: null,
-            currentLng: null
+            currentLng: null,
+            currentAt: null
           });
           // Lie auto-fill mirrors AddShotSheet's logic. GPS pair flows
           // through so the next aim line + lastShotEndDistFromGreen reads
@@ -3178,6 +3233,14 @@ export function HoleTrackingPage() {
             borderTopLeftRadius: 16,
             borderTopRightRadius: 16,
             maxHeight: '85dvh',
+            // The drawer caps at 85dvh but nothing inside it could scroll, so a
+            // hole with more than a few shots simply CLIPPED the rest — the
+            // later shots were unreachable. This makes the Paper the scroller.
+            overflowY: 'auto',
+            // The round screen locks the document (position: fixed) for the
+            // map, so without containment an overscroll at the list's end
+            // chains to a body that can't scroll and the gesture just dies.
+            overscrollBehavior: 'contain',
             bgcolor: 'background.default'
           }
         }}
