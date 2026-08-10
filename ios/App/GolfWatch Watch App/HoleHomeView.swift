@@ -467,11 +467,11 @@ struct HoleHomeView: View {
             .frame(maxWidth: .infinity)
             .padding(.vertical, 8)
         } else {
-            let displayed = puttFeetOverride ?? s.distanceFeet
+            let displayed = puttFeetOverride ?? puttFeetToPin(s)
             VStack(spacing: 8) {
                 HStack(spacing: 8) {
                     stepButton(system: "minus") {
-                        puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) - 1)
+                        puttFeetOverride = max(0, (puttFeetOverride ?? puttFeetToPin(s) ?? 0) - 1)
                     }
                     VStack(spacing: 0) {
                         Text(displayed.map { "\($0) ft" } ?? "—")
@@ -485,7 +485,7 @@ struct HoleHomeView: View {
                     }
                     .frame(maxWidth: .infinity)
                     stepButton(system: "plus") {
-                        puttFeetOverride = max(0, (puttFeetOverride ?? s.distanceFeet ?? 0) + 1)
+                        puttFeetOverride = max(0, (puttFeetOverride ?? puttFeetToPin(s) ?? 0) + 1)
                     }
                 }
                 // Bigger, well-separated targets so a fat-finger on "Missed"
@@ -555,7 +555,9 @@ struct HoleHomeView: View {
         // holed out — this is what stops "tapped Made 4× → 4 putts".
         guard !puttSending, madePuttHole != displayedHoleNumber(s) else { return }
         let putterId = s.bag.first(where: { $0.isPutter })?.id ?? effectiveClubId(s)
-        let feet = puttFeetOverride ?? s.distanceFeet
+        // Same source as the number the golfer just read — a putt must never be
+        // recorded at a distance different from the one on screen.
+        let feet = puttFeetOverride ?? puttFeetToPin(s)
         session.recordPutt(clubId: putterId, made: made, distanceFeet: feet)
         puttFeetOverride = nil
         // A made putt locks the panel immediately (optimistic hole-out), so we
@@ -753,6 +755,24 @@ struct HoleHomeView: View {
         return nil
     }
 
+    /// Feet to the pin for the PUTT panel — the number shown, stepped with ±,
+    /// and recorded as the putt's distance.
+    ///
+    /// Prefers the watch's OWN live GPS for exactly the reason `displayDistance`
+    /// does: the phone's pushed `distanceFeet` FREEZES while the phone is
+    /// backgrounded, which is the normal state during play. The putt panel was
+    /// still reading that frozen value, so the same screen could show 30 ft in
+    /// the headline (live GPS) and 117 ft here (stale phone push) — and the
+    /// stale number was the one recorded against the putt.
+    ///
+    /// Falls back to the phone's value only when there's no usable fix.
+    private func puttFeetToPin(_ s: WatchRoundState) -> Int? {
+        if let yards = liveDistanceToDisplayedPin(s) {
+            return Int((yards * 3).rounded())
+        }
+        return s.distanceFeet
+    }
+
     /// Live yards to the displayed hole's pin (uses that hole's pin coords; falls
     /// back to the snapshot's current-hole pin when the per-hole array is empty).
     private func liveDistanceToDisplayedPin(_ s: WatchRoundState) -> Double? {
@@ -766,9 +786,19 @@ struct HoleHomeView: View {
     /// its OWN GPS — independent of the phone. The phone computes an exact
     /// green-polygon test, but that value FREEZES when the phone is backgrounded
     /// (pocketed during play), so the Putt view never armed. This radius is the
-    /// watch's self-sufficient fallback. Tunable: bigger catches long putts from
-    /// the fringe, smaller avoids arming on a chip from just off the green.
-    private let onGreenRadiusYards: Double = 8
+    /// watch's self-sufficient fallback.
+    ///
+    /// Was 8 yards (24 ft), which is SHORTER THAN A NORMAL PUTT — a golfer 30 ft
+    /// from the pin was left off-green by the watch's own test, so putting mode
+    /// only armed when the phone happened to be awake. 15 yards (45 ft) covers
+    /// realistic long putts.
+    ///
+    /// Tunable, and a genuine trade: bigger catches long putts from the fringe,
+    /// smaller avoids arming on a chip from just off the green. Erring large is
+    /// the cheaper mistake here — a wrongly-armed putt view is visible and
+    /// recoverable (the club picker is right there), whereas failing to arm
+    /// means the golfer can't record the putt from the watch at all.
+    private let onGreenRadiusYards: Double = 15
 
     /// Effective on-green for the DISPLAYED hole: the phone's exact result when
     /// it's awake, OR the watch's own GPS-within-radius test so putting mode

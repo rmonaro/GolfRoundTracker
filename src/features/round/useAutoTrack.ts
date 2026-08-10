@@ -49,11 +49,15 @@ export interface ShotMeta {
 }
 
 export interface ShotDetected {
-  startLat: number;
-  startLng: number;
-  endLat: number;
-  endLng: number;
-  distanceM: number;
+  // All NULLABLE. A strike that arrives with no GPS still records a stroke —
+  // a shot with no position beats a shot that never existed, which is what
+  // "the watch missed shots" actually was.
+  startLat: number | null;
+  startLng: number | null;
+  endLat: number | null;
+  endLng: number | null;
+  /** Null when either end of the shot had no fix, so it can't be measured. */
+  distanceM: number | null;
   /** Always 'impact' — shots are detected from watch strikes only. */
   source: 'impact';
   /**
@@ -169,9 +173,12 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   // The in-flight shot's launch point (start). Set on each strike; its END
   // resolves on the NEXT strike — or via resolvePendingShot(). Null = nothing
   // currently in flight.
+  // lat/lng are NULLABLE: a strike can arrive with no GPS anywhere (watch fix
+  // not yet acquired and the phone's watch quiet). The stroke still happened
+  // and still has to be counted — see the impact effect.
   const inFlightRef = useRef<{
-    lat: number;
-    lng: number;
+    lat: number | null;
+    lng: number | null;
     t: number;
     meta: ShotMeta | null;
   } | null>(null);
@@ -213,24 +220,35 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
         : latestFixRef.current
           ? { lat: latestFixRef.current.lat, lng: latestFixRef.current.lng }
           : null;
-    if (!fix) return; // no GPS anywhere to place the strike — skip this one
+    // NOTE: a missing fix no longer aborts. This used to `return`, which threw
+    // the strike away entirely — the golfer swung, the watch detected it, and
+    // no shot was ever recorded. That is the "it missed some shots" report.
+    // A stroke with no position is still a stroke; the distance is what's lost,
+    // and every field downstream already accepts null.
     const prev = inFlightRef.current;
     if (prev) {
-      const distM = haversineMeters(
-        { lat: prev.lat, lng: prev.lng, accuracyM: 0, timestamp: 0 },
-        { lat: fix.lat, lng: fix.lng, accuracyM: 0, timestamp: 0 }
-      );
+      // Measurable only when BOTH ends have a position.
+      const distM =
+        prev.lat != null && prev.lng != null && fix
+          ? haversineMeters(
+              { lat: prev.lat, lng: prev.lng, accuracyM: 0, timestamp: 0 },
+              { lat: fix.lat, lng: fix.lng, accuracyM: 0, timestamp: 0 }
+            )
+          : null;
       // Strike landed essentially on top of the in-flight start — almost
       // certainly a waggle / practice swing / double-trigger, not a real shot.
       // Drop it WITHOUT moving the in-flight start, so the next real strike
       // still measures from the true launch point. This is what stops the
       // "extra shots to verify with ~0 yards" the auto-tracker was producing.
-      if (distM < MIN_SHOT_M) return;
+      //
+      // Only applicable when the distance is actually measurable — an
+      // unmeasurable shot must never be silently discarded by this guard.
+      if (distM != null && distM < MIN_SHOT_M) return;
       onShotDetectedRef.current({
         startLat: prev.lat,
         startLng: prev.lng,
-        endLat: fix.lat,
-        endLng: fix.lng,
+        endLat: fix?.lat ?? null,
+        endLng: fix?.lng ?? null,
         distanceM: distM,
         source: 'impact',
         // Club latched when THIS shot was struck (its launch strike), not the
@@ -239,13 +257,15 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
       });
     }
     // Open the next shot, latching the club the player is set to at THIS strike.
+    // Position may be null — the following strike then records an unmeasurable
+    // shot rather than none at all.
     inFlightRef.current = {
-      lat: fix.lat,
-      lng: fix.lng,
+      lat: fix?.lat ?? null,
+      lng: fix?.lng ?? null,
       t: Date.now(),
       meta: captureShotMetaRef.current?.() ?? null
     };
-    setPendingStart({ lat: fix.lat, lng: fix.lng });
+    setPendingStart(fix ? { lat: fix.lat, lng: fix.lng } : null);
   }, [lastImpact]);
 
   // Resolve the in-flight shot immediately (hole-out, or right before a manual
@@ -262,16 +282,21 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
         (latestFixRef.current
           ? { lat: latestFixRef.current.lat, lng: latestFixRef.current.lng }
           : null);
-      if (!endPos) return null; // nowhere to land it — drop silently
-      const distM = haversineMeters(
-        { lat: prev.lat, lng: prev.lng, accuracyM: 0, timestamp: 0 },
-        { lat: endPos.lat, lng: endPos.lng, accuracyM: 0, timestamp: 0 }
-      );
+      // No `if (!endPos) return null` any more: that silently dropped a
+      // hole-out (or flushed) shot whenever there was no fix to land it on —
+      // the same lost-stroke bug as the impact path above.
+      const distM =
+        prev.lat != null && prev.lng != null && endPos
+          ? haversineMeters(
+              { lat: prev.lat, lng: prev.lng, accuracyM: 0, timestamp: 0 },
+              { lat: endPos.lat, lng: endPos.lng, accuracyM: 0, timestamp: 0 }
+            )
+          : null;
       return {
         startLat: prev.lat,
         startLng: prev.lng,
-        endLat: endPos.lat,
-        endLng: endPos.lng,
+        endLat: endPos?.lat ?? null,
+        endLng: endPos?.lng ?? null,
         distanceM: distM,
         source: 'impact',
         // Carry the club latched when this (now hole-out / flushed) shot opened.

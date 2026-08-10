@@ -1554,7 +1554,13 @@ export function HoleTrackingPage() {
     // mapped features first; only fall back to the target-type lie guess /
     // optimistic 'hit' result when features aren't loaded or the point matched
     // no polygon. The golfer still reviews this before verifying.
-    const inferred = inferShotAt(shot.endLat, shot.endLng);
+    // Only classifiable when the shot actually landed somewhere we know about.
+    // A positionless shot (no GPS at the strike) still records — it just can't
+    // be inferred, so it falls back to the target-type guess below.
+    const inferred =
+      shot.endLat != null && shot.endLng != null
+        ? inferShotAt(shot.endLat, shot.endLng)
+        : { targetResult: null, lie: null };
     const tResult: import('@/models').TargetResult = inferred.targetResult ?? 'hit';
     const lie: import('@/models').Lie | null =
       // The swing motion refines the lie the GPS point couldn't: a putt is on
@@ -1568,7 +1574,10 @@ export function HoleTrackingPage() {
     void onSubmitShot({
       clubId: autoClubId,
       clubCategory: club?.category ?? null,
-      distance: Math.round(shot.distanceM * 1.0936133),
+      // Null when the shot couldn't be measured (no fix at one or both ends).
+      // The stroke still counts; the golfer can fill the yardage in on review.
+      distance:
+        shot.distanceM != null ? Math.round(shot.distanceM * 1.0936133) : null,
       distanceUnit: 'yards',
       targetType: tType,
       targetResult: tResult,
@@ -1623,9 +1632,12 @@ export function HoleTrackingPage() {
     const flushed = autoTrack.hasPendingShot()
       ? autoTrack.resolvePendingShot({ lat: endLat, lng: endLng })
       : null;
-    const ballStart = flushed
-      ? { lat: flushed.startLat, lng: flushed.startLng }
-      : msg.startLat != null && msg.startLng != null
+    const ballStart =
+      // A flushed shot can now carry a null start (struck with no fix), so fall
+      // through to the watch's position / tee rather than trusting it blindly.
+      flushed && flushed.startLat != null && flushed.startLng != null
+        ? { lat: flushed.startLat, lng: flushed.startLng }
+        : msg.startLat != null && msg.startLng != null
         ? { lat: msg.startLat, lng: msg.startLng }
         : autoTrackInitialBallPos ??
           (teeLat != null && teeLng != null ? { lat: teeLat, lng: teeLng } : null);
