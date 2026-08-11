@@ -51,11 +51,27 @@ export const roundRepo = {
     if (error) throw toAppError(error, 'Could not delete round');
   },
 
+  /**
+   * A user's own rounds — history, stats and handicap all read this.
+   *
+   * Excludes marker cards THIS user recorded for somebody else. While a
+   * scorekeeper is tracking (and until an unclaimed card is claimed) they are
+   * `rounds.user_id`, so without this filter a scorer's own history and
+   * handicap would absorb the four players they scored.
+   *
+   * A marker card the user OWNS but somebody else recorded is deliberately kept:
+   * that's their tournament round, transferred to them after the round, and it
+   * belongs in their history.
+   */
   async listForUser(userId: string): Promise<Round[]> {
     const { data, error } = await supabase
       .from('rounds')
       .select('*')
       .eq('user_id', userId)
+      // NOT (scoring_mode = 'MARKER' AND scored_by_user_id = userId)
+      .or(
+        `scoring_mode.eq.SELF,scored_by_user_id.is.null,scored_by_user_id.neq.${userId}`
+      )
       .order('started_at', { ascending: false });
     if (error) throw toAppError(error, 'Could not load rounds');
     return data ?? [];

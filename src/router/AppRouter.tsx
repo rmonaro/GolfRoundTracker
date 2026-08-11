@@ -13,6 +13,8 @@ import { HoleTrackingPage } from '@/pages/round/HoleTrackingPage';
 import { RoundSummaryPage } from '@/pages/round/RoundSummaryPage';
 import { PastRoundsPage } from '@/pages/round/PastRoundsPage';
 import { MyTournamentsPage } from '@/pages/tournaments/MyTournamentsPage';
+import { ScorerAssignmentsPage } from '@/pages/tournaments/ScorerAssignmentsPage';
+import { ScorerGroupPage } from '@/pages/tournaments/ScorerGroupPage';
 import { StatsPage } from '@/pages/stats/StatsPage';
 import { SettingsPage } from '@/pages/settings/SettingsPage';
 import { WatchPage } from '@/pages/watch/WatchPage';
@@ -95,6 +97,22 @@ export function AppRouter() {
         element={
           <AuthGuard>
             <MyTournamentsPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/scoring"
+        element={
+          <AuthGuard>
+            <ScorerAssignmentsPage />
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/scoring/:teeGroupId"
+        element={
+          <AuthGuard>
+            <ScorerGroupPage />
           </AuthGuard>
         }
       />

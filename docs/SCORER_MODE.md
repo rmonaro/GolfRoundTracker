@@ -443,7 +443,7 @@ scorer-owned with `pending_athlete_email` set.
 | 1 | TM: migration, scorer API, `TeeTimesTab` UI, `/integration/scorers/assignments` | **Built** — TM commit `3a4d41f` |
 | 2 | GRT: migration 034, edge-function action + push authorization + attribution fix | **Built** |
 | 3 | GRT: multi-round store + `roundSync` loop | **Built** — no persist version bump was needed, see below |
-| 4 | GRT: scorer UI — assignments list, group page, quick entry, map tap | **First user-visible milestone** |
+| 4 | GRT: scorer UI — assignments list, group page, quick entry, map tap | **Built** — first user-visible milestone |
 | 5 | Ownership transfer, claim, athlete confirm/dispute | |
 | 6 | Precedence (athlete wins), offline hardening for N rounds, field test | |
 
@@ -457,16 +457,23 @@ scorer-owned with `pending_athlete_email` set.
    selects `rounds.scoring_mode` / `scored_by_user_id`; without them the query
    errors and pushes silently fall back to the old ownership path.
 
-### Carried into Phase 3/4 (not yet done)
+### How to try it (once the migrations are applied)
 
-- **Marker rounds must be excluded from the scorer's own history, stats and
-  handicap** (`roundRepo` list queries, the stats aggregations, `PastRoundsPage`).
-  Nothing creates a `MARKER` round before Phase 4, so this is inert until then —
-  but it stops being optional the moment scorer mode records anything.
-- `ActiveRound` gains `scoredByUserId` / `scoringMode` / `athleteName` /
-  `registrationId`, and `roundSync.roundPayload` starts sending the scorer-mode
-  columns for marker rounds. Until then those columns are written only by the
-  edge function.
+1. In TM, assign yourself to a tee group by the email on your GRT account.
+2. In GRT: **My Tournaments → Scoring for others → Start scoring**.
+3. Route is `/scoring`, group screen is `/scoring/:teeGroupId`.
+
+### Carried into Phase 5/6
+
+- **Ownership transfer on finish.** Cards are currently submitted to TM and left
+  in the scorer's account carrying `pending_athlete_email` — the exact state
+  `claim_marker_rounds()` resolves. The athlete-facing confirm/dispute UI and the
+  edge-function transfer are Phase 5.
+- **Precedence** (`tm_card_role`) is written by nothing yet; the athlete-wins
+  rule is Phase 6.
+- The **shared hole** is component state on the group screen rather than being
+  written back to each card's `currentHoleIndex`, so reopening a group starts at
+  the card's own resume hole. Fine today; revisit if it reads oddly in the field.
 
 Phase 3 is the one to be most careful with: it touches a persisted store that
 live rounds depend on, and a bad migration loses somebody's afternoon.

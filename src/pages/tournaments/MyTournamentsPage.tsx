@@ -12,6 +12,7 @@ import {
   Stack,
   Typography
 } from '@mui/material';
+import AssignmentIndRoundedIcon from '@mui/icons-material/AssignmentIndRounded';
 import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import LockClockRoundedIcon from '@mui/icons-material/LockClockRounded';
@@ -21,6 +22,7 @@ import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useMyTournaments } from '@/features/tournaments/useMyTournaments';
+import { useScorerAssignmentsWithFallback } from '@/features/tournaments/useScorerAssignments';
 import { useTournamentCourse } from '@/features/tournaments/useTournamentCourse';
 import { fmtToPar, localRoundFor } from '@/features/tournaments/tournamentProgress';
 import { useStartRound } from '@/features/round/useStartRound';
@@ -56,6 +58,8 @@ export function MyTournamentsPage() {
         }
       />
       <Stack spacing={2} px={2} pb={4}>
+        <ScoringEntry />
+
         {isError && (
           <Alert severity="error">{toAppError(error).message}</Alert>
         )}
@@ -97,6 +101,52 @@ export function MyTournamentsPage() {
         ))}
       </Stack>
     </Box>
+  );
+}
+
+/**
+ * Way in to scorer mode. Lives here rather than on the round home screen so a
+ * golfer who never scores for anyone isn't shown a button they'll never use —
+ * and so the round screen doesn't take on an extra query per load.
+ */
+function ScoringEntry() {
+  const navigate = useNavigate();
+  const { assignments } = useScorerAssignmentsWithFallback();
+  const count = assignments.length;
+
+  return (
+    <Card
+      elevation={0}
+      onClick={() => navigate('/scoring')}
+      sx={{ bgcolor: 'background.paper', borderRadius: '5px', cursor: 'pointer' }}
+    >
+      <CardContent sx={{ py: 1.5, '&:last-child': { pb: 1.5 } }}>
+        <Stack direction="row" alignItems="center" spacing={1.5}>
+          <Box
+            sx={{
+              width: 36,
+              height: 36,
+              borderRadius: '10px',
+              bgcolor: 'action.hover',
+              display: 'grid',
+              placeItems: 'center',
+              flexShrink: 0
+            }}
+          >
+            <AssignmentIndRoundedIcon sx={{ fontSize: 20, color: 'text.secondary' }} />
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="subtitle2">Scoring for others</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {count > 0
+                ? `${count} tee group${count === 1 ? '' : 's'} assigned to you`
+                : 'Tee groups an admin has assigned you to score'}
+            </Typography>
+          </Box>
+          {count > 0 && <Chip size="small" color="primary" label={count} />}
+        </Stack>
+      </CardContent>
+    </Card>
   );
 }
 

@@ -129,6 +129,24 @@ export interface ActiveRound {
   teeId?: string | null;
   teeName?: string | null;
 
+  /**
+   * Scorer mode (migration 034, docs/SCORER_MODE.md). Absent on every round a
+   * golfer tracks themselves.
+   *
+   * While tracking, `userId` is the SCOREKEEPER — they own every row they write,
+   * which is what lets the reconciler run unchanged. `athleteName` and
+   * `pendingAthleteEmail` say who the card is actually for.
+   */
+  scoringMode?: 'SELF' | 'MARKER';
+  /** The scorekeeper's user id. Equals `userId` until the card is transferred. */
+  scoredByUserId?: string | null;
+  /** Athlete this card belongs to, for the player tabs. */
+  athleteName?: string | null;
+  /** Claim key: set when the athlete has no GRT account yet. */
+  pendingAthleteEmail?: string | null;
+  /** TM tee group this round is being scored under. */
+  teeGroupId?: string | null;
+
   // --- sync bookkeeping (Phase 5) ---
 
   /**

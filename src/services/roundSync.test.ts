@@ -155,6 +155,43 @@ describe('syncRound', () => {
   });
 });
 
+describe('scorer-mode columns on the round upsert', () => {
+  it('omits them entirely for an ordinary self-tracked round', async () => {
+    // roundRepo.create is an UPSERT with a partial payload, so any key present
+    // here is written. Sending `scored_by_user_id: null` on every reconcile of
+    // every round would blank the recorder on any card that had one.
+    await syncRound(round());
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('scoring_mode');
+    expect(payload).not.toHaveProperty('scored_by_user_id');
+    expect(payload).not.toHaveProperty('pending_athlete_email');
+  });
+
+  it('sends them for a marker round', async () => {
+    await syncRound(
+      round({
+        scoringMode: 'MARKER',
+        scoredByUserId: 'scorer-1',
+        pendingAthleteEmail: 'jack@example.com',
+        tmRegistrationId: 'reg-1'
+      })
+    );
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.scoring_mode).toBe('MARKER');
+    expect(payload.scored_by_user_id).toBe('scorer-1');
+    expect(payload.pending_athlete_email).toBe('jack@example.com');
+    expect(payload.pending_registration_id).toBe('reg-1');
+  });
+
+  it('carries the claim key as null once the athlete has a GRT account', async () => {
+    await syncRound(
+      round({ scoringMode: 'MARKER', scoredByUserId: 'scorer-1', tmRegistrationId: 'reg-1' })
+    );
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.pending_athlete_email).toBeNull();
+  });
+});
+
 describe('pendingCount', () => {
   it('is zero for a fully synced round', () => {
     const r = round({ roundSyncedAt: '2026-07-31T10:05:00Z' });

@@ -1,7 +1,7 @@
 -- Migration 034 — Scorer mode (tournament rounds tracked by an assigned scorekeeper)
 -- Dialect: PostgreSQL (Supabase). Safe to re-run.
 --
--- A TournamentManagement admin assigns a scorekeeper to a tee group; that person
+-- A TournamentManagement admin assigns a scorekeeper to a tee group; that person 
 -- opens GRT and records shots for the 2-4 players in their group. See
 -- docs/SCORER_MODE.md for the full design.
 --

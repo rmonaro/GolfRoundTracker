@@ -67,7 +67,7 @@ function holePayload(round: ActiveRound, h: LocalHole) {
 }
 
 function roundPayload(round: ActiveRound, completion?: PendingRound['completion']) {
-  return {
+  const base = {
     id: round.roundId,
     user_id: round.userId,
     course_id: round.courseId,
@@ -87,6 +87,20 @@ function roundPayload(round: ActiveRound, completion?: PendingRound['completion'
     tm_tournament_slug: round.tmTournamentSlug ?? null,
     tee_id: round.teeId ?? null,
     tee_name: round.teeName ?? null
+  };
+
+  // Scorer-mode columns are sent ONLY for marker rounds. Listing them
+  // unconditionally would push `scored_by_user_id: null` on every reconcile of
+  // every ordinary round — and since this is an upsert, that would blank the
+  // recorder on any card that had one. Omitted keys are left untouched by
+  // PostgREST, which is exactly the behaviour we want here.
+  if (round.scoringMode !== 'MARKER') return base;
+  return {
+    ...base,
+    scoring_mode: 'MARKER' as const,
+    scored_by_user_id: round.scoredByUserId ?? null,
+    pending_athlete_email: round.pendingAthleteEmail ?? null,
+    pending_registration_id: round.tmRegistrationId ?? null
   };
 }
 
