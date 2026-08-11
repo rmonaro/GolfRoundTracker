@@ -34,8 +34,9 @@ vi.mock('@/lib/supabase', () => ({
   supabase: { auth: { refreshSession: async () => ({ error: null }) } }
 }));
 
-const { syncRound, pendingCount } = await import('./roundSync');
+const { syncRound, pendingCount, reconcileLiveRounds } = await import('./roundSync');
 const { roundRepo } = await import('./roundRepo');
+const { useRoundStore } = await import('@/stores/roundStore');
 
 function shot(id: string, syncedAt: string | null = null) {
   return {
@@ -176,5 +177,83 @@ describe('pendingCount', () => {
 
   it('is zero with no round', () => {
     expect(pendingCount(null)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reconcileLiveRounds — usually one round; in scorer mode the 2-4 players in a
+// tee group, which must sync independently of one another.
+// ---------------------------------------------------------------------------
+describe('reconcileLiveRounds', () => {
+  beforeEach(() => {
+    useRoundStore.setState({ active: null, parked: {} });
+  });
+
+  function seedGroup() {
+    const store = useRoundStore.getState();
+    store.startRound(round({ roundId: 'r1' }));
+    store.addParallelRound(round({ roundId: 'r2' }));
+    store.addParallelRound(round({ roundId: 'r3' }));
+  }
+
+  it('pushes every live round, not just the one on screen', async () => {
+    seedGroup();
+    const result = await reconcileLiveRounds();
+    expect(result.ok).toBe(true);
+    // Three rounds × (round + holes + shot).
+    expect(calls.filter((c) => c === 'round')).toHaveLength(3);
+    expect(result.syncedShots).toBe(3);
+  });
+
+  it('stamps each round separately', async () => {
+    seedGroup();
+    await reconcileLiveRounds();
+    const s = useRoundStore.getState();
+    expect(s.active?.roundSyncedAt).toBeTruthy();
+    expect(s.parked.r2.roundSyncedAt).toBeTruthy();
+    expect(s.parked.r3.roundSyncedAt).toBeTruthy();
+    expect(s.parked.r2.holes[0].shots[0].syncedAt).toBeTruthy();
+  });
+
+  it('does not strand the rest of the group when one player fails', async () => {
+    // The rounds are independent — a failure on one says nothing about the
+    // others, unlike the ordered outbox where stopping early is correct.
+    seedGroup();
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('network down'));
+    const result = await reconcileLiveRounds();
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('network down');
+    // All three were attempted; the two healthy ones still landed.
+    expect(roundRepo.create).toHaveBeenCalledTimes(3);
+    expect(result.syncedShots).toBe(2);
+    expect(calls.filter((c) => c === 'shot')).toHaveLength(2);
+  });
+
+  it('stops early on an expired session', async () => {
+    // Every remaining round would fail identically; retrying just burns
+    // round-trips and battery.
+    seedGroup();
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('JWT expired'));
+    const result = await reconcileLiveRounds();
+    expect(result.needsAuth).toBe(true);
+    // Only the round that failed was attempted — the other two were abandoned.
+    expect(roundRepo.create).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([]);
+  });
+
+  it('skips rounds that have nothing pending', async () => {
+    const synced = round({ roundId: 'r1', roundSyncedAt: 'x' });
+    synced.holes[0].syncedAt = 'x';
+    synced.holes[0].shots = [shot('s1', 'x')];
+    useRoundStore.getState().startRound(synced);
+    useRoundStore.getState().addParallelRound(round({ roundId: 'r2' }));
+    await reconcileLiveRounds();
+    expect(calls.filter((c) => c === 'round')).toHaveLength(1);
+  });
+
+  it('is a no-op with no rounds at all', async () => {
+    const result = await reconcileLiveRounds();
+    expect(result).toEqual({ ok: true, syncedShots: 0 });
+    expect(calls).toEqual([]);
   });
 });

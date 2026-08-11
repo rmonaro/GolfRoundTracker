@@ -16,7 +16,7 @@
 import { roundRepo } from './roundRepo';
 import { supabase } from '@/lib/supabase';
 import { isUsablyOnline, refreshConnectivity } from './connectivity';
-import { useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
+import { liveRounds, useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
 import { useOutboxStore, type PendingRound } from '@/stores/outboxStore';
 
 export interface SyncResult {
@@ -174,20 +174,59 @@ export async function syncRound(
   }
 }
 
-/** Push the in-progress round and stamp what landed. */
-export async function reconcileActiveRound(): Promise<SyncResult> {
-  const store = useRoundStore.getState();
-  const round = store.active;
-  if (!round) return { ok: true, syncedShots: 0 };
-  if (pendingCount(round) === 0) return { ok: true, syncedShots: 0 };
+/** Everything waiting to go up across every round being tracked right now. */
+export function livePendingCount(): number {
+  return liveRounds(useRoundStore.getState()).reduce((n, r) => n + pendingCount(r), 0);
+}
 
-  const result = await syncRound(round);
-  if (!result.ok) return result;
+/**
+ * Push every in-progress round and stamp what landed.
+ *
+ * Usually that's exactly one round. In scorer mode it's the 2-4 players in a
+ * tee group, and one failing player must NOT strand the others — unlike
+ * drainOutbox, where stopping early is right because the queue is ordered and
+ * a shared cause (expired token, no signal) will fail the rest identically.
+ * Here the rounds are independent, so each is attempted and the worst outcome
+ * is reported.
+ */
+export async function reconcileLiveRounds(): Promise<SyncResult> {
+  const rounds = liveRounds(useRoundStore.getState()).filter((r) => pendingCount(r) > 0);
+  if (rounds.length === 0) return { ok: true, syncedShots: 0 };
 
-  store.markRoundSynced();
-  store.markSynced(result.syncedHoleIds, result.syncedShotIds);
-  if (result.deletedIds.length > 0) store.clearShotTombstones(result.deletedIds);
-  return { ok: true, syncedShots: result.syncedShots };
+  let synced = 0;
+  let failure: SyncResult | null = null;
+
+  for (const round of rounds) {
+    const result = await syncRound(round);
+    if (!result.ok) {
+      // Keep the first failure to report, but carry on with the other players.
+      failure ??= result;
+      // An expired session fails every remaining round the same way, and each
+      // attempt is a doomed round-trip. Stop and let the caller surface it.
+      if (result.needsAuth) break;
+      continue;
+    }
+    synced += result.syncedShots;
+
+    // Stamp by round id: `store` must be re-read each pass, since the previous
+    // iteration's writes have already replaced the snapshot.
+    const store = useRoundStore.getState();
+    store.markRoundSynced(round.roundId);
+    store.markSynced(result.syncedHoleIds, result.syncedShotIds, round.roundId);
+    if (result.deletedIds.length > 0) {
+      store.clearShotTombstones(result.deletedIds, round.roundId);
+    }
+  }
+
+  if (failure) {
+    return {
+      ok: false,
+      syncedShots: synced,
+      needsAuth: failure.needsAuth,
+      error: failure.error
+    };
+  }
+  return { ok: true, syncedShots: synced };
 }
 
 /** Push every finished-but-unsynced round, oldest first. */
@@ -242,13 +281,13 @@ export function syncAll(): Promise<SyncResult> {
       }
 
       const outboxResult = await drainOutbox();
-      const activeResult = await reconcileActiveRound();
+      const liveResult = await reconcileLiveRounds();
 
       return {
-        ok: outboxResult.ok && activeResult.ok,
-        syncedShots: outboxResult.syncedShots + activeResult.syncedShots,
-        needsAuth: outboxResult.needsAuth || activeResult.needsAuth,
-        error: outboxResult.error ?? activeResult.error
+        ok: outboxResult.ok && liveResult.ok,
+        syncedShots: outboxResult.syncedShots + liveResult.syncedShots,
+        needsAuth: outboxResult.needsAuth || liveResult.needsAuth,
+        error: outboxResult.error ?? liveResult.error
       };
     } finally {
       inFlight = null;

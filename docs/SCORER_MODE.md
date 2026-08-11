@@ -317,35 +317,50 @@ create function public.transfer_marker_round(round_id uuid, athlete_id uuid) ret
 
 ## Part 4 — GRT: multi-round store
 
-`src/stores/roundStore.ts` changes shape from one active round to a set:
+**Built differently from the original plan, and better.** The plan called for
+`active: ActiveRound | null` to become `rounds: ActiveRound[]` with `active`
+derived, and a `PERSIST_VERSION` 1 → 2 migration. What shipped instead adds a
+**sibling** field:
 
 ```ts
 interface RoundState {
-  rounds: ActiveRound[];        // was: active: ActiveRound | null
-  activeRoundId: string | null;
-  // `active` stays available as a selector so existing call sites don't move.
+  active: ActiveRound | null;              // unchanged
+  parked: Record<string, ActiveRound>;     // new; empty outside scorer mode
+  addParallelRound: (round: ActiveRound) => void;
   switchRound: (roundId: string) => void;
   closeRound: (roundId: string) => void;
-  // …all existing mutators keep their signatures and apply to the active round.
+  // Sync stamps take an OPTIONAL roundId — omitted means "the one on screen",
+  // which is exactly what every pre-existing call site already passes.
+  markRoundSynced: (roundId?: string) => void;
+  markSynced: (holeIds: string[], shotIds: string[], roundId?: string) => void;
+  clearShotTombstones: (shotIds: string[], roundId?: string) => void;
 }
 ```
 
-- `PERSIST_VERSION` 1 → **2**, with a migration that wraps an existing single
-  `active` into `rounds: [active]`. This runs on phones mid-round at update time;
-  the existing v0→v1 migration is the model to follow, and it must be tested with
-  a real persisted payload before shipping.
-- Every existing `useRoundStore((s) => s.active)` call site keeps working via the
-  derived selector. `HoleTrackingPage` (3,911 lines) needs **no structural
-  change** for this step.
-- `ActiveRound` gains `scoredByUserId`, `scoringMode`, `athleteName`,
-  `registrationId`, `teeGroupId`, `pendingAthleteEmail`.
+Why this is the better shape:
+
+- **No persist version bump, and nothing to migrate.** A payload written before
+  scorer mode simply has no `parked` key, and zustand's shallow merge leaves the
+  initial `{}` in place. The plan's riskiest step — a store migration running on
+  phones mid-round — disappears entirely.
+- **Every existing mutator is untouched.** They all still operate on `active`,
+  so a golfer tracking their own round runs the same code as before rather than
+  a rewritten version of it. `HoleTrackingPage` (3,911 lines) needed no change.
+- `parked` **is** persisted: a scorer's other 1–3 players are unsynced data
+  exactly like the one on screen, and must survive an app restart mid-round.
 
 `src/services/roundSync.ts`:
-- `reconcileActiveRound` → `reconcileLiveRounds`, looping `rounds` and calling
-  the already-pure `syncRound` per round. Failure on one round must not abort the
-  others (unlike `drainOutbox`, where stopping early is correct).
-- `pendingCount` sums across all live rounds so `SyncStatusChip` reports the
-  group, not one player.
+- `reconcileActiveRound` → `reconcileLiveRounds`, looping every live round and
+  calling the already-pure `syncRound` per round. One player's failure must not
+  strand the others — unlike `drainOutbox`, where stopping early is right
+  because the queue is ordered and a shared cause fails the rest identically.
+  An expired session is the one exception: it stops the loop, since every
+  remaining round would fail the same way.
+- `SyncStatusChip` sums pending work across the group, so "3 unsynced" means the
+  scorekeeper's 3 and not just the player on screen.
+
+Still to come in Phase 4: `ActiveRound` gains `scoredByUserId`, `scoringMode`,
+`athleteName`, `registrationId`, `teeGroupId`, `pendingAthleteEmail`.
 
 ---
 
@@ -427,7 +442,7 @@ scorer-owned with `pending_athlete_email` set.
 | ----- | ----- | ------ |
 | 1 | TM: migration, scorer API, `TeeTimesTab` UI, `/integration/scorers/assignments` | **Built** — TM commit `3a4d41f` |
 | 2 | GRT: migration 034, edge-function action + push authorization + attribution fix | **Built** |
-| 3 | GRT: multi-round store + `roundSync` loop (+ persist migration v2) | Next — behavior-neutral for existing users, needs careful testing |
+| 3 | GRT: multi-round store + `roundSync` loop | **Built** — no persist version bump was needed, see below |
 | 4 | GRT: scorer UI — assignments list, group page, quick entry, map tap | **First user-visible milestone** |
 | 5 | Ownership transfer, claim, athlete confirm/dispute | |
 | 6 | Precedence (athlete wins), offline hardening for N rounds, field test | |
