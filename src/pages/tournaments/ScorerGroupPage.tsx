@@ -33,6 +33,7 @@ import ChevronLeftRoundedIcon from '@mui/icons-material/ChevronLeftRounded';
 import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
+import EditRoundedIcon from '@mui/icons-material/EditRounded';
 import MapRoundedIcon from '@mui/icons-material/MapRounded';
 import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
 import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
@@ -48,10 +49,19 @@ import { useScorerAssignment } from '@/features/tournaments/useScorerAssignments
 import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
 import { finalizeScorerRound, pushScorerHole } from '@/features/tournaments/scorerPush';
 import { enqueueFinishedRound, syncRound } from '@/services/roundSync';
-import { computeTotalScore, holeTotalScore } from '@/features/round/computeRoundTotals';
+import {
+  computeCompletedTotals,
+  computeTotalScore,
+  holeTotalScore
+} from '@/features/round/computeRoundTotals';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useBagStore } from '@/stores/bagStore';
-import { useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
+import {
+  useRoundStore,
+  type ActiveRound,
+  type LocalHole,
+  type LocalShot
+} from '@/stores/roundStore';
 import { newId } from '@/lib/ids';
 import type { BagClub, Lie, TargetResult } from '@/models';
 
@@ -68,6 +78,19 @@ interface PendingLanding {
 type ShotSubmitPayload = Parameters<
   React.ComponentProps<typeof AddShotSheet>['onSubmit']
 >[0];
+
+/**
+ * Score relative to par, over completed holes only.
+ *
+ * Shows "E" before any hole is finished rather than the "--" the round summary
+ * uses. On a scoring screen a player who hasn't holed out yet IS level — the
+ * dash reads as missing data, and a scorekeeper glancing at four players wants
+ * a stable baseline, not a placeholder.
+ */
+function fmtVsPar(vsPar: number, completedCount: number): string {
+  if (completedCount === 0 || vsPar === 0) return 'E';
+  return vsPar > 0 ? `+${vsPar}` : `${vsPar}`;
+}
 
 export function ScorerGroupPage() {
   const { teeGroupId } = useParams<{ teeGroupId: string }>();
@@ -95,6 +118,8 @@ export function ScorerGroupPage() {
   const [landing, setLanding] = useState<PendingLanding | null>(null);
   const [sheetOpen, setSheetOpen] = useState(false);
   const [finishOpen, setFinishOpen] = useState(false);
+  /** Shot being edited, or null when the sheet is recording a new one. */
+  const [editingShot, setEditingShot] = useState<LocalShot | null>(null);
 
   /**
    * The group's cards in tab order. Ordered by the assignment's pairing
@@ -147,8 +172,26 @@ export function ScorerGroupPage() {
     );
   }, [landing, bagClubs, currentHole]);
 
-  /** Record a shot against whichever player is on screen. */
-  const addShot = useCallback(
+  /** Recompute the hole's derived stroke/putt counts from its shot list. */
+  const syncHoleStats = useCallback(
+    (hole: number) => {
+      const store = useRoundStore.getState();
+      const after = store.active?.holes.find((h) => h.holeNumber === hole);
+      if (!after) return;
+      const putts = after.shots.filter((s) => {
+        const club = bagClubs.find((c) => c.clubId === s.clubId);
+        return club?.category === 'putter';
+      }).length;
+      store.updateHole(hole, { strokes: after.shots.length, putts });
+    },
+    [bagClubs]
+  );
+
+  /**
+   * Save a shot for whichever player is on screen — new, or an edit of an
+   * existing one when `editingShot` is set.
+   */
+  const submitShot = useCallback(
     (payload: ShotSubmitPayload) => {
       const store = useRoundStore.getState();
       const round = store.active;
@@ -156,9 +199,7 @@ export function ScorerGroupPage() {
       const hole = round.holes.find((h) => h.holeNumber === holeNumber);
       if (!hole) return;
 
-      store.addShot(holeNumber, {
-        id: newId(),
-        shotNumber: hole.shots.length + 1,
+      const fields = {
         clubId: payload.clubId,
         shotResult: payload.derivedShotResult,
         targetType: payload.targetType,
@@ -168,35 +209,43 @@ export function ScorerGroupPage() {
         distance: payload.distance,
         distanceUnit: payload.distanceUnit,
         notes: payload.notes,
-        createdAt: new Date().toISOString(),
-        syncedAt: null,
-        // A scorer's entry is a deliberate observation, not a detection awaiting
-        // review — nothing here comes from the impact detector.
-        verified: true,
         startLat: payload.startLat,
         startLng: payload.startLng,
         endLat: payload.endLat,
         endLng: payload.endLng,
         calculatedDistance: payload.calculatedDistance
-      });
+      };
 
-      // Keep the derived hole stats in step with the shots on it.
-      const after = useRoundStore
-        .getState()
-        .active?.holes.find((h) => h.holeNumber === holeNumber);
-      if (after) {
-        const putts = after.shots.filter((s) => {
-          const club = bagClubs.find((c) => c.clubId === s.clubId);
-          return club?.category === 'putter';
-        }).length;
-        store.updateHole(holeNumber, { strokes: after.shots.length, putts });
+      if (editingShot) {
+        store.updateShot(holeNumber, editingShot.id, {
+          ...fields,
+          // Re-queue it for push. Shots upsert on their client-minted id, so
+          // clearing this makes the reconciler re-send the edited row on the
+          // next pass. Deliberately different from HoleTrackingPage, which
+          // writes the edit remotely there and then — that call is simply lost
+          // when a scorekeeper is standing in a dead zone.
+          syncedAt: null
+        });
+      } else {
+        store.addShot(holeNumber, {
+          id: newId(),
+          shotNumber: hole.shots.length + 1,
+          createdAt: new Date().toISOString(),
+          syncedAt: null,
+          // A scorer's entry is a deliberate observation, not a detection
+          // awaiting review — nothing here comes from the impact detector.
+          verified: true,
+          ...fields
+        });
       }
 
+      syncHoleStats(holeNumber);
       setLanding(null);
+      setEditingShot(null);
       setSheetOpen(false);
       schedulePush(useRoundStore.getState().active, holeNumber);
     },
-    [holeNumber, bagClubs]
+    [holeNumber, editingShot, syncHoleStats]
   );
 
   const removeShot = useCallback(
@@ -205,13 +254,10 @@ export function ScorerGroupPage() {
       const store = useRoundStore.getState();
       store.recordShotDeletion(shotId, wasSynced);
       store.removeShot(holeNumber, shotId);
-      const after = useRoundStore
-        .getState()
-        .active?.holes.find((h) => h.holeNumber === holeNumber);
-      if (after) store.updateHole(holeNumber, { strokes: after.shots.length });
+      syncHoleStats(holeNumber);
       schedulePush(useRoundStore.getState().active, holeNumber);
     },
-    [holeNumber]
+    [holeNumber, syncHoleStats]
   );
 
   const onQuickChange = useCallback((change: QuickEntryChange) => {
@@ -302,11 +348,17 @@ export function ScorerGroupPage() {
         <Stack direction="row" spacing={0.75} sx={{ overflowX: 'auto', pb: 0.5 }}>
           {rounds.map((r) => {
             const hole = r.holes.find((h) => h.holeNumber === holeNumber);
-            const thru = r.holes.filter((h) => holeTotalScore(h) > 0).length;
-            const vsPar = r.holes.reduce(
-              (sum, h) => (holeTotalScore(h) > 0 ? sum + holeTotalScore(h) - h.par : sum),
-              0
-            );
+            // Running score counts COMPLETED holes only, so it sits at E and
+            // holds steady while a hole is being recorded — a player mid-hole
+            // isn't +3 just because three shots are logged. Completion is
+            // relative to the hole the GROUP is on (they walk it together),
+            // which is component state here rather than each card's own
+            // currentHoleIndex.
+            const groupIdx = r.holes.findIndex((h) => h.holeNumber === holeNumber);
+            const { score, par, completedCount } = computeCompletedTotals({
+              holes: r.holes,
+              currentHoleIndex: groupIdx < 0 ? 0 : groupIdx
+            });
             const isCurrent = r.roundId === active.roundId;
             return (
               <Paper
@@ -329,8 +381,11 @@ export function ScorerGroupPage() {
                   {r.athleteName ?? 'Player'}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" className="nums">
-                  {thru > 0 ? `${vsPar > 0 ? '+' : ''}${vsPar === 0 ? 'E' : vsPar} · ${thru}` : '—'}
-                  {hole && holeTotalScore(hole) > 0 ? ` · ${holeTotalScore(hole)}` : ''}
+                  {fmtVsPar(score - par, completedCount)}
+                  {completedCount > 0 ? ` · thru ${completedCount}` : ''}
+                  {/* This hole's strokes, kept separate from the running score
+                      so the total doesn't twitch on every shot. */}
+                  {hole && holeTotalScore(hole) > 0 ? ` · (${holeTotalScore(hole)})` : ''}
                 </Typography>
               </Paper>
             );
@@ -437,7 +492,22 @@ export function ScorerGroupPage() {
                     direction="row"
                     alignItems="center"
                     spacing={1}
-                    sx={{ py: 0.25 }}
+                    // Tap anywhere on the row to correct it — a scorekeeper
+                    // watching four players gets shots wrong, and re-entering
+                    // one from scratch is the wrong penalty for a mis-tap.
+                    onClick={() => {
+                      setEditingShot(s);
+                      setLanding(null);
+                      setSheetOpen(true);
+                    }}
+                    sx={{
+                      py: 0.5,
+                      px: 0.5,
+                      mx: -0.5,
+                      cursor: 'pointer',
+                      borderRadius: '4px',
+                      '&:active': { bgcolor: 'action.selected' }
+                    }}
                   >
                     <Typography
                       variant="caption"
@@ -453,10 +523,14 @@ export function ScorerGroupPage() {
                         : ''}
                       {s.shotResult ? ` · ${s.shotResult.replace(/_/g, ' ')}` : ''}
                     </Typography>
+                    <EditRoundedIcon sx={{ fontSize: 14, color: 'text.disabled' }} />
                     <IconButton
                       size="small"
                       aria-label={`Delete shot ${s.shotNumber}`}
-                      onClick={() => removeShot(s.id, !!s.syncedAt)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeShot(s.id, !!s.syncedAt);
+                      }}
                     >
                       <DeleteOutlineRoundedIcon sx={{ fontSize: 16 }} />
                     </IconButton>
@@ -505,7 +579,28 @@ export function ScorerGroupPage() {
 
       <AddShotSheet
         open={sheetOpen}
-        shotNumber={(currentHole?.shots.length ?? 0) + 1}
+        shotNumber={editingShot ? editingShot.shotNumber : (currentHole?.shots.length ?? 0) + 1}
+        editing={
+          editingShot
+            ? {
+                clubId: editingShot.clubId,
+                distance: editingShot.distance,
+                distanceUnit: editingShot.distanceUnit,
+                targetType: editingShot.targetType,
+                targetResult: editingShot.targetResult,
+                lie: editingShot.lie,
+                penaltyType: editingShot.penaltyType,
+                notes: editingShot.notes,
+                // Carried through so correcting a club doesn't discard where the
+                // scorer marked the ball.
+                startLat: editingShot.startLat,
+                startLng: editingShot.startLng,
+                endLat: editingShot.endLat,
+                endLng: editingShot.endLng,
+                calculatedDistance: editingShot.calculatedDistance
+              }
+            : null
+        }
         holePar={currentHole?.par ?? 4}
         bagClubs={bagClubs}
         // The bag isn't the scorer's, so the yardages are what tell them which
@@ -532,8 +627,9 @@ export function ScorerGroupPage() {
         onClose={() => {
           setSheetOpen(false);
           setLanding(null);
+          setEditingShot(null);
         }}
-        onSubmit={addShot}
+        onSubmit={submitShot}
       />
 
       <FinishGroupDialog
