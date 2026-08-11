@@ -38,6 +38,7 @@ import MapRoundedIcon from '@mui/icons-material/MapRounded';
 import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
 import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
+import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { recommendClub } from '@/features/course/HoleLayout';
@@ -98,7 +99,7 @@ function fmtVsPar(vsPar: number, completedCount: number): string {
 export function ScorerGroupPage() {
   const { teeGroupId } = useParams<{ teeGroupId: string }>();
   const navigate = useNavigate();
-  const { assignment } = useScorerAssignment(teeGroupId);
+  const { assignment, refetch } = useScorerAssignment(teeGroupId);
 
   const hydrated = useRoundStore((s) => s.hydrated);
   const activeRound = useRoundStore((s) => s.active);
@@ -161,30 +162,64 @@ export function ScorerGroupPage() {
   }, [hydrated, active, rounds, switchRound]);
 
   /**
-   * Backfill missing athlete bags.
+   * Backfill athlete bags, and UPGRADE a catalog stand-in to the real thing.
    *
-   * The bag is captured when a group is OPENED, so a group that was already
-   * live — opened on an older build, or before its fetch could succeed — has
-   * none, and its club picker would be empty. Resuming through the assignments
-   * screen wouldn't fix it either, since that path skips the open mutation
-   * entirely. Runs once per round; the result is stored on the round, so it
-   * persists and survives going offline.
+   * The bag is captured when a group is opened, so a group that was already
+   * live has none. But the harder case is a player who wasn't linked to a GRT
+   * account at open time: they get the catalog stand-in, then open the app
+   * themselves, TM stamps their id, and the scorer should start seeing their
+   * real clubs. Storing the catalog bag as if it were final would freeze the
+   * wrong answer in place forever.
+   *
+   * So the guard is keyed by the player's GRT id, not the round: when that id
+   * appears the key changes and the real bag is fetched. A catalog bag is only
+   * ever provisional while an id exists to try.
    */
   const backfilled = useRef<Set<string>>(new Set());
-  useEffect(() => {
+  const runBackfill = useCallback(() => {
     if (!assignment) return;
     for (const r of rounds) {
-      if (r.athleteBag?.length || backfilled.current.has(r.roundId)) continue;
       const player = assignment.players.find(
         (p) => p.registration_id === r.tmRegistrationId
       );
       if (!player) continue;
-      backfilled.current.add(r.roundId);
+
+      const stored = r.athleteBag;
+      const provisional = !stored?.length || (isCatalogBag(stored) && !!player.grt_athlete_id);
+      if (!provisional) continue;
+
+      const key = `${r.roundId}:${player.grt_athlete_id ?? 'unlinked'}`;
+      if (backfilled.current.has(key)) continue;
+      backfilled.current.add(key);
+
       void bagForPlayer(player).then((bag) => {
-        if (bag.length) useRoundStore.getState().setAthleteBag(r.roundId, bag);
+        // Don't overwrite a real bag with the catalog if they raced.
+        const current = useRoundStore.getState();
+        const live =
+          current.active?.roundId === r.roundId ? current.active : current.parked[r.roundId];
+        if (!bag.length) return;
+        if (live?.athleteBag?.length && !isCatalogBag(live.athleteBag) && isCatalogBag(bag)) return;
+        current.setAthleteBag(r.roundId, bag);
       });
     }
   }, [assignment, rounds]);
+
+  useEffect(() => {
+    runBackfill();
+  }, [runBackfill]);
+
+  /**
+   * Pull the assignment again and re-try every bag.
+   *
+   * Needed because `refetchOnWindowFocus` is off app-wide: when a player links
+   * their account mid-round, nothing tells the scorer's device. This is the
+   * "their clubs still look wrong" button.
+   */
+  const refreshPlayers = useCallback(async () => {
+    backfilled.current.clear();
+    await refetch();
+    runBackfill();
+  }, [refetch, runBackfill]);
 
   // Seed the shared hole from whichever card is on screen, once.
   useEffect(() => {
@@ -626,6 +661,7 @@ export function ScorerGroupPage() {
                   (p) => p.registration_id === active.tmRegistrationId
                 )?.grt_athlete_id
               }
+              onRefresh={refreshPlayers}
             />
           </>
         )}
@@ -824,7 +860,8 @@ function AthleteBagReference({
   athleteName,
   bagClubs,
   isCatalog,
-  hasAccount
+  hasAccount,
+  onRefresh
 }: {
   athleteName: string;
   bagClubs: BagClub[];
@@ -832,11 +869,12 @@ function AthleteBagReference({
   isCatalog: boolean;
   /** Whether TM knows a GRT account for this player. */
   hasAccount: boolean;
+  /** Re-pull the assignment and re-try every bag. */
+  onRefresh: () => void;
 }) {
   const [open, setOpen] = useState(false);
-  if (!bagClubs.length) return null;
-
   const withYardage = bagClubs.filter((c) => c.typicalDistanceYards != null).length;
+  const empty = bagClubs.length === 0;
 
   return (
     <Paper elevation={0} sx={{ borderRadius: '5px', bgcolor: 'background.paper' }}>
@@ -847,21 +885,32 @@ function AthleteBagReference({
         startIcon={<GolfCourseRoundedIcon sx={{ fontSize: 16 }} />}
         sx={{ justifyContent: 'flex-start', px: 1.5, py: 1, color: 'text.secondary' }}
       >
-        {isCatalog ? 'Standard clubs' : `${athleteName}'s bag`}
-        {withYardage > 0 ? ` · ${withYardage} with distances` : ' · no distances'}
+        {empty
+          ? 'Clubs not loaded'
+          : isCatalog
+            ? 'Standard clubs'
+            : `${athleteName}'s bag`}
+        {!empty && (withYardage > 0 ? ` · ${withYardage} with distances` : ' · no distances')}
       </Button>
-      <Collapse in={open}>
+      <Collapse in={open || empty}>
         <Box sx={{ px: 1.5, pb: 1.5 }}>
-          {isCatalog && (
+          {(isCatalog || empty) && (
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-              {hasAccount
-                ? // Distinguishing an empty bag from a missing read is impossible
-                  // from here — RLS filters rows rather than erroring — so name
-                  // both rather than assert the wrong one.
-                  `${athleteName} has a GRT account but no clubs came back, so these are the standard clubs. Either they haven't set a bag up, or migration 035 isn't applied yet.`
-                : `${athleteName} doesn't have a GRT account, so these are the standard clubs with no distances.`}
+              {empty
+                ? `Couldn't load clubs for ${athleteName} — you may have been offline. Refresh to try again.`
+                : hasAccount
+                  ? // An empty read and an empty bag are indistinguishable from
+                    // here (RLS filters rows rather than erroring), so name both
+                    // rather than assert the wrong one.
+                    `${athleteName} has a GRT account but no clubs came back — either they haven't set a bag up, or migration 035 isn't applied.`
+                  : `${athleteName} hasn't opened GRT yet, so these are the standard clubs with no distances. Once they sign in, refresh to pick up their real bag.`}
             </Typography>
           )}
+
+          <Button size="small" startIcon={<RefreshRoundedIcon sx={{ fontSize: 14 }} />} onClick={onRefresh}>
+            Refresh players &amp; clubs
+          </Button>
+
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
             {[...bagClubs]
               .sort((a, b) => a.orderPosition - b.orderPosition)
