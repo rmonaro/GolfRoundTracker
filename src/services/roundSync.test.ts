@@ -34,9 +34,14 @@ vi.mock('@/lib/supabase', () => ({
   supabase: { auth: { refreshSession: async () => ({ error: null }) } }
 }));
 
-const { syncRound, pendingCount, reconcileLiveRounds } = await import('./roundSync');
+const { syncRound, pendingCount, reconcileLiveRounds, drainOutbox } = await import('./roundSync');
 const { roundRepo } = await import('./roundRepo');
 const { useRoundStore } = await import('@/stores/roundStore');
+const { useOutboxStore } = await import('@/stores/outboxStore');
+
+function completion() {
+  return { score: 80, scoreVsPar: 8, completedAt: '2026-07-31T15:00:00Z' };
+}
 
 function shot(id: string, syncedAt: string | null = null) {
   return {
@@ -183,6 +188,26 @@ describe('scorer-mode columns on the round upsert', () => {
     expect(payload.pending_registration_id).toBe('reg-1');
   });
 
+  it('omits tm_card_role until the server has decided one', async () => {
+    // The edge function owns precedence. Sending null on every reconcile would
+    // clear a MARKER_BACKUP demotion it had just written.
+    await syncRound(round({ scoringMode: 'MARKER', scoredByUserId: 'scorer-1' }));
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('tm_card_role');
+  });
+
+  it('sends tm_card_role once it is known', async () => {
+    await syncRound(
+      round({
+        scoringMode: 'MARKER',
+        scoredByUserId: 'scorer-1',
+        tmCardRole: 'MARKER_BACKUP'
+      })
+    );
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.tm_card_role).toBe('MARKER_BACKUP');
+  });
+
   it('carries the claim key as null once the athlete has a GRT account', async () => {
     await syncRound(
       round({ scoringMode: 'MARKER', scoredByUserId: 'scorer-1', tmRegistrationId: 'reg-1' })
@@ -224,6 +249,7 @@ describe('pendingCount', () => {
 describe('reconcileLiveRounds', () => {
   beforeEach(() => {
     useRoundStore.setState({ active: null, parked: {} });
+    useOutboxStore.setState({ pending: [] });
   });
 
   function seedGroup() {
@@ -286,6 +312,40 @@ describe('reconcileLiveRounds', () => {
     useRoundStore.getState().addParallelRound(round({ roundId: 'r2' }));
     await reconcileLiveRounds();
     expect(calls.filter((c) => c === 'round')).toHaveLength(1);
+  });
+
+  it('does not let one queued round block the rest of a finished group', async () => {
+    // Finishing a tee group enqueues up to four rounds at once. One failing for
+    // its own reason must not hold three other players' rounds hostage.
+    useOutboxStore.setState({
+      pending: [
+        { round: round({ roundId: 'q1' }), completion: completion(), queuedAt: 'x', attempts: 0 },
+        { round: round({ roundId: 'q2' }), completion: completion(), queuedAt: 'x', attempts: 0 },
+        { round: round({ roundId: 'q3' }), completion: completion(), queuedAt: 'x', attempts: 0 }
+      ]
+    });
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('bad row'));
+
+    const result = await drainOutbox();
+    expect(result.ok).toBe(false);
+    expect(roundRepo.create).toHaveBeenCalledTimes(3);
+    // The two healthy ones cleared; only the failed one is still queued.
+    expect(useOutboxStore.getState().pending.map((p) => p.round.roundId)).toEqual(['q1']);
+  });
+
+  it('still stops the drain on an expired session', async () => {
+    useOutboxStore.setState({
+      pending: [
+        { round: round({ roundId: 'q1' }), completion: completion(), queuedAt: 'x', attempts: 0 },
+        { round: round({ roundId: 'q2' }), completion: completion(), queuedAt: 'x', attempts: 0 }
+      ]
+    });
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('JWT expired'));
+
+    const result = await drainOutbox();
+    expect(result.needsAuth).toBe(true);
+    expect(roundRepo.create).toHaveBeenCalledTimes(1);
+    expect(useOutboxStore.getState().pending).toHaveLength(2);
   });
 
   it('is a no-op with no rounds at all', async () => {

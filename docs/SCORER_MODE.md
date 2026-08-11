@@ -445,7 +445,7 @@ scorer-owned with `pending_athlete_email` set.
 | 3 | GRT: multi-round store + `roundSync` loop | **Built** — no persist version bump was needed, see below |
 | 4 | GRT: scorer UI — assignments list, group page, quick entry, map tap | **Built** — first user-visible milestone |
 | 5 | Ownership transfer, claim, athlete confirm/dispute | **Built** |
-| 6 | Precedence (athlete wins), offline hardening for N rounds, field test | |
+| 6 | Precedence (athlete wins), offline hardening for N rounds | **Built** — field test outstanding |
 
 ### Deploy order (both phases)
 
@@ -488,10 +488,36 @@ policy is conditioned on `athlete_confirmed_at is null`, so afterwards they can
 read it but not change it. Disputing deliberately leaves it unconfirmed, which
 is exactly what keeps them able to fix it.
 
-### Carried into Phase 6
+### Precedence, as built (Phase 6)
 
-- **Precedence** (`tm_card_role`) is written by nothing yet; the athlete-wins
-  rule is Phase 6.
+Decided **server-side**, in the edge function, on every scorer push. A scorer in
+a dead zone has no way to know the athlete started tracking themselves ten
+minutes ago, so the device cannot be trusted with this.
+
+`athleteIsTracking()` requires *evidence of play* — a `SELF` round for that
+registration **and** a hole with strokes on it — not merely that a round row
+exists. A player who taps Start and walks away would otherwise silently demote
+their scorekeeper and stall the leaderboard for the rest of the round.
+
+When the athlete is tracking, the scorer's push is **accepted into GRT but not
+forwarded to TM**, and the response carries `{ primary: false }`. The round is
+stamped `MARKER_BACKUP`, the scorer's screen says so plainly, and their tab is
+labelled *backup*. They keep scoring — a marker's copy is the point.
+
+No merge is attempted. Holes the athlete hasn't reached keep whatever the scorer
+already pushed, because nothing overwrites them. That's the "mid-round switch"
+question from the open items, answered by doing nothing clever.
+
+`roundSync` only sends `tm_card_role` once a value is known, since sending null
+on every reconcile would clear a demotion the edge function had just written.
+
+### Offline hardening (Phase 6)
+
+`drainOutbox` no longer aborts the whole queue on the first failure. That was
+right when the queue held one golfer's round, but finishing a tee group enqueues
+up to four at once, and one entry failing for its own reason would have held
+three other players' rounds hostage indefinitely. Auth failures still stop the
+drain — every remaining entry fails identically and it needs the user.
 - The **shared hole** is component state on the group screen rather than being
   written back to each card's `currentHoleIndex`, so reopening a group starts at
   the card's own resume hole. Fine today; revisit if it reads oddly in the field.

@@ -38,6 +38,7 @@ import MapRoundedIcon from '@mui/icons-material/MapRounded';
 import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
 import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
+import InfoOutlinedIcon from '@mui/icons-material/InfoOutlined';
 import RefreshRoundedIcon from '@mui/icons-material/RefreshRounded';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
@@ -386,6 +387,9 @@ export function ScorerGroupPage() {
   }
 
   const holeCount = active.holesPlayed || 18;
+  const backupPlayers = rounds
+    .filter((r) => r.tmCardRole === 'MARKER_BACKUP')
+    .map((r) => r.athleteName ?? 'A player');
 
   return (
     <Box sx={{ pb: 10 }}>
@@ -401,6 +405,18 @@ export function ScorerGroupPage() {
       />
 
       <Stack spacing={1.5} px={2}>
+        {/* The athlete started tracking their own round, so theirs is the
+            record now. Said plainly, because a scorekeeper who keeps writing
+            without knowing this would think they were feeding the leaderboard. */}
+        {backupPlayers.length > 0 && (
+          <Alert severity="info" icon={<InfoOutlinedIcon />}>
+            {backupPlayers.length === 1
+              ? `${backupPlayers[0]} is tracking their own round, so their card is now the official one.`
+              : `${backupPlayers.join(', ')} are tracking their own rounds, so their cards are now the official ones.`}{' '}
+            Keep scoring — your version is still saved as the marker&apos;s copy.
+          </Alert>
+        )}
+
         {/* ---- Hole strip: shared by the whole group ---- */}
         <Paper
           elevation={0}
@@ -473,6 +489,12 @@ export function ScorerGroupPage() {
               >
                 <Typography variant="body2" noWrap sx={{ fontWeight: 600 }}>
                   {r.athleteName ?? 'Player'}
+                  {r.tmCardRole === 'MARKER_BACKUP' && (
+                    <Typography component="span" variant="caption" color="text.secondary">
+                      {' '}
+                      · backup
+                    </Typography>
+                  )}
                 </Typography>
                 <Typography variant="caption" color="text.secondary" className="nums">
                   {fmtVsPar(score - par, completedCount)}

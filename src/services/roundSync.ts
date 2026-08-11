@@ -100,7 +100,10 @@ function roundPayload(round: ActiveRound, completion?: PendingRound['completion'
     scoring_mode: 'MARKER' as const,
     scored_by_user_id: round.scoredByUserId ?? null,
     pending_athlete_email: round.pendingAthleteEmail ?? null,
-    pending_registration_id: round.tmRegistrationId ?? null
+    pending_registration_id: round.tmRegistrationId ?? null,
+    // Only ever written once the server has decided it. Sending null on every
+    // reconcile would clear a demotion the edge function had just recorded.
+    ...(round.tmCardRole ? { tm_card_role: round.tmCardRole } : {})
   };
 }
 
@@ -243,22 +246,43 @@ export async function reconcileLiveRounds(): Promise<SyncResult> {
   return { ok: true, syncedShots: synced };
 }
 
-/** Push every finished-but-unsynced round, oldest first. */
+/**
+ * Push every finished-but-unsynced round, oldest first.
+ *
+ * Stops immediately on an auth failure: every remaining entry fails the same
+ * way and it needs the user, not more attempts.
+ *
+ * Other failures no longer abort the drain. That mattered less when the queue
+ * held one golfer's round at a time, but finishing a tee group enqueues up to
+ * four at once — and a single entry failing for its own reason would have held
+ * three other players' rounds hostage indefinitely. Each is independent, so
+ * each gets its own attempt.
+ */
 export async function drainOutbox(): Promise<SyncResult> {
   const outbox = useOutboxStore.getState();
   let synced = 0;
+  let failure: SyncResult | null = null;
 
   for (const entry of [...outbox.pending]) {
     const result = await syncRound(entry.round, entry.completion);
     if (result.ok) {
       synced += result.syncedShots;
       useOutboxStore.getState().remove(entry.round.roundId);
-    } else {
-      useOutboxStore.getState().recordFailure(entry.round.roundId, result.error ?? 'unknown');
-      // Stop on the first failure — the rest will fail the same way, and an
-      // auth problem in particular wants the user rather than more attempts.
-      return { ok: false, syncedShots: synced, needsAuth: result.needsAuth, error: result.error };
+      continue;
     }
+
+    useOutboxStore.getState().recordFailure(entry.round.roundId, result.error ?? 'unknown');
+    failure ??= result;
+    if (result.needsAuth) break;
+  }
+
+  if (failure) {
+    return {
+      ok: false,
+      syncedShots: synced,
+      needsAuth: failure.needsAuth,
+      error: failure.error
+    };
   }
   return { ok: true, syncedShots: synced };
 }

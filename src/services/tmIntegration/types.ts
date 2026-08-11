@@ -135,7 +135,15 @@ export interface TmShotsPush {
 }
 
 export interface TmScorecardResult {
-  scorecard: {
+  /**
+   * False when this push was NOT forwarded to the leaderboard because the
+   * athlete is tracking their own round — the scorer's card is a marker backup
+   * (docs/SCORER_MODE.md, decision 6). Absent on an ordinary push.
+   */
+  primary?: boolean;
+  reason?: string;
+  /** Absent when the push was withheld as a backup. */
+  scorecard?: {
     id: string;
     round_number: number;
     status: TmScorecardStatus;

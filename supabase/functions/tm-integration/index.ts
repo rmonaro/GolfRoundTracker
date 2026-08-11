@@ -384,6 +384,38 @@ async function handlePush(
     );
   }
 
+  const roundNumber =
+    typeof args.round_number === 'number' ? args.round_number : null;
+
+  // ---- Precedence: the athlete's own card wins ----------------------------
+  //
+  // If a player is tracking their own round, theirs is the record and the
+  // scorekeeper's becomes a marker backup. Resolved HERE, not on the device:
+  // a scorer standing in a dead zone has no way to know the player started
+  // their own round ten minutes ago.
+  //
+  // The backup's writes are still accepted into GRT — they're a second,
+  // independent record of the same round, which is the point of a marker — they
+  // just stop being forwarded to the leaderboard. Holes the athlete hasn't
+  // reached keep whatever the scorer already pushed, simply because nothing
+  // overwrites them; no merging is attempted.
+  if (auth.kind === 'SCORER' && registrationId && roundNumber != null) {
+    if (await athleteIsTracking(db, registrationId, roundNumber)) {
+      if (rtrid) {
+        await db.from('rounds').update({ tm_card_role: 'MARKER_BACKUP' }).eq('id', rtrid);
+      }
+      return jsonResponse(
+        { data: { primary: false, reason: 'athlete_is_tracking' } },
+        200
+      );
+    }
+  }
+
+  // A self push on a tournament round is the primary card by definition.
+  if (auth.kind === 'SELF' && rtrid) {
+    await db.from('rounds').update({ tm_card_role: 'PRIMARY' }).eq('id', rtrid);
+  }
+
   // Attribution. For a SELF push this is the caller, exactly as before. For a
   // SCORER push it is the ATHLETE — and when that athlete has never opened GRT
   // there is no id to send, so the field is OMITTED rather than defaulted to
@@ -402,6 +434,38 @@ async function handlePush(
     body: JSON.stringify(outbound)
   });
   return await relay(res);
+}
+
+/**
+ * Is the athlete recording this tournament round themselves?
+ *
+ * Requires evidence of actual play, not merely that a SELF round row exists. A
+ * player who tapped Start and walked away would otherwise silently demote their
+ * scorekeeper's card and stall the leaderboard for the rest of the round.
+ */
+async function athleteIsTracking(
+  db: ReturnType<typeof serviceClient>,
+  registrationId: string,
+  roundNumber: number
+): Promise<boolean> {
+  const { data: selfRounds } = await db
+    .from('rounds')
+    .select('id')
+    .eq('tm_registration_id', registrationId)
+    .eq('tm_round_number', roundNumber)
+    .eq('scoring_mode', 'SELF');
+  if (!selfRounds?.length) return false;
+
+  const { data: played } = await db
+    .from('round_holes')
+    .select('id')
+    .in(
+      'round_id',
+      selfRounds.map((r) => r.id)
+    )
+    .gt('strokes', 0)
+    .limit(1);
+  return !!played?.length;
 }
 
 interface PushAuth {

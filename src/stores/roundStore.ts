@@ -158,6 +158,13 @@ export interface ActiveRound {
    * distances) for a player with no GRT account or an empty bag.
    */
   athleteBag?: BagClub[];
+  /**
+   * Whether this card feeds TM's leaderboard. 'MARKER_BACKUP' means the athlete
+   * is tracking their own round and theirs won — the scorer's entries are still
+   * recorded here, they just stop being forwarded. Set from the push response;
+   * the server owns this decision.
+   */
+  tmCardRole?: 'PRIMARY' | 'MARKER_BACKUP' | null;
 
   // --- sync bookkeeping (Phase 5) ---
 
@@ -218,6 +225,11 @@ interface RoundState {
    * bags were captured, or one whose fetch failed while offline.
    */
   setAthleteBag: (roundId: string, bag: BagClub[]) => void;
+  /**
+   * Record whether this card feeds the leaderboard. The server decides it —
+   * an offline scorer can't know the athlete started tracking themselves.
+   */
+  setCardRole: (roundId: string, role: 'PRIMARY' | 'MARKER_BACKUP') => void;
   setCurrentHole: (idx: number) => void;
   updateHole: (holeNumber: number, patch: Partial<LocalHole>) => void;
   addShot: (holeNumber: number, shot: LocalShot) => void;
@@ -479,6 +491,9 @@ export const useRoundStore = create<RoundState>()(
 
       setAthleteBag: (roundId, bag) =>
         set((s) => applyToRound(s, roundId, (r) => ({ ...r, athleteBag: bag }))),
+
+      setCardRole: (roundId, role) =>
+        set((s) => applyToRound(s, roundId, (r) => ({ ...r, tmCardRole: role }))),
 
       markRoundSynced: (roundId) =>
         set((s) =>

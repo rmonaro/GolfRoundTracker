@@ -12,7 +12,7 @@
 // a dead zone, and TM's endpoints are idempotent per hole, so the next
 // successful push self-heals any dropped one.
 
-import type { ActiveRound, LocalHole } from '@/stores/roundStore';
+import { useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
 import { useBagStore } from '@/stores/bagStore';
 import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
 import type { TmScorePush, TmShotsPush } from '@/services/tmIntegration/types';
@@ -47,7 +47,18 @@ export async function pushScorerHole(
 
   const scorePayload: TmScorePush = { ...base, status, holes: [toScoreHole(hole)] };
   try {
-    await tmIntegrationRepo.pushScores(scorePayload);
+    const result = await tmIntegrationRepo.pushScores(scorePayload);
+    // The server withheld this from the leaderboard because the athlete is
+    // tracking their own round. Record it so the scorer is told, rather than
+    // going on believing their entries are the live score.
+    if (result?.primary === false) {
+      useRoundStore.getState().setCardRole(round.roundId, 'MARKER_BACKUP');
+      // Shots would be withheld for the same reason — don't bother sending them.
+      return;
+    }
+    if (round.tmCardRole === 'MARKER_BACKUP') {
+      useRoundStore.getState().setCardRole(round.roundId, 'PRIMARY');
+    }
   } catch (err) {
     console.error('[scorer-push] score failed', round.athleteName, hole.holeNumber, err);
   }
