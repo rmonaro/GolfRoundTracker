@@ -91,6 +91,14 @@ export interface TmScorerAssignments {
   assignments: TmScorerAssignment[];
 }
 
+export interface TmTransferResult {
+  /** Cards handed to a linked athlete. */
+  transferred: number;
+  /** Cards left with the scorer because the athlete has no GRT account yet. */
+  pending: number;
+  errors: string[];
+}
+
 // --- Outbound push payloads (client → edge fn → TM) ------------------------
 
 export interface TmScoreHole {

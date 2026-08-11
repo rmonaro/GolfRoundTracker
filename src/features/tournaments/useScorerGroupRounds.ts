@@ -1,5 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { roundRepo } from '@/services/roundRepo';
+import { bagRepo } from '@/services/bagRepo';
 import { supabase } from '@/lib/supabase';
 import { useAuthStore } from '@/stores/authStore';
 import { emptyHoles, useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
@@ -8,7 +9,7 @@ import { getCachedCourse } from '@/services/courseCacheRepo';
 import { cacheCourseInBackground } from '@/services/courseCacheRepo';
 import { downloadPackInBackground } from '@/services/coursePackRepo';
 import { newId } from '@/lib/ids';
-import type { Course, Round, RoundHole, Shot } from '@/models';
+import type { BagClub, Course, Round, RoundHole, Shot } from '@/models';
 import type { TmAssignedPlayer, TmScorerAssignment } from '@/services/tmIntegration/types';
 
 /** Everyone in the group is playing the same course, so pars are fetched once. */
@@ -29,6 +30,48 @@ async function parsForCourse(courseId: string | null): Promise<Record<number, nu
 
 function displayName(p: TmAssignedPlayer): string {
   return [p.first_name, p.last_name].filter(Boolean).join(' ').trim() || 'Player';
+}
+
+/**
+ * The bag to offer the scorer for one player.
+ *
+ * Prefer the athlete's real bag — their club names and their typical carry
+ * distances, which is what makes the distance-based suggestion meaningful.
+ * Readable thanks to the scorer policy in migration 035.
+ *
+ * Falls back to the standard club catalog when the player has no GRT account
+ * or has never set a bag up. That fallback is not optional: a scorer must
+ * always be able to name the club, and plenty of juniors are tracked without
+ * ever having installed the app. Catalog clubs carry no distances, so the
+ * suggestion simply goes quiet rather than guessing from someone else's yardages.
+ */
+async function bagForPlayer(player: TmAssignedPlayer): Promise<BagClub[]> {
+  if (player.grt_athlete_id) {
+    try {
+      const bag = await bagRepo.listBag(player.grt_athlete_id);
+      if (bag.length > 0) return bag;
+    } catch (err) {
+      console.warn('[scorer] could not read athlete bag', player.registration_id, err);
+    }
+  }
+  try {
+    const catalog = await bagRepo.listClubs();
+    return catalog.map((c, i) => ({
+      bagId: `catalog-${c.id}`,
+      clubId: c.id,
+      name: c.name,
+      category: c.category,
+      customName: null,
+      brand: null,
+      model: null,
+      loft: null,
+      typicalDistanceYards: null,
+      orderPosition: i
+    }));
+  } catch (err) {
+    console.warn('[scorer] could not read club catalog', err);
+    return [];
+  }
 }
 
 /** Rebuild a scorer's local round from rows already on the server. */
@@ -150,7 +193,18 @@ export function useScorerGroupRounds() {
 
       const opened: ActiveRound[] = [];
 
+      // Pull every player's bag now, while we demonstrably have signal — the
+      // group screen has to keep working in a dead zone.
+      const bags = new Map<string, BagClub[]>();
+      await Promise.all(
+        assignment.players.map(async (p) => {
+          bags.set(p.registration_id, await bagForPlayer(p));
+        })
+      );
+
       for (const player of assignment.players) {
+        const athleteBag = bags.get(player.registration_id) ?? [];
+
         // Resume rather than duplicate. Scoped to this scorer because they own
         // every marker round they've written.
         // eslint-disable-next-line no-await-in-loop
@@ -164,7 +218,11 @@ export function useScorerGroupRounds() {
             roundRepo.listHoles(existing.id),
             roundRepo.listShots(existing.id)
           ]);
-          opened.push(hydrateRound(existing, holes, shots, player, assignment));
+          const resumed = hydrateRound(existing, holes, shots, player, assignment);
+          // Refresh the snapshot on resume — the athlete may have set their bag
+          // up between rounds.
+          resumed.athleteBag = athleteBag;
+          opened.push(resumed);
           continue;
         }
 
@@ -198,7 +256,8 @@ export function useScorerGroupRounds() {
           athleteName: displayName(player),
           // No GRT account yet → the card is claimed later, by email.
           pendingAthleteEmail: player.grt_athlete_id ? null : (player.email ?? null),
-          teeGroupId: assignment.tee_group_id
+          teeGroupId: assignment.tee_group_id,
+          athleteBag
         };
         opened.push(local);
 

@@ -13,6 +13,7 @@ import { initPmtilesProvider } from '@/features/course/pmtilesSetup';
 import { useWatchSync } from '@/features/watch/useWatchSync';
 import { usePracticeWatchSync } from '@/features/practice/usePracticeWatchSync';
 import { useSyncScheduler } from '@/features/offline/useSyncScheduler';
+import { useClaimMarkerRounds } from '@/features/tournaments/useClaimMarkerRounds';
 
 // Set the Mapbox access token once at bootstrap. No-op if VITE_MAPBOX_TOKEN
 // is absent — the hole layout falls back to SVG rendering in that case.
@@ -47,6 +48,9 @@ function WatchSyncMount() {
   usePracticeWatchSync();
   // Drains the offline sync outbox on reconnect / resume / retry.
   useSyncScheduler();
+  // Attaches any tournament rounds a scorekeeper recorded for this user before
+  // they had an account. Once per session, and a no-op for almost everyone.
+  useClaimMarkerRounds();
   return null;
 }
 

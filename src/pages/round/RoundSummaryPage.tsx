@@ -40,6 +40,7 @@ import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import dayjs from 'dayjs';
 import { PageHeader } from '@/components/layout/PageHeader';
+import { MarkerCardBanner } from '@/features/tournaments/MarkerCardBanner';
 import { StatCard } from '@/components/ui/StatCard';
 import { useRoundDetails } from '@/features/stats/useRounds';
 import { detailRoundStats } from '@/features/stats/computeStats';
@@ -292,6 +293,9 @@ export function RoundSummaryPage() {
         subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
         back={isPeekingActiveRound ? true : '/round'}
       />
+
+      {/* Somebody else kept this card — the athlete's sign-off step. */}
+      <MarkerCardBanner round={round} />
 
       {/* Verification backstop — auto-detected shots not yet confirmed. */}
       {unverifiedShots.length > 0 && (

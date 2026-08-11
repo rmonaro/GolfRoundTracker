@@ -77,6 +77,34 @@ export const roundRepo = {
     return data ?? [];
   },
 
+  /**
+   * Athlete signs off on a card a scorekeeper kept for them — the app's version
+   * of signing the marker's scorecard.
+   *
+   * Confirming also freezes it: the scorer's write policy (migration 034) is
+   * conditioned on `athlete_confirmed_at is null`, so once this lands they can
+   * still read the card but no longer change it.
+   */
+  async confirmMarkerCard(roundId: string): Promise<void> {
+    const { error } = await supabase
+      .from('rounds')
+      .update({ athlete_confirmed_at: new Date().toISOString(), athlete_dispute_note: null })
+      .eq('id', roundId);
+    if (error) throw toAppError(error, 'Could not confirm this scorecard');
+  },
+
+  /**
+   * Athlete flags a disagreement. Deliberately does NOT stamp
+   * athlete_confirmed_at, which is what keeps the scorer able to correct it.
+   */
+  async disputeMarkerCard(roundId: string, note: string): Promise<void> {
+    const { error } = await supabase
+      .from('rounds')
+      .update({ athlete_dispute_note: note, athlete_confirmed_at: null })
+      .eq('id', roundId);
+    if (error) throw toAppError(error, 'Could not flag this scorecard');
+  },
+
   async getById(roundId: string): Promise<Round | null> {
     const { data, error } = await supabase.from('rounds').select('*').eq('id', roundId).maybeSingle();
     if (error) throw toAppError(error, 'Could not load round');

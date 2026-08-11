@@ -444,7 +444,7 @@ scorer-owned with `pending_athlete_email` set.
 | 2 | GRT: migration 034, edge-function action + push authorization + attribution fix | **Built** |
 | 3 | GRT: multi-round store + `roundSync` loop | **Built** — no persist version bump was needed, see below |
 | 4 | GRT: scorer UI — assignments list, group page, quick entry, map tap | **Built** — first user-visible milestone |
-| 5 | Ownership transfer, claim, athlete confirm/dispute | |
+| 5 | Ownership transfer, claim, athlete confirm/dispute | **Built** |
 | 6 | Precedence (athlete wins), offline hardening for N rounds, field test | |
 
 ### Deploy order (both phases)
@@ -463,12 +463,33 @@ scorer-owned with `pending_athlete_email` set.
 2. In GRT: **My Tournaments → Scoring for others → Start scoring**.
 3. Route is `/scoring`, group screen is `/scoring/:teeGroupId`.
 
-### Carried into Phase 5/6
+### Handover, as built (Phase 5)
 
-- **Ownership transfer on finish.** Cards are currently submitted to TM and left
-  in the scorer's account carrying `pending_athlete_email` — the exact state
-  `claim_marker_rounds()` resolves. The athlete-facing confirm/dispute UI and the
-  edge-function transfer are Phase 5.
+Finishing a group runs three steps per player: stamp `completed_at` via
+`syncRound`, submit to TM, then **transfer**.
+
+Transfer is the `transfer_marker_rounds` edge-function action, not a
+client-callable RPC — deliberately. Writing somebody else's user id onto a round
+means the athlete id must come from **TM's registration**, never the client;
+otherwise a scorer could push a fabricated card into any account. The function
+verifies the caller recorded the card, resolves the athlete from the assignment
+snapshot, and checks the profile exists before assigning (a missing profile
+would fail the foreign key, so those stay claimable instead).
+
+A player with no GRT account can't be transferred to anyone, so their card stays
+with the scorer carrying `pending_athlete_email`. `useClaimMarkerRounds` runs
+once per session at the app root and calls `claim_marker_rounds()`, which
+matches only rounds whose pending email equals the caller's own profile email —
+an address that came from the TM registration, so there's nothing to spoof.
+
+Attestation is `MarkerCardBanner` on the round summary, plus a Confirm/Flagged
+chip in the history list. Confirming **freezes** the card: the scorer's write
+policy is conditioned on `athlete_confirmed_at is null`, so afterwards they can
+read it but not change it. Disputing deliberately leaves it unconfirmed, which
+is exactly what keeps them able to fix it.
+
+### Carried into Phase 6
+
 - **Precedence** (`tm_card_role`) is written by nothing yet; the athlete-wins
   rule is Phase 6.
 - The **shared hole** is component state on the group screen rather than being

@@ -162,6 +162,8 @@ Deno.serve(async (req) => {
         return await handleLink(db, email, grtAthleteId);
       case 'scorer_assignments':
         return await handleScorerAssignments(db, email, grtAthleteId);
+      case 'transfer_marker_rounds':
+        return await handleTransferMarkerRounds(db, grtAthleteId, args);
       case 'scores':
         return await handlePush(db, 'scores', args, grtAthleteId);
       case 'shots':
@@ -264,6 +266,92 @@ async function handleScorerAssignments(
   await upsertScorerAssignments(db, userId, assignments);
 
   return jsonResponse(payload, 200);
+}
+
+// ---------------------------------------------------------------------------
+// transfer_marker_rounds — hand finished cards to the athletes they belong to.
+//
+// This runs here, with the service role, rather than as a client-callable RPC
+// on purpose. Transferring means writing somebody else's user id onto a round;
+// exposing that to the client would mean trusting a client-supplied athlete id,
+// which would let a scorer push a fabricated card into any user's history. The
+// only id we accept is the one TM recorded on the registration.
+//
+// A player with no GRT account can't be transferred to anyone, so their card
+// stays with the scorer carrying pending_athlete_email — the state
+// claim_marker_rounds() resolves when they eventually sign up.
+// ---------------------------------------------------------------------------
+async function handleTransferMarkerRounds(
+  db: ReturnType<typeof serviceClient>,
+  callerId: string,
+  args: Record<string, unknown>
+): Promise<Response> {
+  const roundIds = Array.isArray(args.round_ids)
+    ? (args.round_ids as unknown[]).filter((v): v is string => typeof v === 'string')
+    : [];
+  if (!roundIds.length) return errorResponse(400, 'round_ids is required');
+
+  let transferred = 0;
+  let pending = 0;
+  const errors: string[] = [];
+
+  for (const roundId of roundIds) {
+    const { data: round } = await db
+      .from('rounds')
+      .select('id, user_id, scoring_mode, scored_by_user_id, tm_registration_id')
+      .eq('id', roundId)
+      .maybeSingle();
+
+    if (!round) {
+      errors.push(`${roundId}: not found`);
+      continue;
+    }
+    // Only the scorekeeper who recorded a marker card may hand it over.
+    if (round.scoring_mode !== 'MARKER' || round.scored_by_user_id !== callerId) {
+      errors.push(`${roundId}: not yours to transfer`);
+      continue;
+    }
+
+    const assigned = await scorerAssignmentFor(db, callerId, round.tm_registration_id ?? null);
+    const athleteId = assigned?.athleteGrtId ?? null;
+
+    if (!athleteId) {
+      pending += 1;
+      continue;
+    }
+
+    // The id comes from TM, which stores whatever GRT stamped on the
+    // registration. If that account no longer exists here, assigning it would
+    // fail on the foreign key — so leave the card claimable instead.
+    const { data: profile } = await db
+      .from('profiles')
+      .select('id')
+      .eq('id', athleteId)
+      .maybeSingle();
+    if (!profile) {
+      pending += 1;
+      continue;
+    }
+
+    // One UPDATE moves the whole round graph: round_holes and shots derive
+    // their RLS from the parent round's user_id.
+    const { error } = await db
+      .from('rounds')
+      .update({
+        user_id: athleteId,
+        pending_athlete_email: null,
+        pending_registration_id: round.tm_registration_id ?? null
+      })
+      .eq('id', roundId);
+
+    if (error) {
+      errors.push(`${roundId}: ${error.message}`);
+      continue;
+    }
+    transferred += 1;
+  }
+
+  return jsonResponse({ data: { transferred, pending, errors } }, 200);
 }
 
 // ---------------------------------------------------------------------------

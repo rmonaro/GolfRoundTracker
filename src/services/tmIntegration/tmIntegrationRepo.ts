@@ -6,7 +6,8 @@ import type {
   TmScorePush,
   TmScorecardResult,
   TmScorerAssignments,
-  TmShotsPush
+  TmShotsPush,
+  TmTransferResult
 } from './types';
 
 // All TM calls go through the `tm-integration` edge function so the shared
@@ -56,6 +57,18 @@ export const tmIntegrationRepo = {
    */
   getScorerAssignments(): Promise<TmScorerAssignments> {
     return callTm<TmScorerAssignments>('scorer_assignments');
+  },
+
+  /**
+   * Hand finished marker cards to the athletes they belong to.
+   *
+   * Server-side by necessity: the athlete id comes from TM's registration, never
+   * from the client, so a scorer can't write a card into an arbitrary account.
+   * Cards for players without a GRT account come back as `pending` and stay
+   * claimable by email.
+   */
+  transferMarkerRounds(roundIds: string[]): Promise<TmTransferResult> {
+    return callTm<TmTransferResult>('transfer_marker_rounds', { round_ids: roundIds });
   },
 
   /** Push hole scores (drives TM's live leaderboard). SUBMITTED locks the round. */

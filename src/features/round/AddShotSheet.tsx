@@ -130,6 +130,11 @@ interface AddShotSheetProps {
   holePar: number;
   bagClubs: BagClub[];
   /**
+   * Show each club's typical carry in the picker. On in scorer mode, where the
+   * bag belongs to the player being scored rather than the person tapping.
+   */
+  showClubDistances?: boolean;
+  /**
    * Optional pre-selected club for a NEW shot (ignored in edit mode). The
    * sheet sets clubId + tier1 accordingly when it opens. Use case: after the
    * previous shot landed on the green, HoleTrackingPage passes the putter id
@@ -232,6 +237,7 @@ export function AddShotSheet({
   editing,
   holePar,
   bagClubs,
+  showClubDistances = false,
   defaultClubId,
   defaultGps,
   onClose,
@@ -693,6 +699,7 @@ export function AddShotSheet({
               bagClubs={bagClubs}
               clubId={clubId}
               tier1={tier1}
+              showDistances={showClubDistances}
               onChange={(nextClubId, nextTier1) => {
                 setClubId(nextClubId);
                 setTier1(nextTier1);
@@ -727,9 +734,21 @@ interface ClubPickerProps {
   clubId: string | null;
   tier1: ClubTier1 | null;
   onChange: (clubId: string | null, tier1: ClubTier1 | null) => void;
+  /**
+   * Append each club's typical carry to its chip. Off by default — a golfer
+   * knows their own bag. On in scorer mode, where the person tapping is picking
+   * from SOMEONE ELSE'S bag and the yardages are the whole point.
+   */
+  showDistances?: boolean;
 }
 
-export function ClubPicker({ bagClubs, clubId, tier1, onChange }: ClubPickerProps) {
+export function ClubPicker({
+  bagClubs,
+  clubId,
+  tier1,
+  onChange,
+  showDistances = false
+}: ClubPickerProps) {
   const sortedBag = [...bagClubs].sort((a, b) => a.orderPosition - b.orderPosition);
 
   const groups: Record<ClubTier1, BagClub[]> = {
@@ -816,7 +835,11 @@ export function ClubPicker({ bagClubs, clubId, tier1, onChange }: ClubPickerProp
               return (
                 <Chip
                   key={club.bagId}
-                  label={club.customName || club.name}
+                  label={
+                    showDistances && club.typicalDistanceYards != null
+                      ? `${club.customName || club.name} · ${club.typicalDistanceYards}y`
+                      : club.customName || club.name
+                  }
                   onClick={() => onChange(club.clubId, effectiveTier1)}
                   color={active ? 'primary' : 'default'}
                   variant={active ? 'filled' : 'outlined'}

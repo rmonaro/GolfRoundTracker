@@ -170,6 +170,17 @@ export function PastRoundsPage() {
                           </Typography>
                           <Stack direction="row" spacing={0.75} mt={0.5}>
                             <Chip label={`${r.holes_played} holes`} size="small" />
+                            {/* A card somebody else kept, still waiting on this
+                                golfer's sign-off. Surfaced here so it's noticed
+                                without having to open the round. */}
+                            {r.scoring_mode === 'MARKER' && !r.athlete_confirmed_at && (
+                              <Chip
+                                label={r.athlete_dispute_note ? 'Flagged' : 'Confirm'}
+                                size="small"
+                                color={r.athlete_dispute_note ? 'error' : 'info'}
+                                variant="outlined"
+                              />
+                            )}
                             {r.handicap_differential != null && (
                               <Chip
                                 label={`Δ ${r.handicap_differential.toFixed(1)}`}

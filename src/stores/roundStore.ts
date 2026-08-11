@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { createIdbStorage } from '@/lib/idbStorage';
 import { isUuid, newId } from '@/lib/ids';
 import type {
+  BagClub,
   DistanceUnit,
   FairwayResult,
   Lie,
@@ -146,6 +147,17 @@ export interface ActiveRound {
   pendingAthleteEmail?: string | null;
   /** TM tee group this round is being scored under. */
   teeGroupId?: string | null;
+  /**
+   * The ATHLETE's bag, so the scorer records the club that player actually
+   * carries — with that player's own typical carry distances, which is what
+   * lets a tapped shot distance suggest a club.
+   *
+   * Snapshotted onto the round rather than fetched on demand because scoring
+   * has to work with no signal, and a live query would leave the club picker
+   * empty in a dead zone. Falls back to the standard club catalog (no
+   * distances) for a player with no GRT account or an empty bag.
+   */
+  athleteBag?: BagClub[];
 
   // --- sync bookkeeping (Phase 5) ---
 

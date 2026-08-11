@@ -17,6 +17,7 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
@@ -35,12 +36,16 @@ import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import MapRoundedIcon from '@mui/icons-material/MapRounded';
 import SpeedRoundedIcon from '@mui/icons-material/SpeedRounded';
 import FlagRoundedIcon from '@mui/icons-material/FlagRounded';
+import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
+import { recommendClub } from '@/features/course/HoleLayout';
+import { metersToYards } from '@/features/course/distance';
 import { AddShotSheet } from '@/features/round/AddShotSheet';
 import { SyncStatusChip } from '@/features/offline/SyncStatusChip';
 import { ScorerQuickEntry, type QuickEntryChange } from '@/features/tournaments/ScorerQuickEntry';
 import { useScorerAssignment } from '@/features/tournaments/useScorerAssignments';
+import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
 import { finalizeScorerRound, pushScorerHole } from '@/features/tournaments/scorerPush';
 import { enqueueFinishedRound, syncRound } from '@/services/roundSync';
 import { computeTotalScore, holeTotalScore } from '@/features/round/computeRoundTotals';
@@ -48,7 +53,7 @@ import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useBagStore } from '@/stores/bagStore';
 import { useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
 import { newId } from '@/lib/ids';
-import type { Lie, TargetResult } from '@/models';
+import type { BagClub, Lie, TargetResult } from '@/models';
 
 /** Pending map tap, waiting for the shot sheet to collect the rest. */
 interface PendingLanding {
@@ -72,7 +77,18 @@ export function ScorerGroupPage() {
   const active = useRoundStore((s) => s.active);
   const parked = useRoundStore((s) => s.parked);
   const switchRound = useRoundStore((s) => s.switchRound);
-  const bagClubs = useBagStore((s) => s.clubs);
+  const scorerBag = useBagStore((s) => s.clubs);
+
+  /**
+   * The bag of the player on screen — NOT the scorekeeper's.
+   *
+   * This is the whole point: the club recorded on somebody's round has to come
+   * from the clubs they actually carry, with their own carry distances, or the
+   * suggestion below is guessing from the wrong yardages. Snapshotted onto the
+   * round when the group opened, so it survives a dead zone. The scorer's own
+   * bag is only a last resort for a round that predates this.
+   */
+  const bagClubs = active?.athleteBag?.length ? active.athleteBag : scorerBag;
 
   const [mode, setMode] = useState<'detail' | 'quick'>('detail');
   const [holeNumber, setHoleNumber] = useState<number | null>(null);
@@ -111,6 +127,25 @@ export function ScorerGroupPage() {
   const currentHole: LocalHole | undefined = active?.holes.find(
     (h) => h.holeNumber === holeNumber
   );
+
+  /**
+   * Club suggested for the shot the scorer just marked, from the distance the
+   * map measured and the ATHLETE's own carry distances.
+   *
+   * `excludeDriver` past the tee mirrors the recommender's real-golf rule: from
+   * 250 out in the fairway you hit a 3-wood or hybrid, not a driver. Shot 1 on
+   * a par 4 or 5 is the exception.
+   */
+  const suggestedClubId = useMemo(() => {
+    if (!landing) return null;
+    const yards = metersToYards(landing.calculatedDistanceM);
+    if (!Number.isFinite(yards) || yards <= 0) return null;
+    const shotNumber = (currentHole?.shots.length ?? 0) + 1;
+    const isTeeShot = shotNumber === 1 && (currentHole?.par ?? 4) !== 3;
+    return (
+      recommendClub(bagClubs, yards, { excludeDriver: !isTeeShot })?.clubId ?? null
+    );
+  }, [landing, bagClubs, currentHole]);
 
   /** Record a shot against whichever player is on screen. */
   const addShot = useCallback(
@@ -329,33 +364,54 @@ export function ScorerGroupPage() {
           <>
             {/* Tap the map where the ball came to rest. The layout ray-casts the
                 tap against the course polygons, so the shot sheet opens with the
-                lie and result already inferred. */}
-            <HoleLayoutCard
-              courseId={active.courseId}
-              holeNumber={holeNumber ?? 1}
-              par={currentHole?.par ?? null}
-              yardage={currentHole?.yardage ?? null}
-              compact
-              interactive
-              landingPoint={landing?.end ?? null}
-              shotEndPoints={
-                currentHole?.shots
-                  .filter((s) => s.endLng != null && s.endLat != null)
-                  .map((s) => [s.endLng as number, s.endLat as number]) ?? []
-              }
-              shotLabels={
-                currentHole?.shots
-                  .filter((s) => s.endLng != null && s.endLat != null)
-                  .map((s) => ({
-                    club: clubLabelFor(s.clubId, bagClubs),
-                    distance: s.distance != null ? `${Math.round(s.distance)}` : null
-                  })) ?? []
-              }
-              onShotLanded={(data) => {
-                setLanding(data);
-                setSheetOpen(true);
+                lie and result already inferred.
+
+                The wrapper's DEFINITE height is load-bearing, not styling:
+                HoleLayoutCard is height:100%, and Mapbox needs a sized
+                container. Inside an auto-height flex column that percentage
+                resolves to auto and the map renders at zero height. Unlike
+                HoleTrackingPage this isn't full-screen — the shot list has to
+                share the screen — so it's a fixed band that still leaves room to
+                tap a landing spot accurately. */}
+            <Box
+              sx={{
+                position: 'relative',
+                // Only reserve the band when there's a course to draw. The card
+                // renders nothing at all without one, which would otherwise
+                // leave a tall empty gap above the shot list.
+                display: active.courseId ? 'block' : 'none',
+                height: 'clamp(280px, 42vh, 460px)',
+                borderRadius: '5px',
+                overflow: 'hidden'
               }}
-            />
+            >
+              <HoleLayoutCard
+                courseId={active.courseId}
+                holeNumber={holeNumber ?? 1}
+                par={currentHole?.par ?? null}
+                yardage={currentHole?.yardage ?? null}
+                compact
+                interactive
+                landingPoint={landing?.end ?? null}
+                shotEndPoints={
+                  currentHole?.shots
+                    .filter((s) => s.endLng != null && s.endLat != null)
+                    .map((s) => [s.endLng as number, s.endLat as number]) ?? []
+                }
+                shotLabels={
+                  currentHole?.shots
+                    .filter((s) => s.endLng != null && s.endLat != null)
+                    .map((s) => ({
+                      club: clubLabelFor(s.clubId, bagClubs),
+                      distance: s.distance != null ? `${Math.round(s.distance)}` : null
+                    })) ?? []
+                }
+                onShotLanded={(data) => {
+                  setLanding(data);
+                  setSheetOpen(true);
+                }}
+              />
+            </Box>
 
             <Paper elevation={0} sx={{ p: 1.5, borderRadius: '5px', bgcolor: 'background.paper' }}>
               <Stack
@@ -427,6 +483,12 @@ export function ScorerGroupPage() {
                 Add shot
               </Button>
             </Paper>
+
+            <AthleteBagReference
+              athleteName={active.athleteName ?? 'Player'}
+              bagClubs={bagClubs}
+              isFallback={!active.athleteBag?.length}
+            />
           </>
         )}
 
@@ -446,6 +508,14 @@ export function ScorerGroupPage() {
         shotNumber={(currentHole?.shots.length ?? 0) + 1}
         holePar={currentHole?.par ?? 4}
         bagClubs={bagClubs}
+        // The bag isn't the scorer's, so the yardages are what tell them which
+        // club this player would have hit.
+        showClubDistances
+        // Pre-select the club whose typical carry is closest to the distance
+        // just measured off the map. Null when the player has no recorded
+        // yardages (an unlinked player on the catalog fallback), in which case
+        // the picker simply opens unselected rather than guessing.
+        defaultClubId={suggestedClubId}
         defaultGps={
           landing
             ? {
@@ -476,6 +546,70 @@ export function ScorerGroupPage() {
         }}
       />
     </Box>
+  );
+}
+
+/**
+ * What this player carries, and how far they hit it.
+ *
+ * A scorekeeper walking with someone else's bag has no idea what that player
+ * hits 150 — so this is the reference that makes "which club was that?" a
+ * question they can actually answer. Collapsed by default; the map and the shot
+ * list are what they're using shot to shot.
+ */
+function AthleteBagReference({
+  athleteName,
+  bagClubs,
+  isFallback
+}: {
+  athleteName: string;
+  bagClubs: BagClub[];
+  isFallback: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  if (!bagClubs.length) return null;
+
+  const withYardage = bagClubs.filter((c) => c.typicalDistanceYards != null).length;
+
+  return (
+    <Paper elevation={0} sx={{ borderRadius: '5px', bgcolor: 'background.paper' }}>
+      <Button
+        fullWidth
+        size="small"
+        onClick={() => setOpen((o) => !o)}
+        startIcon={<GolfCourseRoundedIcon sx={{ fontSize: 16 }} />}
+        sx={{ justifyContent: 'flex-start', px: 1.5, py: 1, color: 'text.secondary' }}
+      >
+        {athleteName}&apos;s bag
+        {withYardage > 0 ? ` · ${withYardage} with distances` : ' · no distances set'}
+      </Button>
+      <Collapse in={open}>
+        <Box sx={{ px: 1.5, pb: 1.5 }}>
+          {isFallback && (
+            <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
+              This player hasn&apos;t set up a bag in GRT, so these are the standard
+              clubs with no distances.
+            </Typography>
+          )}
+          <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+            {[...bagClubs]
+              .sort((a, b) => a.orderPosition - b.orderPosition)
+              .map((c) => (
+                <Chip
+                  key={c.bagId}
+                  size="small"
+                  variant="outlined"
+                  label={
+                    c.typicalDistanceYards != null
+                      ? `${c.customName || c.name} · ${c.typicalDistanceYards}y`
+                      : c.customName || c.name
+                  }
+                />
+              ))}
+          </Box>
+        </Box>
+      </Collapse>
+    </Paper>
   );
 }
 
@@ -556,9 +690,25 @@ function FinishGroupDialog({
         await finalizeScorerRound(r);
       }
 
-      // Phase 5 adds the ownership transfer and the athlete's confirmation.
-      // Until then the cards stay in the scorer's account carrying
-      // pending_athlete_email — exactly the state claim_marker_rounds() resolves.
+      // Hand each card to the athlete it belongs to. Server-side, because the
+      // athlete id has to come from TM's registration rather than the client.
+      // Players without a GRT account come back as `pending` and keep their
+      // claim key — claim_marker_rounds() attaches those when they sign up.
+      //
+      // Best-effort: the cards are already submitted to TM and safe in the
+      // scorer's account, so a failure here delays the handover rather than
+      // losing anything.
+      try {
+        const result = await tmIntegrationRepo.transferMarkerRounds(
+          rounds.map((r) => r.roundId)
+        );
+        if (result.errors?.length) {
+          console.warn('[scorer] some cards did not transfer', result.errors);
+        }
+      } catch (err) {
+        console.error('[scorer] transfer failed', err);
+      }
+
       const store = useRoundStore.getState();
       for (const r of rounds) store.closeRound(r.roundId);
       onDone();
