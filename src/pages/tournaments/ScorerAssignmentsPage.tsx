@@ -103,6 +103,10 @@ function AssignmentCard({ assignment }: { assignment: TmScorerAssignment }) {
     tournament.external_course_id
   );
   const openGroup = useScorerGroupRounds();
+  // Gate on hydration. Before the IndexedDB read settles the store looks empty,
+  // so an already-open group reads as closed — and tapping Start would rebuild
+  // it from the SERVER, discarding any shots that hadn't synced yet.
+  const hydrated = useRoundStore((s) => s.hydrated);
   const active = useRoundStore((s) => s.active);
   const parked = useRoundStore((s) => s.parked);
   const [error, setError] = useState<string | null>(null);
@@ -145,7 +149,7 @@ function AssignmentCard({ assignment }: { assignment: TmScorerAssignment }) {
     }
   };
 
-  const busy = openGroup.isPending || isImporting;
+  const busy = openGroup.isPending || isImporting || !hydrated;
 
   return (
     <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
@@ -231,7 +235,13 @@ function AssignmentCard({ assignment }: { assignment: TmScorerAssignment }) {
             disabled={(!assignment.can_start && !isOpen) || otherActive || busy || !players.length}
             onClick={handleOpen}
           >
-            {busy ? 'Opening…' : isOpen ? 'Resume scoring' : 'Start scoring'}
+            {!hydrated
+              ? 'Checking…'
+              : busy
+                ? 'Opening…'
+                : isOpen
+                  ? 'Resume scoring'
+                  : 'Start scoring'}
           </Button>
         </Box>
 

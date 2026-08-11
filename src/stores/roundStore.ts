@@ -180,6 +180,15 @@ export interface ActiveRound {
 }
 
 interface RoundState {
+  /**
+   * False until the persisted round has been read back from IndexedDB.
+   *
+   * That read is ASYNC, so the first render after a reload always shows
+   * `active: null` — indistinguishable from "no round in progress" unless a
+   * screen waits for this. Not persisted (see partialize): it describes this
+   * session, not the round.
+   */
+  hydrated: boolean;
   active: ActiveRound | null;
   /**
    * Other live rounds, parked while a different one is on screen. Keyed by
@@ -324,6 +333,7 @@ export function migratePersistedRound(
 export const useRoundStore = create<RoundState>()(
   persist(
     (set) => ({
+      hydrated: false,
       active: null,
       parked: {},
 
@@ -649,7 +659,13 @@ export const useRoundStore = create<RoundState>()(
       // is why this needed no version bump.
       partialize: (state) => ({ active: state.active, parked: state.parked }),
       version: PERSIST_VERSION,
-      migrate: migratePersistedRound
+      migrate: migratePersistedRound,
+      // Fires after the IndexedDB read settles, whether or not anything was
+      // stored. Screens gate their "nothing in progress" empty state on this so
+      // a reload doesn't flash it before the round comes back.
+      onRehydrateStorage: () => () => {
+        useRoundStore.setState({ hydrated: true });
+      }
     }
   )
 );

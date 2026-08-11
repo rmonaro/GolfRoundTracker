@@ -46,7 +46,10 @@ import { AddShotSheet } from '@/features/round/AddShotSheet';
 import { SyncStatusChip } from '@/features/offline/SyncStatusChip';
 import { ScorerQuickEntry, type QuickEntryChange } from '@/features/tournaments/ScorerQuickEntry';
 import { useScorerAssignment } from '@/features/tournaments/useScorerAssignments';
+import { useScorerGroupRounds } from '@/features/tournaments/useScorerGroupRounds';
+import { useTournamentCourse } from '@/features/tournaments/useTournamentCourse';
 import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
+import { toAppError } from '@/services/errors';
 import { finalizeScorerRound, pushScorerHole } from '@/features/tournaments/scorerPush';
 import { enqueueFinishedRound, syncRound } from '@/services/roundSync';
 import {
@@ -97,9 +100,20 @@ export function ScorerGroupPage() {
   const navigate = useNavigate();
   const { assignment } = useScorerAssignment(teeGroupId);
 
-  const active = useRoundStore((s) => s.active);
+  const hydrated = useRoundStore((s) => s.hydrated);
+  const activeRound = useRoundStore((s) => s.active);
   const parked = useRoundStore((s) => s.parked);
   const switchRound = useRoundStore((s) => s.switchRound);
+
+  /**
+   * The round on screen, but only when it belongs to THIS group.
+   *
+   * These can diverge: `startRound` replaces the active round without touching
+   * parked ones, so a scorer who starts their own round leaves the group's four
+   * cards parked and someone else's round current. Rendering this screen
+   * against that would show a personal round under the group's player tabs.
+   */
+  const active = activeRound?.teeGroupId === teeGroupId ? activeRound : null;
   const scorerBag = useBagStore((s) => s.clubs);
 
   /**
@@ -128,7 +142,7 @@ export function ScorerGroupPage() {
    */
   const rounds = useMemo(() => {
     const all: ActiveRound[] = [
-      ...(active ? [active] : []),
+      ...(activeRound ? [activeRound] : []),
       ...Object.values(parked)
     ].filter((r) => r.teeGroupId === teeGroupId);
 
@@ -140,7 +154,13 @@ export function ScorerGroupPage() {
       const bi = order.get(b.tmRegistrationId ?? '') ?? Number.MAX_SAFE_INTEGER;
       return ai - bi;
     });
-  }, [active, parked, assignment, teeGroupId]);
+  }, [activeRound, parked, assignment, teeGroupId]);
+
+  // The group is live but a different round is on screen — put the group back.
+  useEffect(() => {
+    if (!hydrated || active || rounds.length === 0) return;
+    switchRound(rounds[0].roundId);
+  }, [hydrated, active, rounds, switchRound]);
 
   // Seed the shared hole from whichever card is on screen, once.
   useEffect(() => {
@@ -275,17 +295,32 @@ export function ScorerGroupPage() {
     schedulePush(updated, change.holeNumber);
   }, []);
 
-  if (!active || rounds.length === 0) {
+  // The round comes back from IndexedDB asynchronously, so before that read
+  // settles `active` is null for reasons that have nothing to do with this
+  // group. Showing the empty state here would tell a scorekeeper mid-round that
+  // their group is gone.
+  if (!hydrated) {
     return (
       <Box>
         <PageHeader title="Scoring" back="/scoring" />
-        <Stack spacing={2} px={2}>
-          <Alert severity="info">
-            This group isn&apos;t open. Go back and start scoring it.
-          </Alert>
-          <Button variant="contained" onClick={() => navigate('/scoring')}>
-            Back to my groups
-          </Button>
+        <Stack alignItems="center" py={6}>
+          <CircularProgress />
+        </Stack>
+      </Box>
+    );
+  }
+
+  if (rounds.length === 0) {
+    return <ReopenGroup teeGroupId={teeGroupId} blockedBy={activeRound} />;
+  }
+
+  // Cards are live; the effect above is bringing one to the front.
+  if (!active) {
+    return (
+      <Box>
+        <PageHeader title="Scoring" back="/scoring" />
+        <Stack alignItems="center" py={6}>
+          <CircularProgress />
         </Stack>
       </Box>
     );
@@ -641,6 +676,109 @@ export function ScorerGroupPage() {
           navigate('/scoring');
         }}
       />
+    </Box>
+  );
+}
+
+/**
+ * Shown when this tee group has no live rounds — after finishing it, after the
+ * local store was cleared, or when the link was opened directly.
+ *
+ * Opens the group from here rather than sending the scorekeeper back to the
+ * list to do the same thing. `useScorerGroupRounds` resumes any cards already
+ * recorded for these players rather than starting blank ones, so re-opening a
+ * group mid-round is safe and is the recovery path when a device is wiped.
+ */
+function ReopenGroup({
+  teeGroupId,
+  blockedBy
+}: {
+  teeGroupId: string | undefined;
+  blockedBy: ActiveRound | null;
+}) {
+  const navigate = useNavigate();
+  const { assignment, isLoading } = useScorerAssignment(teeGroupId);
+  const { course, ensureCourse, isImporting } = useTournamentCourse(
+    assignment?.tournament.external_course_id
+  );
+  const openGroup = useScorerGroupRounds();
+  const [error, setError] = useState<string | null>(null);
+
+  const open = async () => {
+    setError(null);
+    if (!assignment) return;
+    try {
+      const resolved = course ?? (await ensureCourse());
+      if (!resolved) {
+        setError('Could not resolve this tournament’s course.');
+        return;
+      }
+      await openGroup.mutateAsync({ assignment, course: resolved });
+    } catch (err) {
+      setError(toAppError(err).message);
+    }
+  };
+
+  return (
+    <Box>
+      <PageHeader title="Scoring" back="/scoring" />
+      <Stack spacing={2} px={2}>
+        {isLoading && (
+          <Stack alignItems="center" py={4}>
+            <CircularProgress />
+          </Stack>
+        )}
+
+        {!isLoading && !assignment && (
+          <>
+            <Alert severity="warning">
+              You aren&apos;t assigned to this tee group, or it no longer exists.
+            </Alert>
+            <Button variant="contained" onClick={() => navigate('/scoring')}>
+              Back to my groups
+            </Button>
+          </>
+        )}
+
+        {assignment && (
+          <>
+            {/* Opening a group while a personal round is live would leave the
+                scorer tracking their own round and four others at once. */}
+            {blockedBy ? (
+              <Alert severity="warning">
+                You have a round in progress at {blockedBy.courseName}. Finish it
+                before scoring this group.
+              </Alert>
+            ) : (
+              <Alert severity="info">
+                This group isn&apos;t open on this device. Opening it picks up any
+                scores already recorded for these players.
+              </Alert>
+            )}
+
+            <Paper elevation={0} sx={{ p: 2, borderRadius: '5px', bgcolor: 'background.paper' }}>
+              <Typography variant="subtitle1">{assignment.tournament.name}</Typography>
+              <Typography variant="body2" color="text.secondary">
+                Round {assignment.round_number} ·{' '}
+                {assignment.players.map((p) => p.first_name).join(', ')}
+              </Typography>
+            </Paper>
+
+            {error && <Alert severity="error">{error}</Alert>}
+
+            <Button
+              variant="contained"
+              disabled={!!blockedBy || openGroup.isPending || isImporting}
+              onClick={open}
+            >
+              {openGroup.isPending || isImporting ? 'Opening…' : 'Open this group'}
+            </Button>
+            <Button variant="text" onClick={() => navigate('/scoring')}>
+              Back to my groups
+            </Button>
+          </>
+        )}
+      </Stack>
     </Box>
   );
 }
