@@ -9,7 +9,7 @@
 // selection. The phone's GPS is the scorekeeper's position, not any player's
 // ball, so ball positions come from tapping the map instead.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   Alert,
@@ -47,6 +47,7 @@ import { SyncStatusChip } from '@/features/offline/SyncStatusChip';
 import { ScorerQuickEntry, type QuickEntryChange } from '@/features/tournaments/ScorerQuickEntry';
 import { useScorerAssignment } from '@/features/tournaments/useScorerAssignments';
 import { useScorerGroupRounds } from '@/features/tournaments/useScorerGroupRounds';
+import { bagForPlayer, isCatalogBag } from '@/features/tournaments/athleteBag';
 import { useTournamentCourse } from '@/features/tournaments/useTournamentCourse';
 import { tmIntegrationRepo } from '@/services/tmIntegration/tmIntegrationRepo';
 import { toAppError } from '@/services/errors';
@@ -58,7 +59,6 @@ import {
   holeTotalScore
 } from '@/features/round/computeRoundTotals';
 import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
-import { useBagStore } from '@/stores/bagStore';
 import {
   useRoundStore,
   type ActiveRound,
@@ -114,18 +114,16 @@ export function ScorerGroupPage() {
    * against that would show a personal round under the group's player tabs.
    */
   const active = activeRound?.teeGroupId === teeGroupId ? activeRound : null;
-  const scorerBag = useBagStore((s) => s.clubs);
-
   /**
-   * The bag of the player on screen — NOT the scorekeeper's.
+   * The bag of the player on screen — NEVER the scorekeeper's.
    *
-   * This is the whole point: the club recorded on somebody's round has to come
-   * from the clubs they actually carry, with their own carry distances, or the
-   * suggestion below is guessing from the wrong yardages. Snapshotted onto the
-   * round when the group opened, so it survives a dead zone. The scorer's own
-   * bag is only a last resort for a round that predates this.
+   * The club recorded on somebody's round has to come from the clubs they
+   * actually carry, with their own carry distances, or the suggestion is
+   * guessing from the wrong yardages. Falling back to the scorer's own bag
+   * would silently put their clubs on another player's card, so an empty bag
+   * here means an empty picker until the backfill below fills it in.
    */
-  const bagClubs = active?.athleteBag?.length ? active.athleteBag : scorerBag;
+  const bagClubs = active?.athleteBag ?? [];
 
   const [mode, setMode] = useState<'detail' | 'quick'>('detail');
   const [holeNumber, setHoleNumber] = useState<number | null>(null);
@@ -161,6 +159,32 @@ export function ScorerGroupPage() {
     if (!hydrated || active || rounds.length === 0) return;
     switchRound(rounds[0].roundId);
   }, [hydrated, active, rounds, switchRound]);
+
+  /**
+   * Backfill missing athlete bags.
+   *
+   * The bag is captured when a group is OPENED, so a group that was already
+   * live — opened on an older build, or before its fetch could succeed — has
+   * none, and its club picker would be empty. Resuming through the assignments
+   * screen wouldn't fix it either, since that path skips the open mutation
+   * entirely. Runs once per round; the result is stored on the round, so it
+   * persists and survives going offline.
+   */
+  const backfilled = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!assignment) return;
+    for (const r of rounds) {
+      if (r.athleteBag?.length || backfilled.current.has(r.roundId)) continue;
+      const player = assignment.players.find(
+        (p) => p.registration_id === r.tmRegistrationId
+      );
+      if (!player) continue;
+      backfilled.current.add(r.roundId);
+      void bagForPlayer(player).then((bag) => {
+        if (bag.length) useRoundStore.getState().setAthleteBag(r.roundId, bag);
+      });
+    }
+  }, [assignment, rounds]);
 
   // Seed the shared hole from whichever card is on screen, once.
   useEffect(() => {
@@ -596,7 +620,12 @@ export function ScorerGroupPage() {
             <AthleteBagReference
               athleteName={active.athleteName ?? 'Player'}
               bagClubs={bagClubs}
-              isFallback={!active.athleteBag?.length}
+              isCatalog={isCatalogBag(bagClubs)}
+              hasAccount={
+                !!assignment?.players.find(
+                  (p) => p.registration_id === active.tmRegistrationId
+                )?.grt_athlete_id
+              }
             />
           </>
         )}
@@ -794,11 +823,15 @@ function ReopenGroup({
 function AthleteBagReference({
   athleteName,
   bagClubs,
-  isFallback
+  isCatalog,
+  hasAccount
 }: {
   athleteName: string;
   bagClubs: BagClub[];
-  isFallback: boolean;
+  /** Showing the standard catalog rather than a real bag. */
+  isCatalog: boolean;
+  /** Whether TM knows a GRT account for this player. */
+  hasAccount: boolean;
 }) {
   const [open, setOpen] = useState(false);
   if (!bagClubs.length) return null;
@@ -814,15 +847,19 @@ function AthleteBagReference({
         startIcon={<GolfCourseRoundedIcon sx={{ fontSize: 16 }} />}
         sx={{ justifyContent: 'flex-start', px: 1.5, py: 1, color: 'text.secondary' }}
       >
-        {athleteName}&apos;s bag
-        {withYardage > 0 ? ` · ${withYardage} with distances` : ' · no distances set'}
+        {isCatalog ? 'Standard clubs' : `${athleteName}'s bag`}
+        {withYardage > 0 ? ` · ${withYardage} with distances` : ' · no distances'}
       </Button>
       <Collapse in={open}>
         <Box sx={{ px: 1.5, pb: 1.5 }}>
-          {isFallback && (
+          {isCatalog && (
             <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1 }}>
-              This player hasn&apos;t set up a bag in GRT, so these are the standard
-              clubs with no distances.
+              {hasAccount
+                ? // Distinguishing an empty bag from a missing read is impossible
+                  // from here — RLS filters rows rather than erroring — so name
+                  // both rather than assert the wrong one.
+                  `${athleteName} has a GRT account but no clubs came back, so these are the standard clubs. Either they haven't set a bag up, or migration 035 isn't applied yet.`
+                : `${athleteName} doesn't have a GRT account, so these are the standard clubs with no distances.`}
             </Typography>
           )}
           <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
@@ -849,7 +886,7 @@ function AthleteBagReference({
 
 function clubLabelFor(
   clubId: string | null,
-  bagClubs: ReturnType<typeof useBagStore.getState>['clubs']
+  bagClubs: BagClub[]
 ): string | null {
   if (!clubId) return null;
   const club = bagClubs.find((c) => c.clubId === clubId);

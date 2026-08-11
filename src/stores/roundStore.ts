@@ -213,6 +213,11 @@ interface RoundState {
    * its place, so a scorer who finishes one player stays inside the group.
    */
   closeRound: (roundId: string) => void;
+  /**
+   * Attach the athlete's bag to a live round. Backfills a group opened before
+   * bags were captured, or one whose fetch failed while offline.
+   */
+  setAthleteBag: (roundId: string, bag: BagClub[]) => void;
   setCurrentHole: (idx: number) => void;
   updateHole: (holeNumber: number, patch: Partial<LocalHole>) => void;
   addShot: (holeNumber: number, shot: LocalShot) => void;
@@ -471,6 +476,9 @@ export const useRoundStore = create<RoundState>()(
           );
           return { active: { ...s.active, holes } };
         }),
+
+      setAthleteBag: (roundId, bag) =>
+        set((s) => applyToRound(s, roundId, (r) => ({ ...r, athleteBag: bag }))),
 
       markRoundSynced: (roundId) =>
         set((s) =>
