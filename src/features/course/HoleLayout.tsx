@@ -934,10 +934,19 @@ export function HoleLayout({
     setMapErrored(false);
   }, [imagery.kind, imagery.url]);
 
+  // Quantised to ~1 m. The fallback SVG is rebuilt whole when this changes, and
+  // a raw fix arrives about once a second with sub-metre jitter that would move
+  // the dot by less than its own radius — not worth redrawing the hole for.
+  const dotLng = currentLocation ? Math.round(currentLocation[0] * 1e5) / 1e5 : null;
+  const dotLat = currentLocation ? Math.round(currentLocation[1] * 1e5) / 1e5 : null;
   const svgRender = useMemo(() => {
     if (useMapbox) return null;
-    return buildSvgRender(layout, compact);
-  }, [useMapbox, layout, compact]);
+    return buildSvgRender(
+      layout,
+      compact,
+      dotLng != null && dotLat != null ? [dotLng, dotLat] : null
+    );
+  }, [useMapbox, layout, compact, dotLng, dotLat]);
 
   const containerRef = useRef<HTMLDivElement | null>(null);
   // Persistent map + landing-point marker handles so we can update them
@@ -947,6 +956,17 @@ export function HoleLayout({
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const landingMarkerRef = useRef<mapboxgl.Marker | null>(null);
   const userMarkerRef = useRef<mapboxgl.Marker | null>(null);
+  // Bumped every time the map-creation effect builds a NEW mapbox instance.
+  //
+  // The marker effects below attach to `mapRef.current` imperatively and then
+  // short-circuit to `setLngLat` on subsequent runs. That's what keeps taps
+  // cheap — but it also meant that when the big effect DID rebuild the map
+  // (a new shot changes `shotEndPoints`, the pin moves, imagery switches…),
+  // every marker was left holding a handle to the destroyed instance, and the
+  // `setLngLat` fast-path meant it was never re-added. The blue "you are here"
+  // dot vanished at the first shot of the hole and stayed gone. Including this
+  // counter in the marker effects' deps re-runs them against the new map.
+  const [mapGeneration, setMapGeneration] = useState(0);
   // Persists the user's dragged aim-handle position across map-effect
   // re-runs. Without this, any state change in deps (par/yardage edit,
   // prop ripples) destroys the marker and the handle snaps back to its
@@ -1061,6 +1081,8 @@ export function HoleLayout({
     // Expose the map to side-effects (landing-point marker, etc.) so they
     // can update overlays without forcing this whole effect to re-fire.
     mapRef.current = map;
+    // Tell the marker effects a fresh instance exists so they re-attach.
+    setMapGeneration((n) => n + 1);
 
     // Two-finger gestures should pinch-zoom only — never rotate the carefully
     // computed tee→green bearing. (touchZoomRotate is enabled above when
@@ -2110,10 +2132,15 @@ export function HoleLayout({
     // about concurrent contexts; a leaked map is the kind of bug that only
     // shows up after the user swipes through 10 holes.
     return () => {
-      // Clear the landing marker first so its DOM node isn't dangling after
-      // the map (and its container) is torn down.
+      // Clear the overlay markers first so their DOM nodes aren't dangling
+      // after the map (and its container) is torn down — and, just as
+      // importantly, so their refs read null on the next run and the markers
+      // get RE-CREATED on the new map instead of silently addressing the dead
+      // one (see `mapGeneration`).
       landingMarkerRef.current?.remove();
       landingMarkerRef.current = null;
+      userMarkerRef.current?.remove();
+      userMarkerRef.current = null;
       if (recenterRef) recenterRef.current = null;
       containerResizeObserver.disconnect();
       container.removeEventListener('pointerdown', markUserMoved);
@@ -2190,7 +2217,8 @@ export function HoleLayout({
     landingMarkerRef.current = new mapboxgl.Marker({ element: el, anchor: 'center' })
       .setLngLat(landingPoint)
       .addTo(map);
-  }, [landingPoint, useMapbox]);
+    // See the user-dot effect: re-attach after a map rebuild.
+  }, [landingPoint, useMapbox, mapGeneration]);
 
   // Recap replay — grow an amber line from tee → each shot landing → pin,
   // revealing each numbered dot as the line reaches it. Triggered whenever
@@ -2399,7 +2427,9 @@ export function HoleLayout({
     userMarkerRef.current = new mapboxgl.Marker({ element: el, anchor: 'center' })
       .setLngLat(currentLocation)
       .addTo(map);
-  }, [currentLocation, useMapbox]);
+    // `mapGeneration` re-attaches the dot after a map rebuild — without it the
+    // dot is drawn once and then disappears for the rest of the hole.
+  }, [currentLocation, useMapbox, mapGeneration]);
 
   // Explicit min-height so percentage-height collapses don't leave Mapbox with
   // a 0×0 canvas at construction time. Matches HoleLayoutCard's wrapper.
@@ -2469,7 +2499,15 @@ export function HoleLayout({
 
 // -------------------- SVG fallback render --------------------
 
-function buildSvgRender(layout: HoleLayoutData, compact: boolean) {
+function buildSvgRender(
+  layout: HoleLayoutData,
+  compact: boolean,
+  // Player's live position, so the "you are here" dot is present on the
+  // fallback renderer too. Without imagery (no signal, no token, a Mapbox
+  // error) this SVG is the ONLY map the golfer has — and it was the one view
+  // that never showed where they were standing.
+  currentLocation?: [number, number] | null
+) {
   const proj = buildProjector(layout.hole);
   if (!proj) return null;
 
@@ -2730,6 +2768,21 @@ function buildSvgRender(layout: HoleLayoutData, compact: boolean) {
             fill="#e53935"
           />
         </g>
+      )}
+
+      {/* Live "you are here" dot. Drawn last so it sits above the hole, and
+          deliberately NOT folded into the bounds — a fix out beyond the hole
+          (or a bad one) should be clipped rather than zoom the whole hole out
+          to accommodate it. */}
+      {currentLocation && (
+        <circle
+          cx={proj(currentLocation[0], currentLocation[1])[0]}
+          cy={proj(currentLocation[0], currentLocation[1])[1]}
+          r={compact ? 3 : 4}
+          fill="#2196f3"
+          stroke="#fff"
+          strokeWidth={compact ? 1 : 1.4}
+        />
       )}
     </svg>
   );
