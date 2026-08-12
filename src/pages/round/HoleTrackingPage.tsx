@@ -300,9 +300,13 @@ export function HoleTrackingPage() {
     impactId: number;
     capturedAt: number;
     // Watch GPS at the strike — used to place the shot even when the phone's
-    // own GPS is asleep in a pocket.
+    // own GPS is asleep in a pocket. Accuracy + fix age travel with it so
+    // useAutoTrack can weigh it against the phone's own fix instead of taking
+    // it on faith.
     lat?: number;
     lng?: number;
+    accuracyM?: number | null;
+    fixAt?: number | null;
   } | null>(null);
   // The club the watch reported in-hand on its most recent strike. Latched onto
   // the impact-opened shot (see captureShotMeta) so the recorded club matches
@@ -507,19 +511,73 @@ export function HoleTrackingPage() {
   // dedupes this call with HoleLayoutCard's own fetch.
   const layoutQuery = useHoleLayout(active.courseId, hole.holeNumber);
 
-  // Pin override (course-wide shared pin → legacy per-round → null).
+  // Pin override (per-round pin → course-wide shared pin → null).
   // Memoized for the same reason as shotEndPoints — a fresh [lng,lat] array
   // on every render would invalidate the HoleLayout map effect's deps and
   // cause a full Mapbox rebuild on every tap.
+  //
+  // PER-ROUND WINS. Moving the flag is a statement about where the cup is
+  // TODAY, and it's written to the round store synchronously (see `movePin`),
+  // so every distance re-derives on the very next render — no refetch, no
+  // network. The shared course pin is the slower, coarser "where this hole's
+  // pin usually is" value and only fills in when this round hasn't set one.
+  // The old order (shared first) meant a just-moved flag was ignored until the
+  // layout query round-tripped — and ignored entirely when the write failed or
+  // the phone was offline, which is exactly when it's needed on-course.
   const sharedPinLng = layoutQuery.data?.hole.pin_lng ?? null;
   const sharedPinLat = layoutQuery.data?.hole.pin_lat ?? null;
   const localPinLng = hole.pinLng;
   const localPinLat = hole.pinLat;
   const pinOverride = useMemo<[number, number] | null>(() => {
-    if (sharedPinLng != null && sharedPinLat != null) return [sharedPinLng, sharedPinLat];
     if (localPinLng != null && localPinLat != null) return [localPinLng, localPinLat];
+    if (sharedPinLng != null && sharedPinLat != null) return [sharedPinLng, sharedPinLat];
     return null;
   }, [sharedPinLng, sharedPinLat, localPinLng, localPinLat]);
+
+  // Current pin/layout context, refreshed every render (see the effect further
+  // down). Read by `movePin` and by the pinned watch-message handler, neither of
+  // which can close over the latest `layoutQuery` / `hole`.
+  const pinCtxRef = useRef<{
+    holeId: string | null;
+    courseId: string | null;
+    holeNumber: number;
+  }>({ holeId: null, courseId: null, holeNumber: hole.holeNumber });
+
+  // Move (or clear) this hole's flag. The single path used by BOTH the phone's
+  // Move Pin tap and the watch's "Set flag here" button.
+  //
+  // Order matters: the round-store write lands FIRST and synchronously, so the
+  // TO PIN yardage, the putt distance, the club recommendation and the map's
+  // flag marker all follow the new position on the next render — no waiting on
+  // Supabase, and it still works with no signal. The shared course pin is then
+  // written best-effort so other players inherit it; if that fails (offline,
+  // permissions), the round keeps the new flag anyway.
+  const movePin = useCallback(
+    (lat: number | null, lng: number | null) => {
+      const holeNumber = pinCtxRef.current.holeNumber;
+      const holeId = pinCtxRef.current.holeId;
+      const courseId = pinCtxRef.current.courseId;
+      updateHole(holeNumber, { pinLat: lat, pinLng: lng });
+      if (!holeId) return;
+      void (async () => {
+        try {
+          await holesRepo.setPin(holeId, lng, lat);
+        } catch (err) {
+          // Non-fatal: the per-round pin above is already in effect. Log so a
+          // repeated failure is diagnosable rather than silently swallowed.
+          console.error('[pin] shared pin save failed', err);
+          return;
+        }
+        // Both caches carry a pin: the per-hole layout (phone distances, map)
+        // and the all-holes meta the watch snapshot is built from. Invalidating
+        // only the first left the WATCH computing its putt distance against the
+        // OLD pin — or the green centroid — for up to 30 minutes.
+        queryClient.invalidateQueries({ queryKey: ['hole-layout', courseId, holeNumber] });
+        queryClient.invalidateQueries({ queryKey: ['watch-holes-meta', courseId] });
+      })();
+    },
+    [updateHole, queryClient]
+  );
 
   // Did the last shot land within ~30 yards (≈27 m) of the green? This covers
   // "around the green" — a chip-shot landing zone where the next stroke is
@@ -532,11 +590,14 @@ export function HoleTrackingPage() {
   const teeLat = layoutQuery.data?.hole.tee_lat ?? null;
   const teeLng = layoutQuery.data?.hole.tee_lng ?? null;
 
-  // Effective pin: the precise shared/per-round pin when set, else the green
+  // Effective pin: the precise per-round/shared pin when set, else the green
   // centroid. Hoisted above the club recommendation so the live GPS→pin
   // distance can drive the recommended club as the player walks up to the ball.
-  const pinLatEff = sharedPinLat ?? localPinLat ?? greenLat;
-  const pinLngEff = sharedPinLng ?? localPinLng ?? greenLng;
+  // Same precedence as `pinOverride` above — a flag moved during THIS round
+  // beats the stored course pin, so "to pin" and the putt distance both follow
+  // the flag the moment it's moved.
+  const pinLatEff = localPinLat ?? sharedPinLat ?? greenLat;
+  const pinLngEff = localPinLng ?? sharedPinLng ?? greenLng;
   // Yards from the player's CURRENT GPS position to the pin. Updates live as
   // they walk (unlike the recorded-shot remaining) and self-corrects through a
   // missed strike. Guarded on a trustworthy fix (≤30 m accuracy) so a noisy
@@ -1878,13 +1939,7 @@ export function HoleTrackingPage() {
   const bagClubsRef = useRef(bagClubs);
   const applyAutoTrackRef = useRef(applyAutoTrack);
   const recordWatchAutoShotRef = useRef(recordWatchAutoShot);
-  // Current pin/layout context, kept fresh for the pinned watch-message handler
-  // (which can't close over the latest layoutQuery/hole). Used by `setPin`.
-  const pinCtxRef = useRef<{
-    holeId: string | null;
-    courseId: string | null;
-    holeNumber: number;
-  }>({ holeId: null, courseId: null, holeNumber: hole.holeNumber });
+  const movePinRef = useRef(movePin);
   useEffect(() => {
     goPrevRef.current = goPrev;
     goNextRef.current = goNext;
@@ -1892,6 +1947,7 @@ export function HoleTrackingPage() {
     bagClubsRef.current = bagClubs;
     applyAutoTrackRef.current = applyAutoTrack;
     recordWatchAutoShotRef.current = recordWatchAutoShot;
+    movePinRef.current = movePin;
     pinCtxRef.current = {
       holeId: layoutQuery.data?.hole?.id ?? null,
       courseId: active?.courseId ?? null,
@@ -1909,21 +1965,10 @@ export function HoleTrackingPage() {
         }
         if (msg.type === 'setPin') {
           // Watch tapped "Set flag here" at the flag — move the current hole's
-          // pin to the watch's GPS. Same shared-course pin the phone's Move Pin
-          // updates. Best-effort; ignore if the layout hole isn't loaded.
-          const { holeId, courseId, holeNumber } = pinCtxRef.current;
-          if (holeId) {
-            void (async () => {
-              try {
-                await holesRepo.setPin(holeId, msg.lng, msg.lat);
-                queryClient.invalidateQueries({
-                  queryKey: ['hole-layout', courseId, holeNumber]
-                });
-              } catch (err) {
-                console.error('[watch] setPin failed', err);
-              }
-            })();
-          }
+          // pin to the watch's GPS. Exactly the same path as the phone's Move
+          // Pin, so the round's distances update immediately even with no
+          // signal and the shared course pin follows best-effort.
+          movePinRef.current(msg.lat, msg.lng);
           return;
         }
         if (msg.type === 'setAutoTrack') {
@@ -2017,7 +2062,11 @@ export function HoleTrackingPage() {
             impactId: msg.impactId,
             capturedAt: msg.capturedAt,
             lat: msg.startLat ?? undefined,
-            lng: msg.startLng ?? undefined
+            lng: msg.startLng ?? undefined,
+            accuracyM: msg.startAccuracyM ?? null,
+            // Older watch builds don't stamp the fix — fall back to the strike
+            // time, which is close enough to rank against the phone's fix.
+            fixAt: msg.startFixAt ?? msg.capturedAt ?? null
           });
           // Mark the stream live and (re)arm a staleness timeout — if strikes
           // stop arriving (watch off / out of range), impact-primary relaxes
@@ -2443,23 +2492,10 @@ export function HoleTrackingPage() {
                   // pin (flag marker, aim line endpoint, putting bounds,
                   // distance-to-pin) picks up the override on next render.
                   if (pinEditMode) {
-                    // Persist to the shared course-wide pin so every other
-                    // player on this course inherits the new position. Bail
-                    // gracefully if the layout isn't loaded — there's no hole
-                    // row to update yet.
-                    const holeId = layoutQuery.data?.hole.id;
-                    if (holeId) {
-                      void (async () => {
-                        try {
-                          await holesRepo.setPin(holeId, data.end[0], data.end[1]);
-                          queryClient.invalidateQueries({
-                            queryKey: ['hole-layout', active?.courseId, hole.holeNumber]
-                          });
-                        } catch {
-                          // Swallow — the user can retry by moving the pin again.
-                        }
-                      })();
-                    }
+                    // Applies to this round immediately (so every distance
+                    // re-reads it on the next render) and syncs to the shared
+                    // course pin in the background — see `movePin`.
+                    movePin(data.end[1], data.end[0]);
                     setPinEditMode(false);
                     return;
                   }
@@ -2633,23 +2669,9 @@ export function HoleTrackingPage() {
               <Button
                 size="small"
                 onClick={() => {
-                  const holeId = layoutQuery.data?.hole.id;
-                  if (holeId) {
-                    void (async () => {
-                      try {
-                        await holesRepo.setPin(holeId, null, null);
-                        queryClient.invalidateQueries({
-                          queryKey: ['hole-layout', active?.courseId, hole.holeNumber]
-                        });
-                      } catch {
-                        // ignore; user can retry
-                      }
-                    })();
-                  }
-                  // Also clear any legacy per-round override.
-                  if (hole.pinLat != null || hole.pinLng != null) {
-                    updateHole(hole.holeNumber, { pinLat: null, pinLng: null });
-                  }
+                  // Clears both the per-round pin and the shared course pin, so
+                  // everything falls back to the green centroid.
+                  movePin(null, null);
                   setPinEditMode(false);
                 }}
                 sx={{

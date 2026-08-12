@@ -427,6 +427,13 @@ enum WatchOutboundMessage {
             if let l = location {
                 d["startLat"] = l.coordinate.latitude
                 d["startLng"] = l.coordinate.longitude
+                // How good this fix is, and when it was actually taken. The
+                // phone compares it against its OWN fix and keeps the better
+                // of the two; without these it had to assume the watch was
+                // always right, which is how shots ended up tens of metres
+                // from where they were hit.
+                d["startAccuracyM"] = l.horizontalAccuracy
+                d["startFixAt"] = l.timestamp.timeIntervalSince1970 * 1000
             }
             return d
         }
@@ -580,6 +587,17 @@ final class WatchSession: NSObject, ObservableObject {
             return last
         }
         return nil
+    }
+
+    /// The position to attribute to something that just happened (a swing, a
+    /// tap). Same ranking `captureShotStart` / `recordAutoShot` already use —
+    /// exposed so the strike detector stops reaching for raw `lastLocation`,
+    /// which is whatever fix happened to land last regardless of how accurate
+    /// or how old it is. That was putting recorded shots on the wrong side of
+    /// the green.
+    @MainActor
+    func fixForCapture() -> CLLocation? {
+        bestRecentFix()
     }
 
     /// Trim fixes older than FIX_WINDOW_S from the buffer.
@@ -1065,7 +1083,11 @@ final class RoundShotController: ObservableObject {
             // Forward the FULL motion metrics (migration 031) so the round shot
             // carries the same swing tempo/quality data practice records.
             metrics: m,
-            location: WatchSession.shared.lastLocation,
+            // Best recent fix, not raw `lastLocation`: the latter is simply the
+            // most recent accepted reading, which can be up to 30 m wide and
+            // several seconds old. `fixForCapture()` ranks the buffered fixes
+            // by accuracy AND age, the same way a manually-recorded shot does.
+            location: WatchSession.shared.fixForCapture(),
             // Tell the phone which club the watch had in hand so the shot latches
             // the right club even though the phone never saw a watch-side change.
             clubId: WatchSession.shared.lastResolvedClubId,
