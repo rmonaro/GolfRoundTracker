@@ -498,6 +498,20 @@ final class WatchSession: NSObject, ObservableObject {
     /// so a stop-shot doesn't kill the live distance display.
     private var continuousLocationActive: Bool = false
 
+    /// When Core Location last called us back — ANY fix, including ones the
+    /// accuracy filter rejects. This measures whether the OS is still talking
+    /// to us, which is a different question from whether we have a good
+    /// position, and it's the one the watchdog below needs to answer.
+    private var lastLocationCallbackAt: Date = .distantPast
+    /// Watchdog that restarts a location feed watchOS has stopped delivering.
+    private var locationWatchdog: Task<Void, Never>?
+    /// Silence longer than this means the feed is dead, not just quiet. A
+    /// walking golfer generates a fix roughly every second, so 20s is far
+    /// outside normal jitter while still recovering within a few paces.
+    private static let LOCATION_STALE_RESTART_S: TimeInterval = 20
+    /// How often the watchdog checks. Cheap — one date comparison.
+    private static let LOCATION_WATCHDOG_TICK_S: TimeInterval = 5
+
     /// True while the watch user is in shot-tracking mode (between Track
     /// tap and End Shot / cancel). Set by HoleHomeView via the helpers
     /// below. While true, `didUpdateLocations` forwards each accepted
@@ -624,17 +638,73 @@ final class WatchSession: NSObject, ObservableObject {
     /// backgrounds the app — leaving CLLocationManager running burns
     /// the watch battery fast.
     func startContinuousLocation() {
-        guard !continuousLocationActive else { return }
-        continuousLocationActive = true
-        locationManager.startUpdatingLocation()
+        // NOT an early return when already active. That guard was the bug
+        // behind "the watch stopped updating my yardage until I opened the
+        // phone": watchOS suspends the app when the wrist drops and stops
+        // delivering fixes, but `continuousLocationActive` stayed true, so
+        // every later call — including the one on the round becoming active
+        // again — did nothing. The flag tracked our INTENT to track, and was
+        // read as proof that tracking was happening.
+        if !continuousLocationActive {
+            continuousLocationActive = true
+            lastLocationCallbackAt = Date()
+            locationManager.startUpdatingLocation()
+        } else {
+            ensureLocationFlowing()
+        }
+        startLocationWatchdog()
     }
 
     func stopContinuousLocation() {
         guard continuousLocationActive else { return }
         continuousLocationActive = false
+        locationWatchdog?.cancel()
+        locationWatchdog = nil
         // Only call stop if no pending shot capture is also using it.
         if pendingShotStart == nil {
             locationManager.stopUpdatingLocation()
+        }
+    }
+
+    /// Restart the location feed if watchOS has gone quiet on us. Safe to call
+    /// at any time: when fixes are flowing it does nothing.
+    ///
+    /// Deliberately does NOT touch `recentFixes`, `lastLocation` or
+    /// `pendingShotStart` — shot positions keep working off exactly the data
+    /// they did before. All this does is ask the OS to resume delivery, and it
+    /// only fires after 20 seconds of total silence, when there is by
+    /// definition nothing in flight to disturb.
+    func ensureLocationFlowing() {
+        guard continuousLocationActive else { return }
+        guard Date().timeIntervalSince(lastLocationCallbackAt)
+                > Self.LOCATION_STALE_RESTART_S else { return }
+        // Stamp before restarting so a slow restart can't retrigger instantly.
+        lastLocationCallbackAt = Date()
+        locationManager.stopUpdatingLocation()
+        locationManager.startUpdatingLocation()
+    }
+
+    /// Poll for a dead location feed for as long as continuous tracking is on.
+    /// Mirrors the self-healing watchdog the PHONE's `watchPosition` already
+    /// has; the watch had no equivalent, so a stalled feed stayed stalled
+    /// until something else happened to wake the app — which is why opening
+    /// the phone appeared to "fix" it.
+    private func startLocationWatchdog() {
+        guard locationWatchdog == nil else { return }
+        locationWatchdog = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(
+                    nanoseconds: UInt64(Self.LOCATION_WATCHDOG_TICK_S * 1_000_000_000)
+                )
+                guard let self else { return }
+                guard self.continuousLocationActive else {
+                    // Clear the handle on the way out so a later
+                    // startContinuousLocation can arm a fresh watchdog.
+                    self.locationWatchdog = nil
+                    return
+                }
+                self.ensureLocationFlowing()
+            }
         }
     }
 
@@ -861,6 +931,15 @@ extension WatchSession: WCSessionDelegate {
         guard let snapshot = WatchRoundState(dict: applicationContext) else { return }
         Task { @MainActor in
             self.state = snapshot
+            // A snapshot arriving is a runtime window we're guaranteed to be
+            // awake for — the perfect moment to notice the GPS feed has died
+            // and restart it. This is what made "open the phone" appear to fix
+            // a frozen yardage: the resulting push woke the app. Now the watch
+            // heals itself here and on its own watchdog, instead of needing
+            // the golfer to pull out their phone.
+            if snapshot.active {
+                self.startContinuousLocation()
+            }
             // Reconcile round-mode strike detection against the desired state:
             // run only during a live round AND when the user's shot-detection
             // setting is on. Comparing against `isRunning` (not just an
@@ -946,6 +1025,11 @@ extension WatchSession: CLLocationManagerDelegate {
         didUpdateLocations locations: [CLLocation]
     ) {
         guard let fix = locations.last else { return }
+        // Record that the OS is still talking to us BEFORE the accuracy
+        // filter. A run of rejected fixes means poor reception, not a dead
+        // feed, and restarting the manager wouldn't help — the watchdog must
+        // not confuse the two.
+        Task { @MainActor in self.lastLocationCallbackAt = Date() }
         // Drop fixes that Core Location couldn't trust: negative
         // accuracy = "no valid fix", and anything worse than
         // MAX_ACCURACY_M is too noisy to use as a shot position at
@@ -1023,9 +1107,20 @@ final class RoundShotController: ObservableObject {
     private let motion = SwingMotionService()
     private let workout = WorkoutManager()
 
-    /// Live heart rate (bpm) while the round workout is running; 0 if
-    /// unavailable. Mirrors `PracticeController.currentHeartRate`.
-    var currentHeartRate: Int { Int(workout.currentHeartRate.rounded()) }
+    /// Heart rate (bpm) to stamp on a strike; 0 if genuinely unavailable.
+    ///
+    /// Uses `bestHeartRate`, not the live workout reading alone. A round's
+    /// workout session is started from `didReceiveApplicationContext` — which
+    /// commonly fires while the watch app is in the BACKGROUND, exactly when
+    /// HealthKit is least willing to start a session or present its
+    /// authorization prompt. When that failed there was no retry and no
+    /// fallback, so `currentHeartRate` stayed 0 for the whole round and the
+    /// wire payload omits 0 — every shot landed with no heart rate.
+    var currentHeartRate: Int { Int(workout.bestHeartRate.rounded()) }
+
+    /// Poller that keeps the stored-sample fallback warm and retries a workout
+    /// session that failed to start. Runs only while round detection is on.
+    private var heartRateTask: Task<Void, Never>?
 
     /// Monotonic within a round session so the phone can order / de-dupe.
     private var nextImpactId = 1
@@ -1056,13 +1151,41 @@ final class RoundShotController: ObservableObject {
         // Keep motion alive wrist-down. No-ops if HealthKit isn't authorized;
         // the standard CMMotionManager path still works while foreground.
         Task { await workout.startSession() }
+        startHeartRateUpkeep()
     }
 
     func stop() {
         guard isRunning else { return }
         isRunning = false
         motion.stop()
+        heartRateTask?.cancel()
+        heartRateTask = nil
         Task { _ = await workout.stopSession() }
+    }
+
+    /// Keep a heart rate available for the whole round.
+    ///
+    /// Two jobs, both of which the round previously had no answer for:
+    ///   • RETRY the workout session. It's started from a WCSession callback
+    ///     that usually fires with the app in the background, where HealthKit
+    ///     may refuse — and the failure was silent and permanent.
+    ///   • REFRESH the stored-sample fallback, so a strike during the gap
+    ///     before the live builder's first reading still carries a bpm.
+    ///
+    /// 60s is well inside the watch's own background heart-rate cadence and
+    /// costs nothing measurable next to the motion stream already running.
+    private func startHeartRateUpkeep() {
+        heartRateTask?.cancel()
+        heartRateTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self, self.isRunning else { return }
+                if !self.workout.isCollecting {
+                    await self.workout.startSession()
+                }
+                self.workout.refreshRecentHeartRate()
+                try? await Task.sleep(nanoseconds: 60_000_000_000)
+            }
+        }
     }
 
     private func handleStrike(_ m: SwingMetrics) {
