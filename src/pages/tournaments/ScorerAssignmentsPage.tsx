@@ -36,7 +36,7 @@ export function ScorerAssignmentsPage() {
       <PageHeader
         title="Scoring"
         subtitle="Tee groups you've been assigned to score"
-        back="/"
+        back="/tournaments"
         action={
           <Button
             size="small"

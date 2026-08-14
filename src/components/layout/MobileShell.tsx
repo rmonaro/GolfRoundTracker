@@ -5,8 +5,13 @@ import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import InsightsRoundedIcon from '@mui/icons-material/InsightsRounded';
 import SportsGolfRoundedIcon from '@mui/icons-material/SportsGolfRounded';
 import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
+import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
+import AssignmentIndRoundedIcon from '@mui/icons-material/AssignmentIndRounded';
+import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import { Capacitor } from '@capacitor/core';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
+import { useAppModeStore } from '@/stores/appModeStore';
+import { useTournamentAccess } from '@/features/appMode/useTournamentAccess';
 
 // Practice tab icon: Apple Watch silhouette on iOS, generic round watch on
 // Android/web — mirrors the platform watch treatment on the practice screen.
@@ -23,7 +28,7 @@ const AppleWatchNavIcon = (
 );
 const watchTabIcon = Capacitor.getPlatform() === 'ios' ? AppleWatchNavIcon : <WatchRoundedIcon />;
 
-const NAV_TABS = [
+const ROUNDS_TABS = [
   { value: '/', label: 'Home', icon: <HomeRoundedIcon /> },
   { value: '/round', label: 'Round', icon: <GolfCourseRoundedIcon /> },
   { value: '/stats', label: 'Stats', icon: <InsightsRoundedIcon /> },
@@ -31,11 +36,30 @@ const NAV_TABS = [
   { value: '/practice', label: 'Practice', icon: watchTabIcon }
 ];
 
+// The tournament side is deliberately narrow: play your events, keep someone
+// else's card, adjust your account. Stats, bag and practice belong to the
+// rounds side and are reached by switching there.
+//
+// Scoring is not part of playing — it only exists for someone an admin assigned
+// to keep another player's card. An athlete playing their own event never sees
+// the tab, so it's added only when there's an actual assignment.
+const tournamentTabs = (canScore: boolean) => [
+  { value: '/tournaments', label: 'Tournaments', icon: <EmojiEventsRoundedIcon /> },
+  ...(canScore
+    ? [{ value: '/scoring', label: 'Scoring', icon: <AssignmentIndRoundedIcon /> }]
+    : []),
+  { value: '/settings', label: 'Settings', icon: <SettingsRoundedIcon /> }
+];
+
 export function MobileShell() {
   const navigate = useNavigate();
   const location = useLocation();
+  const mode = useAppModeStore((s) => s.mode);
+  const { scorerGroupCount } = useTournamentAccess();
+  const navTabs = mode === 'tournament' ? tournamentTabs(scorerGroupCount > 0) : ROUNDS_TABS;
   const activeTab =
-    NAV_TABS.find((t) => t.value !== '/' && location.pathname.startsWith(t.value))?.value ?? '/';
+    navTabs.find((t) => t.value !== '/' && location.pathname.startsWith(t.value))?.value ??
+    navTabs[0].value;
 
   // Full-screen routes — the in-round hole tracking screen owns its own header
   // and floating controls, and the map experience benefits from edge-to-edge
@@ -154,7 +178,7 @@ export function MobileShell() {
               bgcolor: 'transparent'
             }}
           >
-            {NAV_TABS.map((tab) => (
+            {navTabs.map((tab) => (
               <BottomNavigationAction
                 key={tab.value}
                 value={tab.value}

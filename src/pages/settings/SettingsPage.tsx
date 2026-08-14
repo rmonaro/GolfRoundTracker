@@ -22,6 +22,7 @@ import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
 import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
 import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded';
 import { useIsAdmin } from '@/admin/hooks/useIsAdmin';
+import { useAppModeStore, homePathFor } from '@/stores/appModeStore';
 import { useConnectivity } from '@/features/offline/useConnectivity';
 import { OfflineCoursesCard } from '@/features/offline/OfflineCoursesCard';
 import { isSimulatedOffline, setSimulatedOffline } from '@/services/connectivity';
@@ -63,6 +64,7 @@ export function SettingsPage() {
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
   const setWatchShotDetection = useSettingsStore((s) => s.setWatchShotDetection);
   const { data: isAdmin } = useIsAdmin();
+  const appMode = useAppModeStore((s) => s.mode);
   const connectivity = useConnectivity();
   const [simulateOffline, setSimulateOffline] = useState(isSimulatedOffline);
   const [tab, setTab] = useState<'profile' | 'settings' | 'courses'>('profile');
@@ -126,8 +128,8 @@ export function SettingsPage() {
     <Box>
       {/* `back` takes an explicit path rather than navigate(-1): Settings is
           reachable from the bottom nav on any tab, so history could send the
-          user somewhere unrelated. The dashboard is always the right target. */}
-      <PageHeader title="Settings" back="/" />
+          user somewhere unrelated. The current side's home is always right. */}
+      <PageHeader title="Settings" back={appMode ? homePathFor(appMode) : '/'} />
 
       <Stack
         spacing={2}

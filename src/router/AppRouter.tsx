@@ -5,6 +5,9 @@ import { LoginPage } from '@/pages/auth/LoginPage';
 import { SignUpPage } from '@/pages/auth/SignUpPage';
 import { ForgotPasswordPage } from '@/pages/auth/ForgotPasswordPage';
 import { MobileShell } from '@/components/layout/MobileShell';
+import { RequireMode } from '@/features/appMode/RequireMode';
+import { RequireScorer } from '@/features/appMode/RequireScorer';
+import { ModeChooserPage } from '@/pages/ModeChooserPage';
 import { HomePage } from '@/pages/HomePage';
 import { BagPage } from '@/pages/bag/BagPage';
 import { RoundHomePage } from '@/pages/round/RoundHomePage';
@@ -60,19 +63,24 @@ export function AppRouter() {
         <Route path="forgot-password" element={<ForgotPasswordPage />} />
       </Route>
 
+      {/* Tournaments or Golf Rounds. Unset on every launch, so this is the first
+          authenticated screen — it resolves itself when there's nothing to ask. */}
+      <Route
+        path="/choose"
+        element={
+          <AuthGuard>
+            <ModeChooserPage />
+          </AuthGuard>
+        }
+      />
+
+      {/* Playing and reviewing a round belong to both sides — a tournament round
+          is tracked on the same screens as a casual one. */}
       <Route
         path="/round/play"
         element={
           <AuthGuard>
             <HoleTrackingPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/round/start"
-        element={
-          <AuthGuard>
-            <StartRoundPage />
           </AuthGuard>
         }
       />
@@ -84,27 +92,24 @@ export function AppRouter() {
           </AuthGuard>
         }
       />
+
+      <Route
+        path="/round/start"
+        element={
+          <AuthGuard>
+            <RequireMode mode="rounds">
+              <StartRoundPage />
+            </RequireMode>
+          </AuthGuard>
+        }
+      />
       <Route
         path="/round/history"
         element={
           <AuthGuard>
-            <PastRoundsPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/tournaments"
-        element={
-          <AuthGuard>
-            <MyTournamentsPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/scoring"
-        element={
-          <AuthGuard>
-            <ScorerAssignmentsPage />
+            <RequireMode mode="rounds">
+              <PastRoundsPage />
+            </RequireMode>
           </AuthGuard>
         }
       />
@@ -112,7 +117,11 @@ export function AppRouter() {
         path="/scoring/:teeGroupId"
         element={
           <AuthGuard>
-            <ScorerGroupPage />
+            <RequireMode mode="tournament">
+              <RequireScorer>
+                <ScorerGroupPage />
+              </RequireScorer>
+            </RequireMode>
           </AuthGuard>
         }
       />
@@ -120,106 +129,37 @@ export function AppRouter() {
         path="/watch"
         element={
           <AuthGuard>
-            <WatchPage />
+            <RequireMode mode="rounds">
+              <WatchPage />
+            </RequireMode>
           </AuthGuard>
         }
       />
-      <Route
-        path="/practice"
-        element={
-          <AuthGuard>
-            <PracticeStartPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/practice/live"
-        element={
-          <AuthGuard>
-            <PracticeLivePage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/practice/summary"
-        element={
-          <AuthGuard>
-            <SessionSummaryPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/practice/guide"
-        element={
-          <AuthGuard>
-            <SwingMetricsGuidePage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/practice/history"
-        element={
-          <AuthGuard>
-            <PastPracticesPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/practice/history/:sessionId"
-        element={
-          <AuthGuard>
-            <PracticeSessionDetailPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/range"
-        element={
-          <AuthGuard>
-            <RangeSessionPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/range/summary/:sessionId"
-        element={
-          <AuthGuard>
-            <RangeSummaryPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/range/guide"
-        element={
-          <AuthGuard>
-            <RangeGuidePage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/drills"
-        element={
-          <AuthGuard>
-            <DrillsPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/drills/run"
-        element={
-          <AuthGuard>
-            <DrillRunnerPage />
-          </AuthGuard>
-        }
-      />
-      <Route
-        path="/drills/report/:sessionId"
-        element={
-          <AuthGuard>
-            <DrillReportPage />
-          </AuthGuard>
-        }
-      />
+      {/* Practice, range and drills are rounds-side training tools. */}
+      {[
+        { path: '/practice', element: <PracticeStartPage /> },
+        { path: '/practice/live', element: <PracticeLivePage /> },
+        { path: '/practice/summary', element: <SessionSummaryPage /> },
+        { path: '/practice/guide', element: <SwingMetricsGuidePage /> },
+        { path: '/practice/history', element: <PastPracticesPage /> },
+        { path: '/practice/history/:sessionId', element: <PracticeSessionDetailPage /> },
+        { path: '/range', element: <RangeSessionPage /> },
+        { path: '/range/summary/:sessionId', element: <RangeSummaryPage /> },
+        { path: '/range/guide', element: <RangeGuidePage /> },
+        { path: '/drills', element: <DrillsPage /> },
+        { path: '/drills/run', element: <DrillRunnerPage /> },
+        { path: '/drills/report/:sessionId', element: <DrillReportPage /> }
+      ].map((r) => (
+        <Route
+          key={r.path}
+          path={r.path}
+          element={
+            <AuthGuard>
+              <RequireMode mode="rounds">{r.element}</RequireMode>
+            </AuthGuard>
+          }
+        />
+      ))}
       <Route
         path="/onboarding"
         element={
@@ -236,10 +176,61 @@ export function AppRouter() {
           </AuthGuard>
         }
       >
-        <Route path="/" element={<HomePage />} />
-        <Route path="/round" element={<RoundHomePage />} />
-        <Route path="/stats" element={<StatsPage />} />
-        <Route path="/bag" element={<BagPage />} />
+        {/* Golf Rounds side */}
+        <Route
+          path="/"
+          element={
+            <RequireMode mode="rounds">
+              <HomePage />
+            </RequireMode>
+          }
+        />
+        <Route
+          path="/round"
+          element={
+            <RequireMode mode="rounds">
+              <RoundHomePage />
+            </RequireMode>
+          }
+        />
+        <Route
+          path="/stats"
+          element={
+            <RequireMode mode="rounds">
+              <StatsPage />
+            </RequireMode>
+          }
+        />
+        <Route
+          path="/bag"
+          element={
+            <RequireMode mode="rounds">
+              <BagPage />
+            </RequireMode>
+          }
+        />
+
+        {/* Tournament side */}
+        <Route
+          path="/tournaments"
+          element={
+            <RequireMode mode="tournament">
+              <MyTournamentsPage />
+            </RequireMode>
+          }
+        />
+        <Route
+          path="/scoring"
+          element={
+            <RequireMode mode="tournament">
+              <RequireScorer>
+                <ScorerAssignmentsPage />
+              </RequireScorer>
+            </RequireMode>
+          }
+        />
+
+        {/* Shared by both sides */}
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
 

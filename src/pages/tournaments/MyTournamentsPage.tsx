@@ -9,6 +9,7 @@ import {
   Chip,
   CircularProgress,
   Divider,
+  IconButton,
   Stack,
   Typography
 } from '@mui/material';
@@ -25,6 +26,8 @@ import { useMyTournaments } from '@/features/tournaments/useMyTournaments';
 import { useScorerAssignmentsWithFallback } from '@/features/tournaments/useScorerAssignments';
 import { useTournamentCourse } from '@/features/tournaments/useTournamentCourse';
 import { fmtToPar, localRoundFor } from '@/features/tournaments/tournamentProgress';
+import { groupTournaments } from '@/features/tournaments/groupTournaments';
+import { ModeSwitchToggle } from '@/features/appMode/ModeSwitchToggle';
 import { useStartRound } from '@/features/round/useStartRound';
 import { useRounds } from '@/features/stats/useRounds';
 import { useRoundStore } from '@/stores/roundStore';
@@ -38,23 +41,29 @@ import type {
 
 export function MyTournamentsPage() {
   const { data, isLoading, isError, error, refetch, isFetching } = useMyTournaments();
-  const tournaments = data?.tournaments ?? [];
+  // Local rounds decide what's finished — TM's SUBMITTED push can lag — so the
+  // shelves are computed against them, not against TM status alone.
+  const { data: localRounds } = useRounds();
+  const { inProgress, upcoming, past } = groupTournaments(data?.tournaments, localRounds);
+  const total = inProgress.length + upcoming.length + past.length;
 
   return (
     <Box>
       <PageHeader
         title="My Tournaments"
         subtitle="Your registered events from Tournament Management"
-        back="/"
+        back="/choose"
         action={
-          <Button
-            size="small"
-            startIcon={<RefreshRoundedIcon />}
-            onClick={() => refetch()}
-            disabled={isFetching}
-          >
-            {isFetching ? '…' : 'Refresh'}
-          </Button>
+          <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+            <ModeSwitchToggle />
+            <IconButton
+              aria-label="Refresh tournaments"
+              onClick={() => refetch()}
+              disabled={isFetching}
+            >
+              <RefreshRoundedIcon />
+            </IconButton>
+          </Stack>
         }
       />
       <Stack spacing={2} px={2} pb={4}>
@@ -70,7 +79,7 @@ export function MyTournamentsPage() {
           </Stack>
         )}
 
-        {!isLoading && tournaments.length === 0 && !isError && (
+        {!isLoading && total === 0 && !isError && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
             <CardContent>
               <Stack alignItems="center" spacing={1.5} py={3}>
@@ -96,8 +105,38 @@ export function MyTournamentsPage() {
           </Card>
         )}
 
-        {tournaments.map((t) => (
-          <TournamentCard key={t.registration_id} entry={t} />
+        <Section title="In Progress" entries={inProgress} />
+        <Section title="Upcoming" entries={upcoming} />
+        <Section title="Past" entries={past} readOnly />
+      </Stack>
+    </Box>
+  );
+}
+
+/** One shelf of the tournaments list. Renders nothing when it's empty, so a
+ *  player with only upcoming events doesn't scroll past two empty headings. */
+function Section({
+  title,
+  entries,
+  readOnly
+}: {
+  title: string;
+  entries: TmTournamentEntry[];
+  readOnly?: boolean;
+}) {
+  if (entries.length === 0) return null;
+  return (
+    <Box>
+      <Typography
+        variant="overline"
+        color="text.secondary"
+        sx={{ letterSpacing: 0.8, fontWeight: 700 }}
+      >
+        {title}
+      </Typography>
+      <Stack spacing={2} sx={{ mt: 0.5 }}>
+        {entries.map((t) => (
+          <TournamentCard key={t.registration_id} entry={t} readOnly={readOnly} />
         ))}
       </Stack>
     </Box>
@@ -105,14 +144,16 @@ export function MyTournamentsPage() {
 }
 
 /**
- * Way in to scorer mode. Lives here rather than on the round home screen so a
- * golfer who never scores for anyone isn't shown a button they'll never use —
- * and so the round screen doesn't take on an extra query per load.
+ * Heads-up that someone else's card is waiting on this user. Scoring has its own
+ * tab in the tournament nav, so this only appears when there's an actual
+ * assignment to act on — otherwise it's a duplicate link to an empty screen.
  */
 function ScoringEntry() {
   const navigate = useNavigate();
   const { assignments } = useScorerAssignmentsWithFallback();
   const count = assignments.length;
+
+  if (count === 0) return null;
 
   return (
     <Card
@@ -150,7 +191,7 @@ function ScoringEntry() {
   );
 }
 
-function TournamentCard({ entry }: { entry: TmTournamentEntry }) {
+function TournamentCard({ entry, readOnly }: { entry: TmTournamentEntry; readOnly?: boolean }) {
   const { tournament, division, rounds } = entry;
   const { course, ensureCourse, isImporting, isLoadingCourses } = useTournamentCourse(
     tournament.external_course_id
@@ -180,8 +221,9 @@ function TournamentCard({ entry }: { entry: TmTournamentEntry }) {
           />
         </Stack>
 
-        {/* Course match status — both apps key off the GolfCourseAPI id. */}
-        <Box sx={{ mt: 1 }}>
+        {/* Course match status — both apps key off the GolfCourseAPI id. There's
+            nothing left to import for a finished event, so it's hidden there. */}
+        <Box sx={{ mt: 1, display: readOnly ? 'none' : 'block' }}>
           {tournament.external_course_id == null ? (
             <Typography variant="caption" color="text.secondary">
               No course linked on the tournament yet.
@@ -218,6 +260,7 @@ function TournamentCard({ entry }: { entry: TmTournamentEntry }) {
               ensureCourse={ensureCourse}
               hasCourse={!!course}
               isImporting={isImporting}
+              readOnly={readOnly}
             />
           ))}
         </Stack>
@@ -231,7 +274,8 @@ function RoundRow({
   round,
   localRound,
   ensureCourse,
-  isImporting
+  isImporting,
+  readOnly
 }: {
   entry: TmTournamentEntry;
   round: TmRound;
@@ -239,6 +283,8 @@ function RoundRow({
   ensureCourse: () => Promise<import('@/models').Course | null>;
   hasCourse: boolean;
   isImporting: boolean;
+  /** Past event — results only, never a way to start or resume play. */
+  readOnly?: boolean;
 }) {
   const navigate = useNavigate();
   const startRound = useStartRound();
@@ -333,7 +379,26 @@ function RoundRow({
           )}
         </Box>
 
-        {isComplete ? (
+        {readOnly ? (
+          reviewRoundId ? (
+            <Button
+              variant="outlined"
+              size="small"
+              color="success"
+              startIcon={<VisibilityRoundedIcon />}
+              onClick={() => navigate(`/round/summary/${reviewRoundId}`)}
+            >
+              Review
+            </Button>
+          ) : (
+            <Chip
+              size="small"
+              variant="outlined"
+              color={isComplete ? 'success' : 'default'}
+              label={isComplete ? 'Complete' : 'Not played'}
+            />
+          )
+        ) : isComplete ? (
           reviewRoundId ? (
             <Button
               variant="outlined"
@@ -386,7 +451,7 @@ function RoundRow({
       </Stack>
 
       {/* Why Start is locked. can_start is authoritative (now ≥ tee_time on TM). */}
-      {!round.can_start && !isActiveHere && !isComplete && !hasLinkedRound && gateReason && (
+      {!readOnly && !round.can_start && !isActiveHere && !isComplete && !hasLinkedRound && gateReason && (
         <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
           🔒 {gateReason}
         </Typography>
