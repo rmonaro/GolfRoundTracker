@@ -5,6 +5,7 @@ import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import { useNavigate } from 'react-router-dom';
 import { useAppModeStore, homePathFor, type AppMode } from '@/stores/appModeStore';
 import { useTournamentAccess } from '@/features/appMode/useTournamentAccess';
+import { accentFill } from '@/theme/designTokens';
 
 /**
  * Header control for crossing between the two sides of the app.
@@ -39,7 +40,9 @@ export function ModeSwitchToggle() {
         gap: '2px',
         p: '3px',
         borderRadius: '999px',
-        bgcolor: 'action.hover',
+        bgcolor: 'background.paper',
+        border: '1px solid',
+        borderColor: 'divider',
         flexShrink: 0
       }}
     >
@@ -76,14 +79,19 @@ function Segment({
         aria-label={label}
         aria-pressed={selected}
         onClick={onClick}
-        sx={{
-          width: 40,
-          height: 32,
+        sx={(theme) => ({
+          width: 34,
+          height: 34,
           borderRadius: '999px',
           color: selected ? 'primary.contrastText' : 'text.secondary',
-          bgcolor: selected ? 'primary.main' : 'transparent',
-          transition: 'background-color 120ms, color 120ms'
-        }}
+          // The selected segment carries the accent gradient, same treatment as
+          // a contained CTA. Unselected stays quiet until hovered.
+          background: selected ? accentFill(theme.palette.mode, theme.palette.primary.main) : 'none',
+          transition: 'color 120ms',
+          '&:hover': selected
+            ? undefined
+            : { color: 'text.primary', bgcolor: 'action.hover' }
+        })}
       >
         {icon}
       </ButtonBase>

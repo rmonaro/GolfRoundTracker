@@ -222,34 +222,13 @@ export function StatsPage() {
     <Box>
       <PageHeader
         title="Stats"
-        subtitle={`Estimated handicap based on ${stats.handicap.roundsUsed} rounds`}
+        subtitle={completedIds.length === 1 ? '1 round logged' : `${completedIds.length} rounds logged`}
         back="/"
       />
       <Stack spacing={2} px={2} pb={4}>
-        <Card
-          elevation={0}
-          sx={{
-            background: 'linear-gradient(135deg, rgba(46,125,50,0.4), rgba(76,175,80,0.25))',
-            borderRadius: '5px'
-          }}
-        >
-          <CardContent>
-            <Typography variant="caption" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
-              Estimated Handicap
-            </Typography>
-            <Typography variant="h2" sx={{ fontWeight: 800, mt: 0.5 }}>
-              {stats.handicap.value != null ? stats.handicap.value.toFixed(1) : '—'}
-            </Typography>
-            {stats.handicap.message && (
-              <Typography variant="body2" sx={{ opacity: 0.9 }}>
-                {stats.handicap.message}
-              </Typography>
-            )}
-            <Typography variant="caption" sx={{ opacity: 0.75, display: 'block', mt: 1 }}>
-              Estimated handicap only. Not an official USGA handicap.
-            </Typography>
-          </CardContent>
-        </Card>
+        {/* The Estimated Handicap hero is deliberately absent — see HomePage:
+            differentials only land when a round summary is opened, so the
+            number reads "—" for most players. */}
 
         <Box
           sx={{

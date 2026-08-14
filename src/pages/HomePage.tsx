@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Box, Button, Card, CardActionArea, CardContent, IconButton, Stack, Typography } from '@mui/material';
+import { Box, IconButton, Stack, Typography, useTheme } from '@mui/material';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
-import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
+import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
+import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
 import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { PageHeader } from '@/components/layout/PageHeader';
-import { StatCard } from '@/components/ui/StatCard';
+import { NextRoundHero } from '@/components/home/NextRoundHero';
 import { GameStatsCard } from '@/components/home/GameStatsCard';
+import { HomeSummaryRow } from '@/components/home/HomeSummaryRow';
 import { ModeSwitchToggle } from '@/features/appMode/ModeSwitchToggle';
 import { useAuthStore } from '@/stores/authStore';
 import { swingRepo } from '@/services/swingRepo';
@@ -16,10 +18,13 @@ import { useRoundHoles } from '@/features/stats/useRoundHoles';
 import { aggregateRoundStats } from '@/features/stats/computeStats';
 import { useBag } from '@/features/bag/useBag';
 import { useRoundStore } from '@/stores/roundStore';
+import { WASH_ROUND } from '@/theme/designTokens';
+import { brand } from '@/theme/theme';
 import { fullName, scoreVsPar } from '@/utils/format';
 
 export function HomePage() {
   const navigate = useNavigate();
+  const theme = useTheme();
   const profile = useAuthStore((s) => s.profile);
   const active = useRoundStore((s) => s.active);
   const { data: rounds } = useRounds();
@@ -28,18 +33,16 @@ export function HomePage() {
   const completed = (rounds ?? []).filter((r) => r.completed_at);
   const lastRound = completed[0];
 
-  // The Your Game panel. Fairways/GIR/putts need hole-level rows, which arrive
-  // separately — the three score figures paint immediately from the rounds list
-  // and the rest fill in behind a skeleton.
+  // Fairways/GIR/putts need hole-level rows, which arrive separately — the
+  // score figures paint immediately and the rest fill in behind a skeleton.
   const completedIds = useMemo(() => completed.map((r) => r.id), [completed]);
   const holesQuery = useRoundHoles(completedIds);
   const stats = useMemo(
     () => aggregateRoundStats(rounds ?? [], holesQuery.data ?? new Map()),
     [rounds, holesQuery.data]
   );
-  const handicap = stats.handicap;
 
-  // Most recent practice session for the "Last Practice" card.
+  // Most recent practice session for the "Last Practice" row.
   const userId = useAuthStore((s) => s.session?.user.id ?? null);
   const [lastPractice, setLastPractice] = useState<SwingSession | null>(null);
   useEffect(() => {
@@ -56,157 +59,89 @@ export function HomePage() {
     };
   }, [userId]);
 
+  const roundsLabel = completed.length === 1 ? '1 Round Logged' : `${completed.length} Rounds Logged`;
+
   return (
-    <Box>
+    <Box sx={{ fontVariantNumeric: 'tabular-nums' }}>
       <PageHeader
         title={`Hi, ${fullName(profile?.first_name, profile?.last_name)}`}
         subtitle="Ready to play?"
         action={
-          <Stack direction="row" alignItems="center" spacing={0.5} sx={{ flexShrink: 0 }}>
+          <Stack direction="row" alignItems="center" spacing={1} sx={{ flexShrink: 0 }}>
             <ModeSwitchToggle />
-            <IconButton aria-label="Settings" onClick={() => navigate('/settings')}>
+            <IconButton
+              aria-label="Settings"
+              onClick={() => navigate('/settings')}
+              sx={{ borderRadius: '12px' }}
+            >
               <SettingsRoundedIcon />
             </IconButton>
           </Stack>
         }
       />
+
       <Stack spacing={2} px={2} pb={4}>
         {active ? (
-          <Card
-            elevation={0}
-            sx={{
-              background: 'linear-gradient(135deg, rgba(46,125,50,0.55), rgba(76,175,80,0.35))',
-              borderRadius: '5px'
-            }}
-          >
-            <CardActionArea onClick={() => navigate('/round/play')}>
-              <CardContent>
-                <Typography variant="caption" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
-                  Active round
-                </Typography>
-                <Typography variant="h5">{active.courseName}</Typography>
-                <Typography variant="body2" sx={{ opacity: 0.85, mt: 0.5 }}>
-                  Hole {active.currentHoleIndex + 1} of {active.holesPlayed} · tap to resume
-                </Typography>
-              </CardContent>
-            </CardActionArea>
-          </Card>
+          <NextRoundHero
+            eyebrow="Active Round"
+            meta={`Hole ${active.currentHoleIndex + 1} of ${active.holesPlayed}`}
+            body={active.courseName}
+            actionLabel="Resume Round"
+            onAction={() => navigate('/round/play')}
+          />
         ) : (
-          <Button
-            variant="contained"
-            size="large"
-            startIcon={<PlayArrowRoundedIcon />}
-            sx={{ minHeight: 72, fontSize: '1.15rem', borderRadius: '5px' }}
-            onClick={() => navigate('/round/start')}
-          >
-            Start a Round
-          </Button>
-        )}
-
-        <Box sx={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 1.5 }}>
-          <StatCard
-            label="Estimated Handicap"
-            value={handicap.value != null ? handicap.value.toFixed(1) : '—'}
-            hint={handicap.message ?? `Last ${handicap.roundsUsed} rounds`}
-            accent="primary"
-          />
-          <StatCard
-            label="Rounds Logged"
-            value={completed.length}
-            hint={completed.length === 1 ? '1 round' : `${completed.length} rounds`}
-          />
-        </Box>
-
-        {/* Nothing to average before the first finished round — a grid of
-            em-dashes would just be dead weight on a new account. */}
-        {completed.length > 0 && (
-          <GameStatsCard
-            stats={stats}
-            roundCount={completed.length}
-            isLoadingHoles={holesQuery.isLoading}
+          <NextRoundHero
+            eyebrow="Next Round"
+            meta={roundsLabel}
+            body="Pick a course, your tee box and number of holes."
+            actionLabel="Start a Round"
+            onAction={() => navigate('/round/start')}
           />
         )}
+
+        {/* The Estimated Handicap tile is deliberately absent: differentials are
+            only persisted when a round's summary screen is opened, so the number
+            reads "—" for most players. Hidden until that pipeline is fixed
+            rather than showing a permanently empty stat. */}
+
+        {/* Always rendered, dashes and all: the empty grid tells a new player
+            what the app will track for them once they finish a round. */}
+        <GameStatsCard stats={stats} isLoadingHoles={holesQuery.isLoading} />
 
         {lastRound && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-            <CardActionArea onClick={() => navigate(`/round/summary/${lastRound.id}`)}>
-              <CardContent>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
-                >
-                  Last Round
-                </Typography>
-                <Stack direction="row" justifyContent="space-between" alignItems="flex-end" mt={0.5}>
-                  <Box sx={{ minWidth: 0 }}>
-                    <Typography variant="h6" noWrap>
-                      {lastRound.course_name}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      {dayjs(lastRound.started_at).format('MMM D, YYYY')}
-                    </Typography>
-                  </Box>
-                  <Box textAlign="right">
-                    {/* Headline = score-to-par (E / +N / -N). Raw stroke
-                        total drops to the secondary line — matches the
-                        Round Summary final-score treatment. */}
-                    <Typography
-                      variant="h4"
-                      sx={{ fontWeight: 700 }}
-                      color={lastRound.score_vs_par <= 0 ? 'primary' : 'warning.main'}
-                    >
-                      {scoreVsPar(lastRound.score, lastRound.par)}
-                    </Typography>
-                    <Typography
-                      variant="body2"
-                      color="text.secondary"
-                      sx={{ fontWeight: 600 }}
-                    >
-                      {lastRound.score} strokes
-                    </Typography>
-                  </Box>
-                </Stack>
-              </CardContent>
-            </CardActionArea>
-          </Card>
+          <HomeSummaryRow
+            icon={<HistoryRoundedIcon />}
+            iconBg={WASH_ROUND}
+            // The wash is authored for dark surfaces; over a white card it goes
+            // pale, and the light-green glyph disappears into it.
+            iconColor={theme.palette.mode === 'dark' ? brand[200] : brand[800]}
+            eyebrow="Last Round"
+            title={lastRound.course_name}
+            subtitle={dayjs(lastRound.started_at).format('MMM D, YYYY')}
+            value={scoreVsPar(lastRound.score, lastRound.par)}
+            valueColor={lastRound.score_vs_par <= 0 ? 'primary.main' : 'warning.main'}
+            valueNote={`${lastRound.score} strokes`}
+            onClick={() => navigate(`/round/summary/${lastRound.id}`)}
+          />
         )}
 
         {lastPractice && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-            <CardActionArea onClick={() => navigate(`/practice/history/${lastPractice.id}`)}>
-              <CardContent>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
-                >
-                  Last Practice
-                </Typography>
-                <Stack direction="row" justifyContent="space-between" alignItems="flex-end" mt={0.5}>
-                  <Box sx={{ minWidth: 0 }}>
-                    <Typography variant="h6" noWrap>
-                      Swing/Net
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      {dayjs(lastPractice.startedAt).format('MMM D, YYYY')}
-                      {lastPractice.avgTempoRatio != null
-                        ? ` · ${lastPractice.avgTempoRatio.toFixed(1)}:1 tempo`
-                        : ''}
-                    </Typography>
-                  </Box>
-                  <Box textAlign="right">
-                    <Typography variant="h4" sx={{ fontWeight: 700 }} color="primary">
-                      {lastPractice.swingCount}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 600 }}>
-                      {lastPractice.swingCount === 1 ? 'swing' : 'swings'}
-                    </Typography>
-                  </Box>
-                </Stack>
-              </CardContent>
-            </CardActionArea>
-          </Card>
+          <HomeSummaryRow
+            icon={<WatchRoundedIcon />}
+            iconBg="rgba(248,137,48,0.14)"
+            iconColor="primary.main"
+            eyebrow="Last Practice"
+            title="Swing/Net"
+            subtitle={`${dayjs(lastPractice.startedAt).format('MMM D, YYYY')}${
+              lastPractice.avgTempoRatio != null
+                ? ` · ${lastPractice.avgTempoRatio.toFixed(1)}:1 tempo`
+                : ''
+            }`}
+            value={String(lastPractice.swingCount)}
+            valueColor="primary.main"
+            valueNote={lastPractice.swingCount === 1 ? 'swing' : 'swings'}
+            onClick={() => navigate(`/practice/history/${lastPractice.id}`)}
+          />
         )}
       </Stack>
     </Box>

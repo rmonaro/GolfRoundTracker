@@ -1,40 +1,64 @@
-import { Box, Card, Skeleton, Stack, Typography } from '@mui/material';
+import { Box, ButtonBase, Card, Skeleton, Stack, Typography } from '@mui/material';
+import ChevronRightRoundedIcon from '@mui/icons-material/ChevronRightRounded';
+import { useNavigate } from 'react-router-dom';
+import { brand } from '@/theme/theme';
+import { trackFill } from '@/theme/designTokens';
 import type { AggregatedStats } from '@/features/stats/computeStats';
 
 interface GameStatsCardProps {
   stats: AggregatedStats;
-  /** Completed rounds the figures are drawn from. */
-  roundCount: number;
   /** Hole-level rows still in flight — fairways, GIR and putts aren't known yet. */
   isLoadingHoles?: boolean;
 }
 
+interface Cell {
+  label: string;
+  value: string;
+  /** Small qualifier beside the number, e.g. "gross". */
+  note?: string;
+  color?: string;
+  /** 0-100 — renders a progress track under the value. */
+  bar?: number | null;
+  pending?: boolean;
+}
+
 /**
- * The six numbers that describe a player's game, as one panel on Home.
+ * The six numbers that describe a player's game.
  *
- * Laid out as a 3×2 grid of hairline-separated cells rather than six floating
- * cards: at this size the gaps between separate cards read as noise, and a
- * single bordered block keeps the whole set scannable as one thought.
+ * Two-up grid of hairline-separated cells, per the Home Screen design: the
+ * 1px grid gap over a divider-colored background draws the separators, so the
+ * cells themselves stay plain surfaces.
  */
-export function GameStatsCard({ stats, roundCount, isLoadingHoles }: GameStatsCardProps) {
-  const cells: Array<{ label: string; value: string; color?: string; pending?: boolean }> = [
-    { label: 'Avg Score', value: fmt1(stats.averageScore) },
-    { label: 'Best Score', value: stats.bestScore != null ? String(stats.bestScore) : '—' },
+export function GameStatsCard({ stats, isLoadingHoles }: GameStatsCardProps) {
+  const navigate = useNavigate();
+
+  const cells: Cell[] = [
+    { label: 'Avg Score', value: fmt1(stats.averageScore), note: 'gross' },
+    {
+      label: 'Best Score',
+      value: stats.bestScore != null ? String(stats.bestScore) : '—',
+      color: stats.bestScore != null ? 'success.main' : undefined
+    },
     {
       label: 'Avg vs Par',
       value: fmtVsPar(stats.averageScoreVsPar),
-      // Green only for the genuinely notable case of averaging at or under par.
-      // Over par stays neutral: `warning` amber is a near-twin of the primary
-      // orange in this theme, and flagging the normal outcome for most golfers
-      // would read as an alert about nothing.
+      // Under par is the standout case and takes the success green; over par
+      // takes the design's warning amber.
       color:
-        stats.averageScoreVsPar != null && stats.averageScoreVsPar <= 0
-          ? 'success.main'
-          : undefined
+        stats.averageScoreVsPar == null
+          ? undefined
+          : stats.averageScoreVsPar <= 0
+            ? 'success.main'
+            : 'warning.main'
     },
-    { label: 'Fairways', value: fmtPct(stats.fairwaysHitPct), pending: isLoadingHoles },
-    { label: 'GIR', value: fmtPct(stats.girPct), pending: isLoadingHoles },
-    { label: 'Putts/Rd', value: fmt1(stats.puttsPerRound), pending: isLoadingHoles }
+    { label: 'Putts/Rd', value: fmt1(stats.puttsPerRound), pending: isLoadingHoles },
+    {
+      label: 'Fairways',
+      value: fmtPct(stats.fairwaysHitPct),
+      bar: stats.fairwaysHitPct,
+      pending: isLoadingHoles
+    },
+    { label: 'GIR', value: fmtPct(stats.girPct), bar: stats.girPct, pending: isLoadingHoles }
   ];
 
   return (
@@ -43,74 +67,102 @@ export function GameStatsCard({ stats, roundCount, isLoadingHoles }: GameStatsCa
         direction="row"
         alignItems="center"
         justifyContent="space-between"
-        sx={{ px: 2, py: 1.5 }}
+        spacing={1.5}
+        sx={{ px: 2, py: 1.75, borderBottom: '1px solid', borderColor: 'divider' }}
       >
         <Typography
           variant="caption"
           color="text.secondary"
-          sx={{ textTransform: 'uppercase', letterSpacing: 0.6, fontWeight: 700 }}
+          sx={{ textTransform: 'uppercase', letterSpacing: '0.6px' }}
         >
           Your Game
         </Typography>
-        <Typography variant="caption" color="text.secondary">
-          {roundCount === 1 ? '1 round' : `${roundCount} rounds`}
-        </Typography>
+        <ButtonBase
+          onClick={() => navigate('/stats')}
+          sx={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 0.5,
+            color: 'primary.main',
+            fontSize: '0.85rem',
+            fontWeight: 600,
+            borderRadius: '5px',
+            px: 0.5,
+            py: 0.25
+          }}
+        >
+          All Stats
+          <ChevronRightRoundedIcon sx={{ fontSize: 18 }} />
+        </ButtonBase>
       </Stack>
 
+      {/* 1px gap over a divider-colored ground = the cell separators. */}
       <Box
         sx={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(3, 1fr)',
-          borderTop: '1px solid',
-          borderColor: 'divider'
+          gridTemplateColumns: '1fr 1fr',
+          gap: '1px',
+          bgcolor: 'divider'
         }}
       >
-        {cells.map((cell, i) => (
-          <Box
+        {cells.map((cell) => (
+          <Stack
             key={cell.label}
-            sx={{
-              px: 0.75,
-              py: 1.75,
-              textAlign: 'center',
-              minWidth: 0,
-              // Hairlines between cells only — the card edge supplies the rest.
-              borderRight: i % 3 === 2 ? 0 : '1px solid',
-              borderBottom: i < 3 ? '1px solid' : 0,
-              borderColor: 'divider'
-            }}
+            spacing={0.75}
+            sx={{ bgcolor: 'background.paper', px: 2, py: 1.75, minHeight: 84, minWidth: 0 }}
           >
-            {cell.pending ? (
-              <Skeleton variant="text" width="60%" sx={{ mx: 'auto', fontSize: '1.375rem' }} />
-            ) : (
-              <Typography
-                sx={{
-                  // Sized to the narrowest real case: three columns on a 390px
-                  // screen still has to fit "102.5" and "+14.4" without clipping.
-                  fontSize: '1.375rem',
-                  fontWeight: 800,
-                  lineHeight: 1.15,
-                  color: cell.color ?? 'text.primary'
-                }}
-                noWrap
-              >
-                {cell.value}
-              </Typography>
-            )}
             <Typography
               variant="caption"
               color="text.secondary"
-              sx={{
-                display: 'block',
-                mt: 0.25,
-                textTransform: 'uppercase',
-                letterSpacing: 0.2,
-                fontSize: '0.6rem',
-                lineHeight: 1.25
-              }}
+              sx={{ fontSize: '0.7rem', textTransform: 'uppercase', letterSpacing: '0.5px' }}
+              noWrap
             >
               {cell.label}
             </Typography>
-          </Box>
+
+            {cell.pending ? (
+              <Skeleton variant="text" width="55%" sx={{ fontSize: '1.75rem' }} />
+            ) : (
+              <Stack direction="row" alignItems="baseline" spacing={0.75} sx={{ minWidth: 0 }}>
+                <Typography
+                  sx={{
+                    fontSize: '1.75rem',
+                    fontWeight: 700,
+                    lineHeight: 1,
+                    color: cell.color ?? 'text.primary'
+                  }}
+                  noWrap
+                >
+                  {cell.value}
+                </Typography>
+                {cell.note && (
+                  <Typography variant="caption" color="text.disabled" sx={{ fontSize: '0.75rem' }}>
+                    {cell.note}
+                  </Typography>
+                )}
+              </Stack>
+            )}
+
+            {cell.bar != null && !cell.pending && (
+              <Box
+                sx={(theme) => ({
+                  height: 4,
+                  borderRadius: '999px',
+                  bgcolor: trackFill(theme.palette.mode),
+                  overflow: 'hidden'
+                })}
+              >
+                <Box
+                  sx={{
+                    height: '100%',
+                    width: `${Math.min(100, Math.max(0, cell.bar ?? 0))}%`,
+                    bgcolor: brand[500],
+                    borderRadius: '999px'
+                  }}
+                />
+              </Box>
+            )}
+          </Stack>
         ))}
       </Box>
     </Card>
