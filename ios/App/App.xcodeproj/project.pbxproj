@@ -526,7 +526,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = A7Y5T82BND;
 				INFOPLIST_FILE = App/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Golf Round Tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = RoundIQ;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -558,7 +558,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = A7Y5T82BND;
 				INFOPLIST_FILE = App/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = "Golf Round Tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = RoundIQ;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.sports";
 				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
 				LD_RUNPATH_SEARCH_PATHS = (
@@ -601,7 +601,7 @@
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "GolfWatch-Watch-App-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Golf Round Tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = RoundIQ;
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "Reads your heart rate during practice to show effort and fatigue trends.";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Saves your practice as a workout so it appears in the Health app.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Used to estimate your swing tempo and motion patterns during practice. Motion-based only — not a launch monitor.";
@@ -656,7 +656,7 @@
 				GCC_C_LANGUAGE_STANDARD = gnu17;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = "GolfWatch-Watch-App-Info.plist";
-				INFOPLIST_KEY_CFBundleDisplayName = "Golf Round Tracker";
+				INFOPLIST_KEY_CFBundleDisplayName = RoundIQ;
 				INFOPLIST_KEY_NSHealthShareUsageDescription = "Reads your heart rate during practice to show effort and fatigue trends.";
 				INFOPLIST_KEY_NSHealthUpdateUsageDescription = "Saves your practice as a workout so it appears in the Health app.";
 				INFOPLIST_KEY_NSMotionUsageDescription = "Used to estimate your swing tempo and motion patterns during practice. Motion-based only — not a launch monitor.";
