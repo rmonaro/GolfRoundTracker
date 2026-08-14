@@ -36,23 +36,51 @@ final class WorkoutManager: NSObject, ObservableObject {
     private let hrvType = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
     private let calType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned)!
 
-    /// Most recent heart-rate reading (bpm), 0 until the first sample.
+    /// Most recent heart-rate reading (bpm) from the LIVE workout builder,
+    /// 0 until the first sample.
     @Published private(set) var currentHeartRate: Double = 0
+
+    /// Most recent heart rate HealthKit has on file, from `refreshRecentHeartRate()`.
+    /// The watch samples heart rate on its own schedule all day, so this is
+    /// usually populated within a couple of minutes even when no workout is
+    /// running. 0 when nothing recent exists (or read access was refused).
+    @Published private(set) var recentHeartRate: Double = 0
+
+    /// True once `startSession` has a workout actually collecting. False after
+    /// a failure — authorization refused, HealthKit unavailable, or the session
+    /// refusing to start because the app was in the background. Callers use
+    /// this to retry rather than reporting 0 bpm forever.
+    @Published private(set) var isCollecting = false
+
+    /// The heart rate to attribute to something happening right now: the live
+    /// workout reading when one is flowing, else the most recent stored sample.
+    ///
+    /// Round mode previously read only the live value, so a round whose workout
+    /// session never started (or whose HR read authorization was never granted)
+    /// reported 0 for every shot — and 0 is dropped from the wire payload, so
+    /// every shot arrived with no heart rate at all.
+    var bestHeartRate: Double { currentHeartRate > 0 ? currentHeartRate : recentHeartRate }
 
     private var heartRates: [Double] = []
     private var hrvValues: [Double] = []
 
     /// Request authorization + start a golf workout. Safe to call when
     /// HealthKit isn't available or authorized — it just won't collect.
-    func startSession() async {
-        guard HKHealthStore.isHealthDataAvailable() else { return }
+    /// Idempotent: a second call while already collecting is a no-op, so
+    /// callers can use it as "make sure this is running".
+    @discardableResult
+    func startSession() async -> Bool {
+        guard HKHealthStore.isHealthDataAvailable() else { return false }
+        if isCollecting, session != nil { return true }
 
         let toShare: Set = [HKQuantityType.workoutType()]
         let toRead: Set<HKObjectType> = [hrType, hrvType, calType]
         do {
             try await healthStore.requestAuthorization(toShare: toShare, read: toRead)
         } catch {
-            return
+            // Can't collect live, but stored samples may still be readable.
+            refreshRecentHeartRate()
+            return false
         }
 
         let config = HKWorkoutConfiguration()
@@ -76,14 +104,48 @@ final class WorkoutManager: NSObject, ObservableObject {
             let start = Date()
             session.startActivity(with: start)
             builder.beginCollection(withStart: start) { _, _ in }
+            isCollecting = true
+            // Seed something usable immediately — the live builder's first
+            // sample can be a minute or more away, and a shot hit in that
+            // window would otherwise carry no heart rate.
+            refreshRecentHeartRate()
+            return true
         } catch {
             session = nil
             builder = nil
+            isCollecting = false
+            refreshRecentHeartRate()
+            return false
         }
+    }
+
+    /// Read the most recent stored heart-rate sample (last 15 minutes) into
+    /// `recentHeartRate`. This is what makes a heart rate available when the
+    /// live workout isn't running or hasn't produced a sample yet.
+    func refreshRecentHeartRate() {
+        guard HKHealthStore.isHealthDataAvailable() else { return }
+        let end = Date()
+        let predicate = HKQuery.predicateForSamples(
+            withStart: end.addingTimeInterval(-15 * 60), end: end, options: .strictEndDate
+        )
+        let newestFirst = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+        let query = HKSampleQuery(
+            sampleType: hrType,
+            predicate: predicate,
+            limit: 1,
+            sortDescriptors: [newestFirst]
+        ) { [weak self] _, samples, _ in
+            guard let sample = samples?.first as? HKQuantitySample else { return }
+            let bpm = sample.quantity.doubleValue(for: HKUnit.count().unitDivided(by: .minute()))
+            guard bpm > 0 else { return }
+            Task { @MainActor in self?.recentHeartRate = bpm }
+        }
+        healthStore.execute(query)
     }
 
     /// Stop the workout and return the collected summary.
     func stopSession() async -> WorkoutSummary {
+        isCollecting = false
         guard let session, let builder else { return .empty }
         session.end()
         let end = Date()
@@ -159,5 +221,15 @@ extension WorkoutManager: HKWorkoutSessionDelegate {
     nonisolated func workoutSession(
         _ workoutSession: HKWorkoutSession,
         didFailWithError error: Error
-    ) {}
+    ) {
+        // Mark the session dead so `startSession` will genuinely restart it on
+        // the next attempt instead of short-circuiting on `isCollecting` — and
+        // so heart rate falls back to stored samples in the meantime.
+        Task { @MainActor in
+            self.isCollecting = false
+            self.session = nil
+            self.builder = nil
+            self.refreshRecentHeartRate()
+        }
+    }
 }

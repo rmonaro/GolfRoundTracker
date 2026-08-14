@@ -222,6 +222,14 @@ export type WatchInboundMessage =
       clubId?: string | null;
       startLat?: number | null;
       startLng?: number | null;
+      /** Horizontal accuracy (metres) of the fix in startLat/startLng, and the
+       *  epoch-ms timestamp of when that fix was actually taken. Both let the
+       *  phone judge how good the watch's position is instead of trusting it
+       *  blindly — a 28 m fix from 9 seconds ago is worse than the phone's own
+       *  6 m fix from just now, and preferring it put shots on the wrong side
+       *  of the green. Absent on older watch builds. */
+      startAccuracyM?: number | null;
+      startFixAt?: number | null;
     }
   // --- Practice-mode swing feedback (motion-based) -----------------------
   | { type: 'practiceStarted'; sessionId: string; clubId: string | null }

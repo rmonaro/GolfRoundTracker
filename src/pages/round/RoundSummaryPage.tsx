@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Alert,
   Box,
@@ -115,6 +115,8 @@ export function RoundSummaryPage() {
   const [editOpen, setEditOpen] = useState(false);
   const [verifyingAll, setVerifyingAll] = useState(false);
   const [tab, setTab] = useState<'overview' | 'holes' | 'game'>('overview');
+  /** Anchor for re-homing the shared scroll container when the tab changes. */
+  const tabBarRef = useRef<HTMLDivElement | null>(null);
   // When set (via a "needs review" hole chip), the Holes tab jumps to this hole
   // so the golfer lands right on the shots that need confirming. Reset to null
   // once consumed so tapping the same hole again re-triggers the jump.
@@ -369,10 +371,20 @@ export function RoundSummaryPage() {
       {/* Tab nav — Overview (existing content) / Holes (per-hole detail) /
           Game Stats (placeholder). Sits between the header and the page
           body so the rest of the page can swap in place. */}
-      <Box sx={{ px: 2, mt: 1 }}>
+      <Box ref={tabBarRef} sx={{ px: 2, mt: 1, scrollMarginTop: 12 }}>
         <Tabs
           value={tab}
-          onChange={(_, v) => setTab(v)}
+          onChange={(_, v) => {
+            setTab(v);
+            // The two tabs are very different heights and the scroll container
+            // is shared (MobileShell's Box), so switching while scrolled down
+            // dropped you into the middle — or, on the shorter tab, at a
+            // clamped offset that read as "the page is stuck". Anchor the new
+            // tab at its top.
+            requestAnimationFrame(() =>
+              tabBarRef.current?.scrollIntoView({ block: 'start' })
+            );
+          }}
           variant="fullWidth"
           sx={{
             minHeight: 40,
@@ -1253,12 +1265,36 @@ function HolesTab({
     sorted[firstPlayedIdx >= 0 ? firstPlayedIdx : 0]?.hole_number ?? 1
   );
 
+  // The Shots card, so a hole jumped to from the "needs review" chips can be
+  // scrolled to. Nothing on this page scrolls itself otherwise: the scroll
+  // container is MobileShell's inner Box (the document body is locked
+  // `position: fixed`), so switching tabs left the viewport wherever it
+  // happened to be — the shots the golfer was sent here to review sat below
+  // the fold behind the hole strip, stats and clubs cards.
+  const shotsCardRef = useRef<HTMLDivElement | null>(null);
+  /** Pending scroll frame, so an unmount mid-animation doesn't leave it queued. */
+  const scrollFrameRef = useRef<number | null>(null);
+
   // Jump to a hole requested from the summary's "needs review" chips, then tell
   // the parent it's been consumed so re-tapping the same hole re-triggers it.
   useEffect(() => {
     if (focusHoleNumber == null) return;
     setSelectedHoleNumber(focusHoleNumber);
     onFocusConsumed?.();
+    // Two frames: one for this tab's content to mount, one for it to lay out.
+    // scrollIntoView finds the real scroll container by itself.
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = requestAnimationFrame(() => {
+        scrollFrameRef.current = null;
+        shotsCardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+    return () => {
+      if (scrollFrameRef.current != null) {
+        cancelAnimationFrame(scrollFrameRef.current);
+        scrollFrameRef.current = null;
+      }
+    };
   }, [focusHoleNumber, onFocusConsumed]);
 
   // Hole numbers that still have an unverified (auto-detected) shot — drives the
@@ -1489,7 +1525,13 @@ function HolesTab({
           shows shot #, club, distance, outcome (target_result + lie), and
           any penalty / notes. Sourced from the shots list filtered by
           hole_id (see shotsByHole above). */}
-      <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+      <Card
+        ref={shotsCardRef}
+        elevation={0}
+        // scroll-margin keeps the card's heading clear of the top edge when a
+        // "needs review" chip scrolls it into view.
+        sx={{ bgcolor: 'background.paper', borderRadius: '5px', scrollMarginTop: 12 }}
+      >
         <CardContent>
           <Stack
             direction="row"

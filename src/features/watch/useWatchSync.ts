@@ -110,12 +110,20 @@ export function useWatchSync() {
   // ~1KB and the comparison is microseconds vs. the cost of a watch wake.
   const lastSentRef = useRef<string>('');
   useEffect(() => {
-    // Pin position for the current hole: per-round override wins over
-    // the green centroid. Pushed to the watch so it can compute live
-    // distance against its own GPS fix.
+    // Pin position for the current hole. Pushed to the watch so it can compute
+    // live distance against its own GPS fix.
+    //
+    // Precedence mirrors HoleTrackingPage's `pinLatEff`: a flag moved during
+    // THIS round wins, then the shared course pin, then the green centroid.
+    // The round-local value is written synchronously when the flag is moved
+    // (from either the phone or the watch's "Set flag here"), so the watch's
+    // putt distance follows the flag on the very next push instead of waiting
+    // on — or missing entirely — the layout refetch.
     const holeRow = layoutQuery.data?.hole;
-    const pinLat = holeRow?.pin_lat ?? holeRow?.green_lat ?? null;
-    const pinLng = holeRow?.pin_lng ?? holeRow?.green_lng ?? null;
+    const pinLat =
+      currentHole?.pinLat ?? holeRow?.pin_lat ?? holeRow?.green_lat ?? null;
+    const pinLng =
+      currentHole?.pinLng ?? holeRow?.pin_lng ?? holeRow?.green_lng ?? null;
 
     const snapshot = buildSnapshot({
       active,
@@ -343,8 +351,19 @@ function buildSnapshot({
       suggestedClubId: suggestedClub?.clubId ?? null,
       shots: h.shots.length,
       putts: h.shots.filter((s) => s.targetType === 'putt').length,
-      pinLat: h.pinLat ?? meta?.pinLat ?? meta?.greenLat ?? null,
-      pinLng: h.pinLng ?? meta?.pinLng ?? meta?.greenLng ?? null
+      // The CURRENT hole takes the fully-resolved pin computed above. The watch
+      // reads its distances off this per-hole array in preference to the
+      // top-level pin, and `holesMeta` is a 30-minute-cached batch query — so
+      // without this a flag moved mid-round left the watch measuring to the old
+      // pin (or the green centroid) until that cache expired.
+      pinLat:
+        h.holeNumber === currentHole.holeNumber
+          ? pinLat
+          : h.pinLat ?? meta?.pinLat ?? meta?.greenLat ?? null,
+      pinLng:
+        h.holeNumber === currentHole.holeNumber
+          ? pinLng
+          : h.pinLng ?? meta?.pinLng ?? meta?.greenLng ?? null
     };
   });
 

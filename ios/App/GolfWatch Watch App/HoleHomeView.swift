@@ -358,7 +358,14 @@ struct HoleHomeView: View {
     /// watch's own optimistic "Made" tap. Gates the prev/next hole arrows, which
     /// are hidden during active play so a hole can't be skipped mid-round.
     private func holeCompleted(_ s: WatchRoundState) -> Bool {
-        s.holeComplete || madePuttHole == displayedHoleNumber(s)
+        // `s.holeComplete` describes the hole the PHONE is on. While the watch
+        // is showing a hole ahead of it — which is the normal state after
+        // holing out and tapping Next Hole, since the pocketed phone won't
+        // process the nav until it next runs — that flag is about the previous
+        // hole, and honouring it here showed the next tee as already finished:
+        // hole arrows instead of Track / Add Shot.
+        if isPreviewing(s) { return madePuttHole == displayedHoleNumber(s) }
+        return s.holeComplete || madePuttHole == displayedHoleNumber(s)
     }
 
     @ViewBuilder
@@ -800,15 +807,39 @@ struct HoleHomeView: View {
     /// means the golfer can't record the putt from the watch at all.
     private let onGreenRadiusYards: Double = 15
 
+    /// Distance (yards from the pin) past which the watch's own GPS OVERRULES a
+    /// phone snapshot claiming you're on the green.
+    ///
+    /// `s.onGreen` is computed by the phone, and the phone is in a pocket for
+    /// most of a round — so that flag doesn't go false when you walk off the
+    /// green, it just STOPS UPDATING, holding whatever it said when the phone
+    /// last ran. Trusting it unconditionally is what left the putt view up on
+    /// the next tee: it also forces the club to the putter (see
+    /// `rawEffectiveClubId`), which satisfies the putt-view gate's other half,
+    /// so the two propped each other up until the app was restarted.
+    ///
+    /// Well clear of the on-green radius so a front-pin green whose centre is
+    /// the only mapped point can still read as on-green; but no green is 45
+    /// yards from its own flag, so past this we are certainly off it.
+    private let definitelyOffGreenYards: Double = 45
+
     /// Effective on-green for the DISPLAYED hole: the phone's exact result when
     /// it's awake, OR the watch's own GPS-within-radius test so putting mode
     /// still arms when the phone is asleep. Only for the hole you're physically
     /// on (not a previewed hole).
     private func isOnGreen(_ s: WatchRoundState) -> Bool {
-        if s.onGreen { return true }
+        // A hole you're only previewing is a hole you're not standing on.
+        // (Checked before the phone flag, which describes the hole the PHONE
+        // thinks you're playing — not the one being shown.)
         if isPreviewing(s) { return false }
-        if let yards = liveDistanceToDisplayedPin(s) { return yards <= onGreenRadiusYards }
-        return false
+        if let yards = liveDistanceToDisplayedPin(s) {
+            // Our own GPS is live even when the phone's isn't, so it gets the
+            // last word in both directions.
+            if yards > definitelyOffGreenYards { return false }
+            return s.onGreen || yards <= onGreenRadiusYards
+        }
+        // No usable fix — the phone's last word is all we have.
+        return s.onGreen
     }
 
     /// Club recommendation computed ON THE WATCH from its own live distance to

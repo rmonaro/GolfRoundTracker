@@ -32,6 +32,39 @@ export type AutoTrackState = 'idle' | 'armed';
 const MIN_SHOT_M = 5;
 
 /**
+ * Assumed walking speed (m/s) used to turn a fix's AGE into distance error.
+ * ~1.4 m/s is a golfer on foot. Mirrors the watch's own constant.
+ */
+const ASSUMED_SPEED_MPS = 1.4;
+
+/**
+ * How wrong a fix probably is RIGHT NOW: its own accuracy radius plus the
+ * ground the player has likely covered since it was taken.
+ *
+ * Ranking positions by accuracy alone ignores age, and taking the watch's
+ * position unconditionally ignores both. Either one puts the shot marker
+ * tens of metres off — the "it said I was left of the green when I was on the
+ * right" report. Comparing phone and watch on the same yardstick means the
+ * better of the two wins every time, whichever device it came from.
+ */
+function effectiveErrorM(accuracyM: number | null, at: number | null): number {
+  // No accuracy reported → assume a mediocre-but-usable fix rather than
+  // rejecting it; a positionless shot is worse than an imprecise one.
+  const acc = accuracyM != null && accuracyM >= 0 ? accuracyM : 25;
+  const ageS = at != null ? Math.max(0, (Date.now() - at) / 1000) : 0;
+  return acc + ageS * ASSUMED_SPEED_MPS;
+}
+
+/**
+ * Beyond this (metres of likely error) a position isn't worth recording as
+ * where the shot happened — half a green's width of slop turns a useful shot
+ * map into a misleading one. The stroke is still recorded; only its
+ * coordinates are dropped. Deliberately generous: watch GPS under tree cover
+ * is genuinely coarse, and an approximate dot still beats no dot.
+ */
+const MAX_FIX_ERROR_M = 40;
+
+/**
  * Opaque per-shot metadata latched when a strike OPENS a shot and carried
  * through to when that shot is CLOSED. The hook never inspects it — it only
  * snapshots (via `captureShotMeta`) and hands it back on the emitted shot.
@@ -87,6 +120,11 @@ export interface UseAutoTrackOptions {
     capturedAt: number;
     lat?: number;
     lng?: number;
+    /** Accuracy (m) and epoch-ms age of the watch's fix, when it reported them.
+     *  Used to compare it against the phone's own fix instead of assuming the
+     *  watch is always right — see `effectiveErrorM`. */
+    accuracyM?: number | null;
+    fixAt?: number | null;
   } | null;
   /**
    * Impact-primary mode. When true, watch strikes drive detection and emitted
@@ -211,15 +249,39 @@ export function useAutoTrack(opts: UseAutoTrackOptions): UseAutoTrackResult {
   useEffect(() => {
     if (!lastImpact) return;
     if (!impactPrimaryRef.current) return;
-    // Prefer the WATCH's position carried on the strike (the striker's wrist,
-    // and available even when the phone's own GPS has stopped in a pocket).
-    // Fall back to the phone's live fix. Only skip when neither exists.
+    // Two candidate positions for where this strike happened: the watch's fix
+    // (the striker's wrist, and alive even when the phone is pocketed and its
+    // GPS has stopped) and the phone's own live fix. Take the one with the
+    // lower likely error rather than always taking the watch's — the watch
+    // accepts fixes up to 30 m and its reading can be seconds stale, so
+    // "always the watch" regularly recorded shots well off the true spot.
+    const phoneFix = latestFixRef.current;
+    const candidates: Array<{ lat: number; lng: number; err: number }> = [];
+    if (lastImpact.lat != null && lastImpact.lng != null) {
+      candidates.push({
+        lat: lastImpact.lat,
+        lng: lastImpact.lng,
+        err: effectiveErrorM(lastImpact.accuracyM ?? null, lastImpact.fixAt ?? null)
+      });
+    }
+    if (phoneFix) {
+      candidates.push({
+        lat: phoneFix.lat,
+        lng: phoneFix.lng,
+        err: effectiveErrorM(phoneFix.accuracyM ?? null, phoneFix.timestamp ?? null)
+      });
+    }
+    const bestFix = candidates.reduce<{ lat: number; lng: number; err: number } | null>(
+      (best, c) => (best == null || c.err < best.err ? c : best),
+      null
+    );
+    // A position this uncertain is misinformation on a shot map. Drop the
+    // COORDINATES only — the stroke itself still records (see below), which is
+    // the distinction that matters: a shot with no position beats no shot.
     const fix: { lat: number; lng: number } | null =
-      lastImpact.lat != null && lastImpact.lng != null
-        ? { lat: lastImpact.lat, lng: lastImpact.lng }
-        : latestFixRef.current
-          ? { lat: latestFixRef.current.lat, lng: latestFixRef.current.lng }
-          : null;
+      bestFix && bestFix.err <= MAX_FIX_ERROR_M
+        ? { lat: bestFix.lat, lng: bestFix.lng }
+        : null;
     // NOTE: a missing fix no longer aborts. This used to `return`, which threw
     // the strike away entirely — the golfer swung, the watch detected it, and
     // no shot was ever recorded. That is the "it missed some shots" report.
