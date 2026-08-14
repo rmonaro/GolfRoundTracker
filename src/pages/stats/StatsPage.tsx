@@ -17,6 +17,7 @@ import { StatCard } from '@/components/ui/StatCard';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { useRounds } from '@/features/stats/useRounds';
 import { aggregateRoundStats } from '@/features/stats/computeStats';
+import { useRoundHoles } from '@/features/stats/useRoundHoles';
 import {
   computeClubDispersion,
   type AimTargetByHole
@@ -49,16 +50,8 @@ export function StatsPage() {
     [rounds]
   );
 
-  const holesQuery = useQuery({
-    queryKey: ['stats-holes', completedIds],
-    enabled: completedIds.length > 0,
-    queryFn: async () => {
-      const all = await Promise.all(completedIds.map((id) => roundRepo.listHoles(id)));
-      const map = new Map<string, typeof all[number]>();
-      completedIds.forEach((id, idx) => map.set(id, all[idx]));
-      return map;
-    }
-  });
+  // Same hook (and cache entry) the Home screen's stats panel uses.
+  const holesQuery = useRoundHoles(completedIds);
 
   const shotsQuery = useQuery({
     queryKey: ['stats-shots', completedIds],

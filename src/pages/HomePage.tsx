@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Button, Card, CardActionArea, CardContent, IconButton, Stack, Typography } from '@mui/material';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
@@ -6,15 +6,17 @@ import { useNavigate } from 'react-router-dom';
 import dayjs from 'dayjs';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { StatCard } from '@/components/ui/StatCard';
+import { GameStatsCard } from '@/components/home/GameStatsCard';
 import { ModeSwitchToggle } from '@/features/appMode/ModeSwitchToggle';
 import { useAuthStore } from '@/stores/authStore';
 import { swingRepo } from '@/services/swingRepo';
 import type { SwingSession } from '@/types/swing';
 import { useRounds } from '@/features/stats/useRounds';
+import { useRoundHoles } from '@/features/stats/useRoundHoles';
+import { aggregateRoundStats } from '@/features/stats/computeStats';
 import { useBag } from '@/features/bag/useBag';
 import { useRoundStore } from '@/stores/roundStore';
 import { fullName, scoreVsPar } from '@/utils/format';
-import { estimateHandicap } from '@/utils/handicap';
 
 export function HomePage() {
   const navigate = useNavigate();
@@ -25,7 +27,17 @@ export function HomePage() {
 
   const completed = (rounds ?? []).filter((r) => r.completed_at);
   const lastRound = completed[0];
-  const handicap = estimateHandicap(completed.slice(0, 20).map((r) => r.handicap_differential));
+
+  // The Your Game panel. Fairways/GIR/putts need hole-level rows, which arrive
+  // separately — the three score figures paint immediately from the rounds list
+  // and the rest fill in behind a skeleton.
+  const completedIds = useMemo(() => completed.map((r) => r.id), [completed]);
+  const holesQuery = useRoundHoles(completedIds);
+  const stats = useMemo(
+    () => aggregateRoundStats(rounds ?? [], holesQuery.data ?? new Map()),
+    [rounds, holesQuery.data]
+  );
+  const handicap = stats.handicap;
 
   // Most recent practice session for the "Last Practice" card.
   const userId = useAuthStore((s) => s.session?.user.id ?? null);
@@ -104,6 +116,16 @@ export function HomePage() {
             hint={completed.length === 1 ? '1 round' : `${completed.length} rounds`}
           />
         </Box>
+
+        {/* Nothing to average before the first finished round — a grid of
+            em-dashes would just be dead weight on a new account. */}
+        {completed.length > 0 && (
+          <GameStatsCard
+            stats={stats}
+            roundCount={completed.length}
+            isLoadingHoles={holesQuery.isLoading}
+          />
+        )}
 
         {lastRound && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
