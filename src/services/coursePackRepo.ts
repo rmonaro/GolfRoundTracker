@@ -94,7 +94,15 @@ export async function downloadPack(
   const res = await fetch(info.tilesUrl, { signal });
   if (!res.ok) throw new Error(`Imagery download failed (${res.status})`);
 
-  const total = Number(res.headers.get('content-length')) || info.sizeBytes || 0;
+  const headerLength = Number(res.headers.get('content-length')) || 0;
+  const total = headerLength || info.sizeBytes || 0;
+  // Only the server's OWN length can verify the body, and only when it isn't
+  // re-encoded in transit — with `content-encoding` the header counts compressed
+  // bytes while the reader yields decompressed ones, and comparing the two would
+  // reject every download. (Storage currently sends neither compression nor a
+  // mismatch: measured 32,934,326 both ways.)
+  const verifiableLength =
+    headerLength > 0 && !res.headers.get('content-encoding') ? headerLength : 0;
   let bytes: ArrayBuffer;
 
   if (res.body && total > 0) {
@@ -108,6 +116,16 @@ export async function downloadPack(
       received += value.length;
       onProgress?.(Math.min(1, received / total));
     }
+    // A stream that ends early resolves cleanly — `done` is `done`, whether or
+    // not the body arrived. Storing that would leave a TRUNCATED pack on the
+    // device that reads as a complete download and then fails to render at the
+    // one moment it's needed, so compare against the length the server promised.
+    if (verifiableLength && received !== verifiableLength) {
+      throw new Error(
+        `Imagery download incomplete (${received} of ${verifiableLength} bytes) — check your connection and try again`
+      );
+    }
+
     const merged = new Uint8Array(received);
     let offset = 0;
     for (const c of chunks) {
@@ -205,6 +223,8 @@ export function isPackDownloading(courseId: string): boolean {
   return inFlight.has(courseId);
 }
 
+export type PackDownloadPhase = 'downloading' | 'failed';
+
 export interface PackDownloadState {
   courseId: string;
   courseName: string | null;
@@ -212,6 +232,9 @@ export interface PackDownloadState {
   fraction: number;
   /** Expected total, for showing "12.4 MB" alongside the bar. */
   sizeBytes: number | null;
+  phase: PackDownloadPhase;
+  /** Why it failed, for the UI to show. Null while downloading. */
+  error: string | null;
 }
 
 /**
@@ -263,7 +286,13 @@ export function downloadPackInBackground(
 ): void {
   if (!courseId || inFlight.has(courseId)) return;
   inFlight.add(courseId);
+  // Starting again clears any previous failure for this course, so a retry
+  // doesn't show the old error next to a live progress bar.
+  if (downloadState?.phase === 'failed' && downloadState.courseId === courseId) {
+    setDownloadState(null);
+  }
   void (async () => {
+    let failure: string | null = null;
     try {
       if (!isUsablyOnline()) return;
       const local = await getPackMeta(courseId);
@@ -272,18 +301,37 @@ export function downloadPackInBackground(
       if (!remote) return;
       // Already have it, and the server hasn't re-tiled since.
       if (local && !isPackStale(local, remote)) return;
-      setDownloadState({ courseId, courseName, fraction: 0, sizeBytes: remote.sizeBytes });
+      const base = { courseId, courseName, sizeBytes: remote.sizeBytes };
+      setDownloadState({ ...base, fraction: 0, phase: 'downloading', error: null });
       await downloadPack(courseId, courseName, remote, (fraction) =>
-        setDownloadState({ courseId, courseName, fraction, sizeBytes: remote.sizeBytes })
+        setDownloadState({ ...base, fraction, phase: 'downloading', error: null })
       );
     } catch (err) {
+      // A failure MUST outlive the attempt. This used to clear to null, which
+      // made a download that died at 60% indistinguishable from one that
+      // finished — the golfer reached the course, lost signal, and only then
+      // discovered there was no map. The state now sticks so the UI can say so
+      // and offer a retry.
+      failure = toAppError(err).message;
       console.warn('[coursePack] background download failed', err);
+      setDownloadState({
+        courseId,
+        courseName,
+        fraction: 0,
+        sizeBytes: null,
+        phase: 'failed',
+        error: failure
+      });
     } finally {
       inFlight.delete(courseId);
-      // Clear on success AND on failure — a bar frozen at 60% because the
-      // connection dropped is worse than no bar, and the round screen retries
-      // on its next mount anyway.
-      setDownloadState(null);
+      if (!failure) setDownloadState(null);
     }
   })();
+}
+
+/** Dismiss a stuck failure — used when retrying or leaving the screen. */
+export function clearPackFailure(courseId: string): void {
+  if (downloadState?.phase === 'failed' && downloadState.courseId === courseId) {
+    setDownloadState(null);
+  }
 }

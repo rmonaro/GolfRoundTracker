@@ -10,8 +10,10 @@ import CloudDownloadRoundedIcon from '@mui/icons-material/CloudDownloadRounded';
 import CheckCircleRoundedIcon from '@mui/icons-material/CheckCircleRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import {
+  clearPackFailure,
   deletePack,
   downloadPack,
+  downloadPackInBackground,
   getPackMeta,
   getRemotePackInfo,
   isPackStale,
@@ -19,6 +21,7 @@ import {
   type RemotePackInfo
 } from '@/services/coursePackRepo';
 import { useConnectivity } from './useConnectivity';
+import { usePackDownload } from './usePackDownload';
 
 function formatSize(bytes: number | null): string {
   if (!bytes) return '';
@@ -43,6 +46,13 @@ export function CoursePackButton({
   const [error, setError] = useState<string | null>(null);
   const [checked, setChecked] = useState(false);
 
+  // The same pack can be pulled by the automatic background download (course
+  // selected, round started, round screen mounted). Without watching that, this
+  // button would sit on "Save maps offline" while a download it didn't start was
+  // already running — and would never show that one's failure.
+  const background = usePackDownload(courseId);
+  const backgroundPhase = background?.phase ?? null;
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -63,7 +73,9 @@ export function CoursePackButton({
     return () => {
       cancelled = true;
     };
-  }, [courseId, isOnline]);
+    // `backgroundPhase` re-reads the stored meta when a background download
+    // ends, so the button flips to "Maps saved" without needing a remount.
+  }, [courseId, isOnline, backgroundPhase]);
 
   const onDownload = async () => {
     if (!remote) return;
@@ -87,17 +99,49 @@ export function CoursePackButton({
     if (isOnline) setRemote(await getRemotePackInfo(courseId).catch(() => null));
   };
 
+  // A failure is reported even when there's nothing else to show, so it can't
+  // be swallowed by the "no imagery for this course" silence below.
+  if (background?.phase === 'failed') {
+    return (
+      <Stack spacing={0.5} sx={{ minWidth: 160 }}>
+        <Typography variant="caption" color="error">
+          Maps didn&apos;t save. {background.error ?? ''}
+        </Typography>
+        <Box>
+          <Button
+            size="small"
+            variant="outlined"
+            color="warning"
+            startIcon={<CloudDownloadRoundedIcon sx={{ fontSize: 16 }} />}
+            disabled={!isOnline}
+            onClick={() => {
+              clearPackFailure(courseId);
+              downloadPackInBackground(courseId, courseName ?? null);
+            }}
+            sx={{ textTransform: 'none' }}
+          >
+            Try again
+          </Button>
+        </Box>
+      </Stack>
+    );
+  }
+
   // Nothing to offer: no pack on the device and none built for this course yet.
   // Silence is right — most courses won't have imagery until the tiler runs.
   if (!checked || (!local && !remote)) return null;
 
-  if (progress != null) {
+  // Either this button's own download or the automatic one — same bar.
+  const activeProgress =
+    progress ?? (background?.phase === 'downloading' ? background.fraction : null);
+
+  if (activeProgress != null) {
     return (
       <Stack spacing={0.5} sx={{ minWidth: 160 }}>
         <Typography variant="caption" color="text.secondary">
-          Downloading maps… {Math.round(progress * 100)}%
+          Saving maps… {Math.round(activeProgress * 100)}%
         </Typography>
-        <LinearProgress variant="determinate" value={progress * 100} />
+        <LinearProgress variant="determinate" value={activeProgress * 100} />
       </Stack>
     );
   }
