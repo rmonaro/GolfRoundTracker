@@ -16,6 +16,8 @@ import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
 import VerifiedRoundedIcon from '@mui/icons-material/VerifiedRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import TravelExploreRoundedIcon from '@mui/icons-material/TravelExploreRounded';
+import { CoursePackButton } from '@/features/offline/CoursePackButton';
+import { downloadPackInBackground } from '@/services/coursePackRepo';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
@@ -58,6 +60,10 @@ export function StartRoundPage() {
   const [roundDate, setRoundDate] = useState<string>(() => toLocalDateInput(new Date()));
   const [error, setError] = useState<string | null>(null);
 
+  // The chosen course, for the offline-maps control below. Named here rather
+  // than looked up at submit time because the control needs it while picking.
+  const selectedCourse = courses.data?.find((c) => c.id === selectedCourseId) ?? null;
+
   // Named tee sets for the selected existing course (Blue/White/Red…). Empty for
   // manual entry or courses with no imported tee data.
   const teesQuery = useCourseTees(mode === 'existing' ? selectedCourseId : null);
@@ -68,6 +74,19 @@ export function StartRoundPage() {
   useEffect(() => {
     setSelectedTeeId('');
   }, [selectedCourseId]);
+
+  // Start pulling the course's satellite imagery the moment it's picked, rather
+  // than waiting for the round to start.
+  //
+  // This is the last point where wifi is likely — by the time the round begins
+  // the golfer is usually at the course on cellular, or already without signal.
+  // No-ops when the course has no imagery built, when the pack is already on the
+  // device and current, or when there's no usable connection, and it dedupes
+  // against a download already running for the same course.
+  useEffect(() => {
+    if (mode !== 'existing' || !selectedCourseId) return;
+    downloadPackInBackground(selectedCourseId, selectedCourse?.name ?? null);
+  }, [mode, selectedCourseId, selectedCourse?.name]);
 
   // Auto-pick a sensible default tee once tees load (a "White"/"Regular"-ish
   // middle tee, else the middle of the yardage-sorted list) so the picker isn't
@@ -258,6 +277,27 @@ export function StartRoundPage() {
               <TeePicker tees={tees} value={selectedTeeId} onSelect={setSelectedTeeId} />
             </CardContent>
           </Card>
+        )}
+
+        {/* Progress / saved state / failure for the download the effect above
+            kicked off. Not a "please click me" button in the normal case — the
+            download is already running by the time this renders. It stays
+            because it's also the retry, the delete, and the "newer imagery
+            available" prompt.
+
+            This is also the ONLY place a course can be saved before playing it:
+            the Settings list is built from the geometry cache, which fills on
+            round start, so a course you've never played has no row there.
+
+            Renders nothing when the course has no imagery built, so it stays
+            invisible for courses the tiler hasn't reached. */}
+        {mode === 'existing' && selectedCourseId && (
+          <Box sx={{ px: 0.5 }}>
+            <CoursePackButton
+              courseId={selectedCourseId}
+              courseName={selectedCourse?.name ?? null}
+            />
+          </Box>
         )}
 
         {mode === 'manual' && (
