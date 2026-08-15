@@ -66,10 +66,12 @@ worker can run simultaneously without ever taking the same course.
 
 Chosen automatically from the course's `state`, falling back to NAIP.
 
-| Source | Resolution | Year | Coverage |
-|---|---|---|---|
-| `ct` | **3 inch** (0.076 m) | **2023** | Connecticut |
-| `naip` (default) | 0.6 m | 2019 in much of the northeast | Continental US |
+| Source | Resolution | Year | Coverage | Kind |
+|---|---|---|---|---|
+| `ct` | **3 inch** (0.076 m) | **2023** | Connecticut | ImageServer |
+| `ny` | ~6 inch (0.15 m) | 2022–2025 rolling | New York State | MapServer |
+| `ma` | 15 cm (7.5 cm on Cape Cod) | **2025** | Massachusetts | tile cache |
+| `naip` (default) | 0.6 m | 2019 in much of the northeast | Continental US | ImageServer |
 
 **Source choice matters more than anything else here.** NAIP is free and
 nationwide, but the USGS service only carries 2019 for large parts of the
@@ -81,18 +83,47 @@ Override with `IMAGERY_SOURCE=naip` (or `ct`) to force one for a run.
 
 ### Adding a state
 
-Two edits in `tile_course.py`: an entry in `IMAGERY_SOURCES` with the
+Usually two edits in `tile_course.py`: an entry in `IMAGERY_SOURCES` with the
 endpoint and its request limits, and a line in `STATE_SOURCES` mapping the
 state code to it. No schema change — `imagery_source`, `imagery_attribution`
 and `imagery_captured_at` are per-course columns, so sources can be mixed
 freely.
 
-Worth knowing when adding one: these services advertise per-axis size caps but
+**First work out which of the three kinds you're dealing with**, because it
+decides how much work it is:
+
+| `kind` | What the endpoint gives you | Examples |
+|---|---|---|
+| `imageserver` | `exportImage` → a real GeoTIFF, ready to use | NAIP, CT |
+| `mapserver` | `export` → a bare image, **no georeferencing** | NY |
+| `tilecache` | No bbox export at all — a cached XYZ pyramid | MA |
+
+For `mapserver` the extent is stamped on afterwards with `-a_ullr`, which takes
+upper-left then lower-right: **maxY precedes minY**, and getting that order
+wrong mirrors the image inside a correct bbox, which looks plausible and is
+badly wrong.
+
+For `tilecache` there is nothing to size-split — GDAL's WMS driver reads the
+pyramid as one raster and fetches only the 256px blocks the window touches, so
+`max_w`/`max_h`/`max_pixels` are all `None`. Two things bite here instead:
+
+- The cache's deepest level is a hard ceiling. MassGIS advertises LODs to z23
+  and publishes 7.5 cm on Cape Cod, but z21 returns 404 — the cache stops at
+  z20, so that is `max_zoom` regardless of native resolution. Probe it with a
+  single `curl` on a tile before assuming.
+- Thousands of small CDN requests fail differently from one big export: dropped
+  TLS connections surface as `SSL_read: unexpected eof` with **HTTP status 0**.
+  Do NOT add 0 to `ZeroBlockHttpCodes` to silence it — that turns a dropped
+  connection into a black square in the middle of a fairway. Retry instead
+  (`GDAL_HTTP_MAX_RETRY`) and pin `GDAL_HTTP_VERSION=1.1`.
+
+For the export kinds, note that these services advertise per-axis size caps but
 actually fail on TOTAL PIXELS, usually with a bare HTTP 500. `max_pixels` in
-each config is measured, not documented. NY's programme (2022-2025, 6-12 inch)
-is a good next candidate, but its endpoint is a MapServer returning
-ungeoreferenced PNG/JPEG, so it needs the extent applied manually — unlike CT
-and NAIP, which return proper GeoTIFF.
+each config is measured, not documented.
+
+Whatever the kind, verify georeferencing on a real course before trusting a new
+source: pull one tile from the finished pack and the same z/x/y straight from
+the publisher, and look at both. Identical framing proves the whole chain.
 
 ## Size and zoom
 

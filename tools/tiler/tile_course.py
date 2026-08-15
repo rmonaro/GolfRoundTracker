@@ -200,6 +200,33 @@ IMAGERY_SOURCES: dict[str, dict[str, Any]] = {
         "captured": None,
         "coverage": "New York State",
     },
+    "ma": {
+        "label": "ma-ortho-2025",
+        # NOT an exportImage endpoint. MassGIS publishes no ortho ImageServer at
+        # all — the whole programme ships as CACHED TILE LAYERS on ArcGIS Online
+        # (checked: their own arcgisserver carries only LiDAR derivatives and a
+        # 1994 coastal mosaic). So this one is read as an XYZ pyramid instead of
+        # a bbox export; see fetch_from_tile_cache.
+        "url": (
+            "https://tiles.arcgis.com/tiles/hGdibHYSPO59RG1h/arcgis/rest/"
+            "services/Massachusetts_Aerial_Imagery_2025/MapServer/tile/"
+            "${z}/${y}/${x}"
+        ),
+        "kind": "tilecache",
+        # No pixel budget applies — the fetch is per 256px tile, and GDAL's WMS
+        # driver only requests the blocks the output window touches.
+        "max_w": None,
+        "max_h": None,
+        "max_pixels": None,
+        "band_ids": None,
+        # Spring 2025, 15 cm statewide and 7.5 cm on Cape Cod. The CACHE, though,
+        # stops at z20: z21 returns 404 (verified over both Cape courses), so
+        # z20 is the service's real floor rather than a size choice we made.
+        "max_zoom": 20,
+        "attribution": "Imagery: MassGIS — Commonwealth of Massachusetts (2025)",
+        "captured": "2025-04-01",
+        "coverage": "Massachusetts",
+    },
 }
 
 # Which source to use for a course, by `courses.state`. Anything unlisted falls
@@ -208,6 +235,7 @@ IMAGERY_SOURCES: dict[str, dict[str, Any]] = {
 STATE_SOURCES = {
     "CT": "ct",
     "NY": "ny",
+    "MA": "ma",
 }
 
 DEFAULT_SOURCE = "naip"
@@ -406,6 +434,93 @@ def _export_cell(
     raise last if last else RuntimeError("image request failed")
 
 
+def fetch_from_tile_cache(cfg: dict[str, Any], bbox: BBox, out: Path) -> None:
+    """
+    Read a cached XYZ tile pyramid as if it were one raster.
+
+    Some publishers (MassGIS) ship orthoimagery only as an ArcGIS *tile cache* —
+    there is no bbox-export endpoint to call. Rather than hand-rolling a tile
+    downloader and stitcher, this hands the pyramid to GDAL's WMS driver as a
+    TMS service, so GDAL fetches exactly the 256px blocks the output window
+    touches and assembles them. No cell grid, no pixel budget, no VRT mosaic:
+    the splitting logic in fetch_imagery exists to work around per-request size
+    caps that simply don't apply when the unit of transfer is one tile.
+
+    A happy side effect: the cache is already EPSG:3857 at 256px, which is the
+    exact scheme the finished pack uses, so this path resamples nothing.
+    """
+    zoom = max_zoom_for(cfg)
+    x0, y0 = to_mercator(bbox.min_lng, bbox.min_lat)
+    x1, y1 = to_mercator(bbox.max_lng, bbox.max_lat)
+    res = MERCATOR_M_PER_PX / (2 ** zoom)
+    tiles_x = math.ceil((x1 - x0) / (res * 256)) + 1
+    tiles_y = math.ceil((y1 - y0) / (res * 256)) + 1
+    print(
+        f"  [{cfg['label']}] z{zoom} tile cache, {res:.3f} m/px "
+        f"-> ~{tiles_x * tiles_y} tiles ({tiles_x}x{tiles_y})"
+    )
+
+    # Whole-world data window at the deepest cached level. YOrigin=top because
+    # ArcGIS caches number rows from the north, like XYZ and unlike true TMS.
+    #
+    # ZeroBlockHttpCodes matters at the edges: a course bbox rarely lands on a
+    # tile boundary and the cache is clipped to the state, so an edge request
+    # can legitimately 404. Without this the whole course fails on one missing
+    # corner tile instead of leaving it blank.
+    wms = out.parent / "tilecache.xml"
+    wms.write_text(
+        f"""<GDAL_WMS>
+  <Service name="TMS">
+    <ServerUrl>{cfg['url']}</ServerUrl>
+  </Service>
+  <DataWindow>
+    <UpperLeftX>-20037508.34</UpperLeftX>
+    <UpperLeftY>20037508.34</UpperLeftY>
+    <LowerRightX>20037508.34</LowerRightX>
+    <LowerRightY>-20037508.34</LowerRightY>
+    <TileLevel>{zoom}</TileLevel>
+    <TileCountX>1</TileCountX>
+    <TileCountY>1</TileCountY>
+    <YOrigin>top</YOrigin>
+  </DataWindow>
+  <Projection>EPSG:3857</Projection>
+  <BlockSizeX>256</BlockSizeX>
+  <BlockSizeY>256</BlockSizeY>
+  <BandsCount>3</BandsCount>
+  <MaxConnections>4</MaxConnections>
+  <Timeout>120</Timeout>
+  <ZeroBlockHttpCodes>204,404,403</ZeroBlockHttpCodes>
+  <ZeroBlockOnServerException>true</ZeroBlockOnServerException>
+  <UserAgent>golf-round-tracker-tiler</UserAgent>
+  <Cache/>
+</GDAL_WMS>
+"""
+    )
+
+    # Thousands of small requests to a CDN drop connections in a way one big
+    # exportImage call never does: the failure is a bare SSL "unexpected eof"
+    # with HTTP status 0, so ZeroBlockHttpCodes can't catch it — and it MUST NOT,
+    # since treating a dropped connection as a blank tile would punch black
+    # squares into the middle of a course. Retry instead, and pin HTTP/1.1:
+    # multiplexing many tile requests over one HTTP/2 connection is what
+    # provokes the resets in the first place.
+    env = {
+        **os.environ,
+        "GDAL_HTTP_MAX_RETRY": "5",
+        "GDAL_HTTP_RETRY_DELAY": "2",
+        "GDAL_HTTP_VERSION": "1.1",
+    }
+
+    # -projwin takes upper-left then lower-right, so maxY precedes minY.
+    run([
+        "gdal_translate", "-q",
+        "-projwin", str(x0), str(y1), str(x1), str(y0),
+        "-projwin_srs", "EPSG:3857",
+        "-co", "TILED=YES",
+        str(wms), str(out),
+    ], env=env)
+
+
 def fetch_imagery(cfg: dict[str, Any], bbox: BBox, out: Path) -> None:
     """
     Pull imagery for `bbox` from an ArcGIS ImageServer, mosaicking if needed.
@@ -415,6 +530,10 @@ def fetch_imagery(cfg: dict[str, Any], bbox: BBox, out: Path) -> None:
     Clamping to the cap instead would silently DOWNSAMPLE — the map would look
     soft at exactly the zoom golfers use to pick a line.
     """
+    if cfg.get("kind") == "tilecache":
+        fetch_from_tile_cache(cfg, bbox, out)
+        return
+
     mid_lat = (bbox.min_lat + bbox.max_lat) / 2
     cos_lat = math.cos(math.radians(mid_lat))
     width_m = (bbox.max_lng - bbox.min_lng) * 111_320.0 * cos_lat
