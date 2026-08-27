@@ -12,6 +12,7 @@ import { Capacitor } from '@capacitor/core';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAppModeStore } from '@/stores/appModeStore';
 import { useTournamentAccess } from '@/features/appMode/useTournamentAccess';
+import { lockDocumentScroll } from '@/utils/scrollLock';
 
 // Practice tab icon: Apple Watch silhouette on iOS, generic round watch on
 // Android/web — mirrors the platform watch treatment on the practice screen.
@@ -73,48 +74,10 @@ export function MobileShell() {
   // so the reserved space is still needed.
   const ownsBottomBar = location.pathname.startsWith('/settings');
 
-  // iOS PWA scroll lock. position: fixed + anchoring body to all four
-  // viewport edges (top/right/bottom/left: 0) removes the document from the
-  // scrollable layer AND reliably extends body to the full screen including
-  // safe-area-inset zones — `height: 100%` alone isn't enough on iOS, where
-  // 100% of html doesn't always include the safe areas. The inner Box below
-  // is the real scroll container; locking the body just stops it from being
-  // the scroller.
-  useEffect(() => {
-    const html = document.documentElement;
-    const body = document.body;
-    const prev = {
-      htmlOverflow: html.style.overflow,
-      bodyPosition: body.style.position,
-      bodyOverflow: body.style.overflow,
-      bodyTop: body.style.top,
-      bodyRight: body.style.right,
-      bodyBottom: body.style.bottom,
-      bodyLeft: body.style.left,
-      bodyWidth: body.style.width,
-      bodyHeight: body.style.height
-    };
-    html.style.overflow = 'hidden';
-    body.style.position = 'fixed';
-    body.style.overflow = 'hidden';
-    body.style.top = '0';
-    body.style.right = '0';
-    body.style.bottom = '0';
-    body.style.left = '0';
-    body.style.width = '';
-    body.style.height = '';
-    return () => {
-      html.style.overflow = prev.htmlOverflow;
-      body.style.position = prev.bodyPosition;
-      body.style.overflow = prev.bodyOverflow;
-      body.style.top = prev.bodyTop;
-      body.style.right = prev.bodyRight;
-      body.style.bottom = prev.bodyBottom;
-      body.style.left = prev.bodyLeft;
-      body.style.width = prev.bodyWidth;
-      body.style.height = prev.bodyHeight;
-    };
-  }, []);
+  // iOS PWA scroll lock — see `lockDocumentScroll`. The inner Box below is the
+  // real scroll container; pinning the body just stops it from being a second
+  // scroller that rubber-bands on iOS.
+  useEffect(() => lockDocumentScroll(), []);
 
   return (
     <Box
@@ -135,10 +98,13 @@ export function MobileShell() {
           // Page body scrolls in normal routes, locks on full-screen ones.
           overflowY: fullScreen ? 'hidden' : 'auto',
           overflowX: 'hidden',
-          // Full-screen routes manage their own safe-area padding (see the
-          // HoleTrackingPage sticky header / FABs). Normal routes still
-          // honor the top safe area + bottom-nav reservation.
-          paddingTop: fullScreen ? 0 : 'env(safe-area-inset-top)',
+          // No top inset here on purpose. PageHeader is pinned (position:
+          // sticky) and every screen in the shell renders one, so IT owns the
+          // top safe area. Padding on the scroll container would sit ABOVE the
+          // pinned header instead — a strip the page's content visibly scrolls
+          // through, since a scroller's padding box is part of its scrollport.
+          // Full-screen routes manage their own insets (see the
+          // HoleTrackingPage sticky header / FABs).
           paddingBottom: fullScreen ? 0 : 'calc(90px + env(safe-area-inset-bottom))'
         }}
       >

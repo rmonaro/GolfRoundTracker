@@ -53,6 +53,7 @@ import { abbreviateClubName } from '@/features/bag/abbreviateClubName';
 import { useAuthStore } from '@/stores/authStore';
 import { toAppError } from '@/services/errors';
 import { pct, scoreVsPar, durationLabel, fullName } from '@/utils/format';
+import { fmtTempoVsTarget } from '@/utils/swingLabels';
 import { Scorecard } from '@/components/Scorecard';
 import { AddShotSheet, type ShotEditDraft } from '@/features/round/AddShotSheet';
 import { RoundSwingDetail, hasSwingDetail } from '@/features/round/RoundSwingDetail';
@@ -225,6 +226,9 @@ export function RoundSummaryPage() {
       .map(([holeNumber, count]) => ({ holeNumber, count }))
       .sort((a, b) => a.holeNumber - b.holeNumber);
   })();
+  // A "needs review" chip is a shortcut straight to the evidence: switch to the
+  // Holes tab on that hole AND open its map, since reviewing an auto-detected
+  // shot means looking at where the watch thinks it landed.
   const jumpToHole = (holeNumber: number) => {
     setTab('holes');
     setFocusHoleNumber(holeNumber);
@@ -289,12 +293,41 @@ export function RoundSummaryPage() {
   const backPar = back.reduce((s, h) => s + h.par, 0);
 
   return (
-    <Box>
-      <PageHeader
-        title="Round Summary"
-        subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
-        back={isPeekingActiveRound ? true : '/round'}
-      />
+    // This route lives OUTSIDE MobileShell, so it owns its own viewport: a
+    // fixed-height flex column with the header pinned and a single scrolling
+    // body beneath it. Two reasons it can't just be a tall Box on the document
+    // scroller: the header should stay put while reviewing a long round, and
+    // the full-screen round pages lock `body { position: fixed }` — if one of
+    // those locks ever outlives its page (backgrounded app, interrupted
+    // unmount) the summary inherits an unscrollable body. Scrolling our own
+    // container is immune to whatever state the body is left in.
+    <Box
+      sx={{
+        height: '100dvh',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden'
+      }}
+    >
+      <Box sx={{ flexShrink: 0, bgcolor: 'background.default', zIndex: 2 }}>
+        <PageHeader
+          title="Round Summary"
+          subtitle={`${round.course_name} · ${dayjs(round.started_at).format('MMM D, YYYY')}`}
+          back={isPeekingActiveRound ? true : '/round'}
+        />
+      </Box>
+
+      <Box
+        sx={{
+          flex: 1,
+          minHeight: 0,
+          overflowY: 'auto',
+          overflowX: 'hidden',
+          WebkitOverflowScrolling: 'touch',
+          overscrollBehavior: 'contain',
+          pb: 'calc(24px + env(safe-area-inset-bottom))'
+        }}
+      >
 
       {/* Somebody else kept this card — the athlete's sign-off step. */}
       <MarkerCardBanner round={round} />
@@ -513,9 +546,13 @@ export function RoundSummaryPage() {
           shots={shots}
           bag={bag}
           focusHoleNumber={focusHoleNumber}
+          // Chips send the golfer here to review shots — land them on the map.
+          focusOpensMap
           onFocusConsumed={() => setFocusHoleNumber(null)}
         />
       )}
+
+      </Box>
 
       <EditRoundDialog
         open={editOpen}
@@ -1008,12 +1045,15 @@ function HolesTab({
   shots,
   bag,
   focusHoleNumber,
+  focusOpensMap = false,
   onFocusConsumed
 }: {
   roundId: string;
   courseId: string | null;
   /** When set (from a "needs review" chip), select this hole. */
   focusHoleNumber?: number | null;
+  /** Also open that hole's map dialog when the focus lands. */
+  focusOpensMap?: boolean;
   /** Called after focusHoleNumber has been applied so the parent can reset it. */
   onFocusConsumed?: () => void;
   holes: Array<{
@@ -1280,6 +1320,10 @@ function HolesTab({
   useEffect(() => {
     if (focusHoleNumber == null) return;
     setSelectedHoleNumber(focusHoleNumber);
+    // Reviewing a shot means seeing where it landed, so the chip opens the
+    // hole's map straight away rather than leaving the golfer to find the
+    // "View map" button under the stats cards.
+    if (focusOpensMap) setMapHoleNumber(focusHoleNumber);
     onFocusConsumed?.();
     // Two frames: one for this tab's content to mount, one for it to lay out.
     // scrollIntoView finds the real scroll container by itself.
@@ -1295,7 +1339,7 @@ function HolesTab({
         scrollFrameRef.current = null;
       }
     };
-  }, [focusHoleNumber, onFocusConsumed]);
+  }, [focusHoleNumber, focusOpensMap, onFocusConsumed]);
 
   // Hole numbers that still have an unverified (auto-detected) shot — drives the
   // amber "needs review" dot on the hole strip and the per-shot flag below.
@@ -1912,6 +1956,11 @@ function HolesTab({
   );
 }
 
+/** Meters → the shot's own display unit, rounded the way the shot row shows it. */
+function distanceInShotUnit(meters: number, unit: string | null): number {
+  return unit === 'feet' ? Math.round(meters / 0.3048) : Math.round(meters / 0.9144);
+}
+
 /**
  * Read-only hole-map dialog launched from the Holes-tab "View map"
  * button. Renders the existing HoleLayoutCard with the per-hole shot
@@ -2008,7 +2057,9 @@ function HoleMapDialog({
   );
 
   // Per-dot info-box labels (# / club / distance), aligned 1:1 with
-  // shotEndPoints (built from the same orderedShots list).
+  // shotEndPoints (built from the same orderedShots list). `distanceUnit` lets
+  // the map re-format the number itself while a dot is being dragged — a putt
+  // stays in feet, everything else in yards.
   const shotLabels = useMemo(
     () =>
       orderedShots.map((s) => {
@@ -2016,25 +2067,37 @@ function HoleMapDialog({
         const clubName = club
           ? abbreviateClubName(club.customName?.trim() || club.name, club.category)
           : null;
+        const unit: 'yards' | 'feet' = s.distance_unit === 'feet' ? 'feet' : 'yards';
         const distance =
           s.distance == null
             ? null
-            : s.distance_unit === 'feet'
+            : unit === 'feet'
               ? `${Math.round(s.distance)}ft`
               : `${Math.round(s.distance)}y`;
-        return { club: clubName, distance };
+        return { club: clubName, distance, distanceUnit: unit };
       }),
     [orderedShots, bag]
   );
 
-  // Drag-end handler. Looks up the shot by index, recomputes the
-  // GPS-calculated distance (haversine from start to the new end), and
-  // patches the row in Supabase. Round-detail query invalidates so
-  // every consumer (Scorecard, Shots list, dispersion stats) picks up
-  // the corrected position.
+  // Drag-end handler. The map hands back the geometry it already measured for
+  // the live drag label: where the shot was played FROM (previous shot's
+  // landing, or the tee on shot 1), how far it travelled, and how far the
+  // FOLLOWING shot now travels — because moving a dot moves the next shot's
+  // start too. Both shots' yardages are rewritten to match, along with
+  // `start_lat/lng` so the stored geometry stays self-consistent. Round-detail
+  // invalidates so every consumer (Scorecard, Shots list, dispersion stats)
+  // picks up the corrected numbers.
   const onShotEndPointMoved = useMemo(() => {
     if (!editMode) return undefined;
-    return async (index: number, newPos: [number, number]) => {
+    return async (
+      index: number,
+      newPos: [number, number],
+      geometry: {
+        anchor: [number, number] | null;
+        distanceFromAnchorM: number | null;
+        nextDistanceM: number | null;
+      }
+    ) => {
       const s = orderedShots[index];
       if (!s) return;
       const [lng, lat] = newPos;
@@ -2046,26 +2109,32 @@ function HoleMapDialog({
         next.set(s.id, [lng, lat]);
         return next;
       });
-      let calculated: number | null = null;
-      if (s.start_lat != null && s.start_lng != null) {
-        // Haversine in meters — same formula HoleLayout uses internally.
-        const toRad = (d: number) => (d * Math.PI) / 180;
-        const R = 6371000;
-        const dLat = toRad(lat - s.start_lat);
-        const dLng = toRad(lng - s.start_lng);
-        const a =
-          Math.sin(dLat / 2) ** 2 +
-          Math.cos(toRad(s.start_lat)) *
-            Math.cos(toRad(lat)) *
-            Math.sin(dLng / 2) ** 2;
-        calculated = 2 * R * Math.asin(Math.sqrt(a));
+      const { anchor, distanceFromAnchorM, nextDistanceM } = geometry;
+      const patch: Parameters<typeof roundRepo.updateShot>[1] = {
+        end_lat: lat,
+        end_lng: lng
+      };
+      if (anchor) {
+        patch.start_lng = anchor[0];
+        patch.start_lat = anchor[1];
       }
+      if (distanceFromAnchorM != null) {
+        patch.calculated_distance = distanceFromAnchorM;
+        patch.distance = distanceInShotUnit(distanceFromAnchorM, s.distance_unit);
+      }
+      // The shot played FROM the dot that just moved — its start and its
+      // yardage both change even though the golfer didn't touch its dot.
+      const next = orderedShots[index + 1];
       try {
-        await roundRepo.updateShot(s.id, {
-          end_lat: lat,
-          end_lng: lng,
-          calculated_distance: calculated
-        });
+        await roundRepo.updateShot(s.id, patch);
+        if (next && nextDistanceM != null) {
+          await roundRepo.updateShot(next.id, {
+            start_lat: lat,
+            start_lng: lng,
+            calculated_distance: nextDistanceM,
+            distance: distanceInShotUnit(nextDistanceM, next.distance_unit)
+          });
+        }
         queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
       } catch (err) {
         console.error('[summary] shot reposition failed', err);
@@ -2499,7 +2568,13 @@ function formatSwingSummary(
   if (!metrics) return '';
   const parts: string[] = [];
   if (swingType && swingType !== 'air') parts.push(capitalize(swingType));
-  if (metrics.tempoRatio != null) parts.push(`Tempo ${metrics.tempoRatio.toFixed(1)}`);
+  // Tempo carries its target inline — a bare "Tempo 2.4" gives the golfer no
+  // way to tell whether that was good, and reading the ratio against the target
+  // is the whole point of showing it. The target depends on the stroke: 3:1 for
+  // a swing, 2:1 for a putt.
+  if (metrics.tempoRatio != null) {
+    parts.push(`Tempo ${fmtTempoVsTarget(metrics.tempoRatio, swingType)}`);
+  }
   if (metrics.estimatedHandSpeed != null) parts.push(`Speed ${metrics.estimatedHandSpeed}`);
   return parts.join(' · ');
 }

@@ -54,7 +54,9 @@ export function FeedbackChips({ items }: { items: SwingFeedback[] }) {
             </DialogTitle>
             <DialogContent>
               <Typography variant="body2" color="text.secondary">
-                {feedbackExplanation(active.code) || 'No additional detail for this one yet.'}
+                {active.explanation ||
+                  feedbackExplanation(active.code) ||
+                  'No additional detail for this one yet.'}
               </Typography>
               {active.disclaimer && (
                 <Box sx={{ mt: 2 }}>

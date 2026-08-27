@@ -43,7 +43,12 @@ interface HoleLayoutCardProps {
   /** Recorded-shot end positions. See HoleLayoutProps.shotEndPoints. */
   shotEndPoints?: Array<[number, number]>;
   /** Per-shot label data (# / club / distance), aligned with shotEndPoints. */
-  shotLabels?: Array<{ club: string | null; distance: string | null }>;
+  shotLabels?: Array<{
+    club: string | null;
+    distance: string | null;
+    /** Unit `distance` is in — used when a drag recomputes it live. */
+    distanceUnit?: 'yards' | 'feet';
+  }>;
   /** Suppress aim handle / line while a landing-point pin is active. */
   hideAim?: boolean;
   /** Render the aim handle as a compact dot instead of the crosshair. */
@@ -66,8 +71,17 @@ interface HoleLayoutCardProps {
    *  yardage. user_yardage / osm_yardage. */
   yardageScale?: number;
   /** Enables drag-to-move on each numbered shot dot. Fires with the
-   *  index + new [lng, lat] on drag-end. */
-  onShotEndPointMoved?: (index: number, newPos: [number, number]) => void;
+   *  index, the new [lng, lat], and the anchor / distances the map measured
+   *  on drag-end. See HoleLayout for the geometry contract. */
+  onShotEndPointMoved?: (
+    index: number,
+    newPos: [number, number],
+    geometry: {
+      anchor: [number, number] | null;
+      distanceFromAnchorM: number | null;
+      nextDistanceM: number | null;
+    }
+  ) => void;
   /** Recap replay trigger — bump to a fresh positive number to animate the
    *  tee → shots → pin line with sequential dot reveals. See HoleLayout. */
   recapToken?: number;
