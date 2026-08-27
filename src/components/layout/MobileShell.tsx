@@ -13,6 +13,7 @@ import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAppModeStore } from '@/stores/appModeStore';
 import { useTournamentAccess } from '@/features/appMode/useTournamentAccess';
 import { lockDocumentScroll } from '@/utils/scrollLock';
+import { NAV_CONTENT_INSET, bottomNavSx } from '@/components/layout/bottomNavStyles';
 
 // Practice tab icon: Apple Watch silhouette on iOS, generic round watch on
 // Android/web — mirrors the platform watch treatment on the practice screen.
@@ -29,10 +30,12 @@ const AppleWatchNavIcon = (
 );
 const watchTabIcon = Capacitor.getPlatform() === 'ios' ? AppleWatchNavIcon : <WatchRoundedIcon />;
 
+// Round sits in the CENTRE — it's the thing the app is for, and the middle slot
+// is the easiest reach on a phone. The rest keep their relative order around it.
 const ROUNDS_TABS = [
   { value: '/', label: 'Home', icon: <HomeRoundedIcon /> },
-  { value: '/round', label: 'Round', icon: <GolfCourseRoundedIcon /> },
   { value: '/stats', label: 'Stats', icon: <InsightsRoundedIcon /> },
+  { value: '/round', label: 'Round', icon: <GolfCourseRoundedIcon /> },
   { value: '/bag', label: 'Bag', icon: <SportsGolfRoundedIcon /> },
   { value: '/practice', label: 'Practice', icon: watchTabIcon }
 ];
@@ -105,7 +108,7 @@ export function MobileShell() {
           // through, since a scroller's padding box is part of its scrollport.
           // Full-screen routes manage their own insets (see the
           // HoleTrackingPage sticky header / FABs).
-          paddingBottom: fullScreen ? 0 : 'calc(90px + env(safe-area-inset-bottom))'
+          paddingBottom: fullScreen ? 0 : NAV_CONTENT_INSET
         }}
       >
         <Outlet />
@@ -135,14 +138,7 @@ export function MobileShell() {
             value={activeTab}
             onChange={(_, val) => navigate(val)}
             showLabels
-            sx={{
-              // 80px icon row (70px standard + 10px breathing room above).
-              // Transparent so Paper's bg shows through uniformly.
-              height: 80,
-              paddingTop: '10px',
-              alignItems: 'flex-start',
-              bgcolor: 'transparent'
-            }}
+            sx={bottomNavSx}
           >
             {navTabs.map((tab) => (
               <BottomNavigationAction
@@ -150,7 +146,6 @@ export function MobileShell() {
                 value={tab.value}
                 label={tab.label}
                 icon={tab.icon}
-                sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
               />
             ))}
           </BottomNavigation>

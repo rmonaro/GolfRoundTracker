@@ -8,6 +8,14 @@ interface PageHeaderProps {
   title: string;
   subtitle?: string;
   back?: boolean | string;
+  /**
+   * Replace the current history entry instead of pushing when `back` is a path.
+   *
+   * For a multi-screen flow that should behave like ONE step in history — the
+   * start-a-round screens, say — so that whatever the flow lands on can't be
+   * backed into from its destination.
+   */
+  backReplace?: boolean;
   action?: ReactNode;
 }
 
@@ -22,7 +30,7 @@ interface PageHeaderProps {
 // renders a PageHeader, so nothing is left uninset.
 const isNative = Capacitor.isNativePlatform();
 
-export function PageHeader({ title, subtitle, back, action }: PageHeaderProps) {
+export function PageHeader({ title, subtitle, back, backReplace, action }: PageHeaderProps) {
   const navigate = useNavigate();
   return (
     <Box
@@ -52,7 +60,9 @@ export function PageHeader({ title, subtitle, back, action }: PageHeaderProps) {
       {back && (
         <IconButton
           aria-label="Back"
-          onClick={() => (typeof back === 'string' ? navigate(back) : navigate(-1))}
+          onClick={() =>
+            typeof back === 'string' ? navigate(back, { replace: backReplace }) : navigate(-1)
+          }
           sx={{ ml: -1 }}
         >
           <ArrowBackRoundedIcon />

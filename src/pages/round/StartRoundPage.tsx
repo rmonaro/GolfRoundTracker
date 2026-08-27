@@ -1,834 +1,462 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
+  Alert,
   Box,
   Button,
   Card,
   CardActionArea,
   CardContent,
   Chip,
+  CircularProgress,
+  IconButton,
   InputAdornment,
   Stack,
   TextField,
-  Typography,
-  Alert
+  Typography
 } from '@mui/material';
 import SearchRoundedIcon from '@mui/icons-material/SearchRounded';
 import VerifiedRoundedIcon from '@mui/icons-material/VerifiedRounded';
 import AddRoundedIcon from '@mui/icons-material/AddRounded';
 import TravelExploreRoundedIcon from '@mui/icons-material/TravelExploreRounded';
-import { CoursePackButton } from '@/features/offline/CoursePackButton';
-import { downloadPackInBackground } from '@/services/coursePackRepo';
+import StarRoundedIcon from '@mui/icons-material/StarRounded';
+import StarOutlineRoundedIcon from '@mui/icons-material/StarOutlineRounded';
+import NearMeRoundedIcon from '@mui/icons-material/NearMeRounded';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
-import { ToggleGroup } from '@/components/ui/ToggleGroup';
-import { useCourses, useCourseTees, useStartRound } from '@/features/round/useStartRound';
+import { useCourses } from '@/features/round/useStartRound';
 import { useSearchCourses, useImportCourse } from '@/admin/hooks/useCoursesApi';
 import { useAuthStore } from '@/stores/authStore';
-import { toAppError } from '@/services/errors';
-import { watchBridge } from '@/services/watchBridge';
-import type { Course, CourseTee } from '@/models';
+import { useCourseFavoritesStore } from '@/stores/courseFavoritesStore';
+import { useCourseLocation } from '@/features/round/useCourseLocation';
+import { formatCourseDistance, rankCourses } from '@/features/round/courseRanking';
+import type { Course } from '@/models';
 
-type HoleChoice = '9' | '18' | 'custom';
+/** Rows rendered before the "show more" button appears. */
+const PAGE_SIZE = 50;
 
+// Every move WITHIN the start-a-round flow replaces the current history entry
+// rather than pushing, so the three screens together occupy exactly one entry
+// sitting on top of /round. That's what makes backing out of the round land on
+// the round home instead of dropping the golfer into the course picker they
+// just came through — and it holds however many times they bounce between the
+// picker and the setup screen before committing.
+const WITHIN_FLOW = { replace: true } as const;
+
+/**
+ * Step 1 of starting a round: pick the course.
+ *
+ * Search at the top, then every course the golfer can play, nearest first with
+ * starred ones above. Choosing one moves to `/round/start/:courseId`, where the
+ * tee and hole count are set — the two decisions that need the course to be
+ * known. Hand-entering a course is its own screen off the bottom of this one.
+ */
 export function StartRoundPage() {
   const navigate = useNavigate();
   const courses = useCourses();
-  const startRound = useStartRound();
+  const [search, setSearch] = useState('');
 
-  const [mode, setMode] = useState<'existing' | 'manual'>('existing');
-  const [selectedCourseId, setSelectedCourseId] = useState<string>('');
-  const [selectedTeeId, setSelectedTeeId] = useState<string>('');
-  const [courseSearch, setCourseSearch] = useState<string>('');
-  const [courseName, setCourseName] = useState('');
-  const [teeBox, setTeeBox] = useState('White');
-  const [holeChoice, setHoleChoice] = useState<HoleChoice>('18');
-  const [customHoles, setCustomHoles] = useState<number>(9);
-  const [courseRating, setCourseRating] = useState<string>('72.0');
-  const [slopeRating, setSlopeRating] = useState<string>('113');
-  const [totalPar, setTotalPar] = useState<string>('72');
-  const [totalYardage, setTotalYardage] = useState<string>('6800');
-  const [address, setAddress] = useState<string>('');
-  const [city, setCity] = useState<string>('');
-  const [stateField, setStateField] = useState<string>('');
-  const [zip, setZip] = useState<string>('');
-  // YYYY-MM-DD format — what <input type="date"> emits. Defaults to today in
-  // the user's local timezone so the normal "start round now" flow Just Works;
-  // backdating means typing/picking an earlier date. Converted to a noon-local
-  // ISO timestamp at submit so the round doesn't shift to the previous day in
-  // negative-UTC offsets.
-  const [roundDate, setRoundDate] = useState<string>(() => toLocalDateInput(new Date()));
-  const [error, setError] = useState<string | null>(null);
+  const favoriteIds = useCourseFavoritesStore((s) => s.favoriteIds);
+  const toggleFavorite = useCourseFavoritesStore((s) => s.toggleFavorite);
+  const location = useCourseLocation();
 
-  // The chosen course, for the offline-maps control below. Named here rather
-  // than looked up at submit time because the control needs it while picking.
-  const selectedCourse = courses.data?.find((c) => c.id === selectedCourseId) ?? null;
+  const ranked = useMemo(
+    () =>
+      rankCourses(courses.data ?? [], {
+        favorites: favoriteIds,
+        origin: location.origin,
+        search
+      }),
+    [courses.data, favoriteIds, location.origin, search]
+  );
 
-  // Named tee sets for the selected existing course (Blue/White/Red…). Empty for
-  // manual entry or courses with no imported tee data.
-  const teesQuery = useCourseTees(mode === 'existing' ? selectedCourseId : null);
-  const tees = teesQuery.data ?? [];
-  const selectedTee = tees.find((t) => t.id === selectedTeeId) ?? null;
-
-  // Reset the tee choice whenever the course changes.
-  useEffect(() => {
-    setSelectedTeeId('');
-  }, [selectedCourseId]);
-
-  // Start pulling the course's satellite imagery the moment it's picked, rather
-  // than waiting for the round to start.
-  //
-  // This is the last point where wifi is likely — by the time the round begins
-  // the golfer is usually at the course on cellular, or already without signal.
-  // No-ops when the course has no imagery built, when the pack is already on the
-  // device and current, or when there's no usable connection, and it dedupes
-  // against a download already running for the same course.
-  useEffect(() => {
-    if (mode !== 'existing' || !selectedCourseId) return;
-    downloadPackInBackground(selectedCourseId, selectedCourse?.name ?? null);
-  }, [mode, selectedCourseId, selectedCourse?.name]);
-
-  // Auto-pick a sensible default tee once tees load (a "White"/"Regular"-ish
-  // middle tee, else the middle of the yardage-sorted list) so the picker isn't
-  // left blank. Only fires while nothing is chosen yet.
-  useEffect(() => {
-    if (selectedTeeId || tees.length === 0) return;
-    setSelectedTeeId(defaultTee(tees).id);
-  }, [tees, selectedTeeId]);
-
-  const onStart = async () => {
-    setError(null);
-    try {
-      const holesPlayed = holeChoice === '9' ? 9 : holeChoice === '18' ? 18 : customHoles;
-      const selected = courses.data?.find((c) => c.id === selectedCourseId);
-
-      const payload = {
-        course: mode === 'existing' && selected
-          ? {
-              id: selected.id,
-              name: selected.name,
-              // A chosen tee set overrides the course-level tee/rating/yardage
-              // and seeds per-hole yardages for the round.
-              teeBox: selectedTee?.tee_name ?? selected.tee_box,
-              courseRating: selectedTee?.course_rating ?? selected.course_rating,
-              slopeRating: selectedTee?.slope_rating ?? selected.slope_rating,
-              totalPar: selected.total_par ?? (Number(totalPar) || 72),
-              totalYardage: selectedTee?.total_yards ?? selected.total_yardage,
-              teeId: selectedTee?.id ?? null,
-              teeName: selectedTee?.tee_name ?? null,
-              teeHoleYardages: selectedTee ? teeHoleYardages(selectedTee) : null
-            }
-          : {
-              name: courseName.trim(),
-              teeBox,
-              courseRating: numberOrNull(courseRating),
-              slopeRating: integerOrNull(slopeRating),
-              totalPar: Math.max(1, Math.round(Number(totalPar)) || 72),
-              totalYardage: integerOrNull(totalYardage),
-              address: address.trim() || null,
-              city: city.trim() || null,
-              state: stateField.trim() || null,
-              zip: zip.trim() || null
-            },
-        holesPlayed,
-        // For TODAY's date: pass null so useStartRound uses Date.now() —
-        // a live round should start at the actual current time, not noon.
-        // For BACKDATED rounds (past day): pass the noon-anchored ISO so
-        // the calendar day is unambiguous across timezones.
-        playedAt:
-          roundDate === toLocalDateInput(new Date())
-            ? null
-            : localDateInputToIso(roundDate)
-      };
-
-      if (!payload.course.name) {
-        setError('Course name is required.');
-        return;
-      }
-
-      await startRound.mutateAsync(payload);
-      // Live (today) rounds only: launch the watch so it comes up on the
-      // round. Backdated rounds are historical entry — no watch. Fire-and-
-      // forget; the round flow works regardless of whether the watch wakes.
-      if (payload.playedAt === null) {
-        void watchBridge.launchWatch(false);
-      }
-      navigate('/round/play', { replace: true });
-    } catch (err) {
-      setError(toAppError(err).message);
-    }
-  };
+  // How many rows are actually rendered. Reset whenever the query changes so a
+  // new search starts from the top of its own results.
+  const [shown, setShown] = useState(PAGE_SIZE);
+  useEffect(() => setShown(PAGE_SIZE), [search]);
+  const visible = ranked.slice(0, shown);
 
   return (
     <Box>
-      <PageHeader title="Start Round" subtitle="Set up the course and number of holes" back />
-      <Stack spacing={2} px={2} pb={4}>
-        {error && <Alert severity="error">{error}</Alert>}
+      {/* Header and search pin together as ONE block. Two sibling sticky
+          elements would both stop at top: 0 and overlap; nesting the header
+          inside the pinned wrapper keeps the search bar visible however far
+          down the list the golfer scrolls. */}
+      <Box
+        sx={{
+          position: 'sticky',
+          top: 0,
+          zIndex: (t) => t.zIndex.appBar,
+          bgcolor: 'background.default'
+        }}
+      >
+        <PageHeader title="Start Round" subtitle="Pick your course" back />
+        <Box sx={{ px: 2, pb: 1.5 }}>
+          <TextField
+            placeholder="Search courses"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            fullWidth
+            autoComplete="off"
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchRoundedIcon fontSize="small" />
+                  </InputAdornment>
+                )
+              }
+            }}
+          />
+        </Box>
+      </Box>
 
-        {/* Top row: Date played (left half) + Holes selector (right half). Keeps
-            the two scoring-context decisions visible above the course picker so
-            they're the first things the user resolves. */}
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
-          <CardContent>
-            <Stack direction="row" spacing={1.5} alignItems="flex-start">
-              <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
-                >
-                  Date played
-                </Typography>
-                <TextField
-                  type="date"
-                  value={roundDate}
-                  onChange={(e) => setRoundDate(e.target.value)}
-                  fullWidth
-                  sx={{ mt: 1 }}
-                  inputProps={{ max: toLocalDateInput(new Date()) }}
-                />
-              </Box>
-              <Box sx={{ flex: 1, minWidth: 0 }}>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
-                >
-                  Holes
-                </Typography>
-                <Box mt={1}>
-                  <ToggleGroup
-                    value={holeChoice}
-                    onChange={(v) => v && setHoleChoice(v)}
-                    options={[
-                      { label: '9', value: '9' },
-                      { label: '18', value: '18' },
-                      { label: 'Custom', value: 'custom' }
-                    ]}
-                  />
-                </Box>
-              </Box>
-            </Stack>
-            {holeChoice === 'custom' && (
-              <TextField
-                label="Number of holes"
-                type="number"
-                sx={{ mt: 2 }}
-                value={customHoles}
-                onChange={(e) => setCustomHoles(Math.max(1, Math.min(36, Number(e.target.value) || 1)))}
-                inputProps={{ inputMode: 'numeric', min: 1, max: 36 }}
-                fullWidth
-              />
-            )}
-          </CardContent>
-        </Card>
+      <Stack spacing={1.5} px={2} pb={4}>
+        <LocationNotice location={location} />
 
-        <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
-          <CardContent>
-            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Course
-            </Typography>
-            <ToggleGroup
-              value={mode}
-              onChange={(v) => v && setMode(v)}
-              size="medium"
-              options={[
-                { label: 'Existing course', value: 'existing' },
-                { label: 'Manual entry', value: 'manual' }
-              ]}
-            />
-            {mode === 'existing' ? (
-              <CoursePicker
-                courses={courses.data ?? []}
-                value={selectedCourseId}
-                onSelect={setSelectedCourseId}
-                search={courseSearch}
-                onSearchChange={setCourseSearch}
-                onAddManually={() => {
-                  setMode('manual');
-                  setCourseName(courseSearch);
-                  setSelectedCourseId('');
-                }}
-              />
-            ) : (
-              <Stack spacing={2} mt={2}>
-                <TextField
-                  label="Course Name"
-                  value={courseName}
-                  onChange={(e) => setCourseName(e.target.value)}
-                  required
-                />
-                <TextField label="Tee Box" value={teeBox} onChange={(e) => setTeeBox(e.target.value)} />
-              </Stack>
-            )}
-          </CardContent>
-        </Card>
-
-        {mode === 'existing' && selectedCourseId && tees.length > 0 && (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
-            <CardContent>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
-              >
-                Tee Box
-              </Typography>
-              <TeePicker tees={tees} value={selectedTeeId} onSelect={setSelectedTeeId} />
-            </CardContent>
-          </Card>
-        )}
-
-        {/* Progress / saved state / failure for the download the effect above
-            kicked off. Not a "please click me" button in the normal case — the
-            download is already running by the time this renders. It stays
-            because it's also the retry, the delete, and the "newer imagery
-            available" prompt.
-
-            This is also the ONLY place a course can be saved before playing it:
-            the Settings list is built from the geometry cache, which fills on
-            round start, so a course you've never played has no row there.
-
-            Renders nothing when the course has no imagery built, so it stays
-            invisible for courses the tiler hasn't reached. */}
-        {mode === 'existing' && selectedCourseId && (
-          <Box sx={{ px: 0.5 }}>
-            <CoursePackButton
-              courseId={selectedCourseId}
-              courseName={selectedCourse?.name ?? null}
-            />
+        {courses.isLoading && (
+          <Box sx={{ display: 'grid', placeItems: 'center', py: 6 }}>
+            <CircularProgress />
           </Box>
         )}
 
-        {mode === 'manual' && (
-          <>
-            <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
-              <CardContent>
-                <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}>
-                  Course Info
-                </Typography>
-                <Stack direction="row" spacing={1.5} mt={2}>
-                  <TextField
-                    label="Course Rating"
-                    type="number"
-                    value={courseRating}
-                    onChange={(e) => setCourseRating(e.target.value)}
-                    inputProps={{ inputMode: 'decimal', step: '0.1' }}
-                  />
-                  <TextField
-                    label="Slope Rating"
-                    type="number"
-                    value={slopeRating}
-                    onChange={(e) => setSlopeRating(e.target.value)}
-                    inputProps={{ inputMode: 'numeric' }}
-                  />
-                </Stack>
-                <Stack direction="row" spacing={1.5} mt={2}>
-                  <TextField
-                    label="Total Par"
-                    type="number"
-                    value={totalPar}
-                    onChange={(e) => setTotalPar(e.target.value)}
-                    inputProps={{ inputMode: 'numeric' }}
-                  />
-                  <TextField
-                    label="Total Yardage"
-                    type="number"
-                    value={totalYardage}
-                    onChange={(e) => setTotalYardage(e.target.value)}
-                    inputProps={{ inputMode: 'numeric' }}
-                  />
-                </Stack>
-              </CardContent>
-            </Card>
-
-            <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
-              <CardContent>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
-                >
-                  Location (optional)
-                </Typography>
-                <Stack spacing={1.5} mt={2}>
-                  <TextField
-                    label="Street Address"
-                    value={address}
-                    onChange={(e) => setAddress(e.target.value)}
-                    autoComplete="street-address"
-                  />
-                  <TextField
-                    label="City"
-                    value={city}
-                    onChange={(e) => setCity(e.target.value)}
-                    autoComplete="address-level2"
-                  />
-                  <Stack direction="row" spacing={1.5}>
-                    <TextField
-                      label="State"
-                      value={stateField}
-                      onChange={(e) => setStateField(e.target.value.toUpperCase())}
-                      autoComplete="address-level1"
-                      inputProps={{ maxLength: 20 }}
-                      sx={{ flex: 1 }}
-                    />
-                    <TextField
-                      label="ZIP"
-                      value={zip}
-                      onChange={(e) => setZip(e.target.value)}
-                      autoComplete="postal-code"
-                      inputProps={{ inputMode: 'numeric', maxLength: 12 }}
-                      sx={{ flex: 1 }}
-                    />
-                  </Stack>
-                </Stack>
-              </CardContent>
-            </Card>
-          </>
+        {!courses.isLoading && ranked.length === 0 && (
+          <Box sx={{ py: 4, textAlign: 'center' }}>
+            <Typography variant="body2" color="text.secondary">
+              {search.trim()
+                ? `No saved courses match "${search.trim()}".`
+                : 'No courses yet.'}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {search.trim()
+                ? 'Try the online search below, or add it by hand.'
+                : 'Search online for one, or add it by hand.'}
+            </Typography>
+          </Box>
         )}
 
+        {/* The list itself grows the page — the page scrolls, the list doesn't
+            get its own inner scroller. A nested scroll area inside a scrolling
+            page is the thing that makes a phone list feel broken. */}
+        <Stack spacing={1}>
+          {visible.map(({ course, distanceMeters, favorite }) => (
+            <CourseRow
+              key={course.id}
+              course={course}
+              distanceLabel={formatCourseDistance(distanceMeters)}
+              favorite={favorite}
+              onToggleFavorite={() => toggleFavorite(course.id)}
+              onSelect={() => navigate(`/round/start/${course.id}`, WITHIN_FLOW)}
+            />
+          ))}
+        </Stack>
+
+        {/* The library is shared across every user, so it can grow well past
+            what's worth putting in the DOM at once. The cap is stated rather
+            than silent — with the list already sorted nearest-first, the ones
+            beyond it are the ones the golfer is furthest from. */}
+        {ranked.length > shown && (
+          <Button
+            variant="text"
+            onClick={() => setShown((n) => n + PAGE_SIZE)}
+            sx={{ minHeight: 44 }}
+          >
+            Show {Math.min(PAGE_SIZE, ranked.length - shown)} more of{' '}
+            {ranked.length - shown}
+          </Button>
+        )}
+
+        <OnlineCourseSearch
+          search={search}
+          localCourses={courses.data ?? []}
+          onImported={(courseId) => navigate(`/round/start/${courseId}`, WITHIN_FLOW)}
+        />
+
         <Button
-          variant="contained"
-          size="large"
-          onClick={onStart}
-          disabled={startRound.isPending || (mode === 'existing' && !selectedCourseId)}
-          sx={{ minHeight: 64, fontSize: '1.1rem' }}
+          variant="outlined"
+          startIcon={<AddRoundedIcon />}
+          onClick={() =>
+            navigate(
+              search.trim()
+                ? `/round/start/manual?name=${encodeURIComponent(search.trim())}`
+                : '/round/start/manual',
+              WITHIN_FLOW
+            )
+          }
+          sx={{ minHeight: 48, mt: 1 }}
         >
-          {startRound.isPending ? 'Starting…' : 'Create Round'}
+          {search.trim() ? `Add "${search.trim()}" manually` : 'Add a course manually'}
         </Button>
       </Stack>
     </Box>
   );
 }
 
-interface CoursePickerProps {
-  courses: Course[];
-  value: string;
-  onSelect: (id: string) => void;
-  search: string;
-  onSearchChange: (s: string) => void;
-  onAddManually: () => void;
+/**
+ * One course in the list. The star is a real button sitting beside — not
+ * inside — the row's action area: nesting it would make favouriting also
+ * select the course.
+ */
+function CourseRow({
+  course,
+  distanceLabel,
+  favorite,
+  onToggleFavorite,
+  onSelect
+}: {
+  course: Course;
+  distanceLabel: string | null;
+  favorite: boolean;
+  onToggleFavorite: () => void;
+  onSelect: () => void;
+}) {
+  const subtitle = [course.club_name, [course.city, course.state].filter(Boolean).join(', ')]
+    .filter(Boolean)
+    .join(' · ');
+
+  return (
+    <Card
+      elevation={0}
+      sx={{
+        bgcolor: 'background.paper',
+        border: 1,
+        borderColor: favorite ? 'primary.main' : 'divider',
+        borderRadius: '5px',
+        display: 'flex',
+        alignItems: 'stretch'
+      }}
+    >
+      <CardActionArea onClick={onSelect} sx={{ flex: 1, minWidth: 0 }}>
+        <CardContent sx={{ py: 1.25, '&:last-child': { pb: 1.25 } }}>
+          <Stack direction="row" alignItems="center" spacing={1}>
+            <Box sx={{ flex: 1, minWidth: 0 }}>
+              <Stack direction="row" alignItems="center" spacing={0.75}>
+                <Typography variant="body1" sx={{ fontWeight: 600 }} noWrap>
+                  {course.name}
+                </Typography>
+                {course.verified && (
+                  <VerifiedRoundedIcon
+                    color="primary"
+                    sx={{ fontSize: 16, flexShrink: 0 }}
+                    aria-label="Verified course"
+                  />
+                )}
+              </Stack>
+              {subtitle && (
+                <Typography variant="caption" color="text.secondary" noWrap display="block">
+                  {subtitle}
+                </Typography>
+              )}
+            </Box>
+            {distanceLabel && (
+              <Chip
+                size="small"
+                icon={<NearMeRoundedIcon sx={{ fontSize: 14 }} />}
+                label={distanceLabel}
+                sx={{
+                  flexShrink: 0,
+                  height: 24,
+                  fontWeight: 700,
+                  '.MuiChip-label': { px: 0.75, fontSize: '0.72rem' }
+                }}
+              />
+            )}
+          </Stack>
+        </CardContent>
+      </CardActionArea>
+      <IconButton
+        onClick={onToggleFavorite}
+        aria-label={favorite ? `Unfavorite ${course.name}` : `Favorite ${course.name}`}
+        aria-pressed={favorite}
+        sx={{ alignSelf: 'center', mr: 0.5, color: favorite ? 'warning.main' : 'text.disabled' }}
+      >
+        {favorite ? <StarRoundedIcon /> : <StarOutlineRoundedIcon />}
+      </IconButton>
+    </Card>
+  );
 }
 
-function CoursePicker({
-  courses,
-  value,
-  onSelect,
+/** Inline explanation of why distances are (or aren't) showing. */
+function LocationNotice({ location }: { location: ReturnType<typeof useCourseLocation> }) {
+  if (location.status === 'ready' || location.status === 'unavailable') return null;
+
+  if (location.status === 'locating') {
+    return (
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ px: 0.5 }}>
+        <CircularProgress size={14} />
+        <Typography variant="caption" color="text.secondary">
+          Finding you, to sort by distance…
+        </Typography>
+      </Stack>
+    );
+  }
+
+  // 'off' — the GPS opt-in is what stops the app asking for location before the
+  // user wants it, so this is a prompt rather than an automatic request.
+  if (location.status === 'off') {
+    return (
+      <Alert
+        severity="info"
+        variant="outlined"
+        sx={{ borderRadius: '5px' }}
+        action={
+          <Button size="small" onClick={location.enableAndLocate}>
+            Turn on
+          </Button>
+        }
+      >
+        Turn on location to see how far each course is and put the closest first.
+      </Alert>
+    );
+  }
+
+  return (
+    <Alert
+      severity="warning"
+      variant="outlined"
+      sx={{ borderRadius: '5px' }}
+      action={
+        <Button size="small" onClick={location.retry}>
+          Retry
+        </Button>
+      }
+    >
+      Couldn't get your location — courses are listed alphabetically.
+    </Alert>
+  );
+}
+
+/**
+ * GolfCourseAPI lookup for courses not in the library yet. Kept behind an
+ * explicit button rather than firing as the golfer types, so the API key isn't
+ * hammered on every keystroke.
+ */
+function OnlineCourseSearch({
   search,
-  onSearchChange,
-  onAddManually
-}: CoursePickerProps) {
+  localCourses,
+  onImported
+}: {
+  search: string;
+  localCourses: Course[];
+  onImported: (courseId: string) => void;
+}) {
   const userId = useAuthStore((s) => s.session?.user.id);
   const queryClient = useQueryClient();
   const searchOnline = useSearchCourses();
   const importCourse = useImportCourse();
-  // Track which API id is currently being imported so we can disable that one
-  // row and leave the others tappable. Cleared on success/error.
+  /** Which API row is mid-import, so only that one disables. */
   const [importingId, setImportingId] = useState<string | null>(null);
 
-  // Map local courses by course_api_id for instant "already in library" checks
-  // after a search response (the API result also reports `alreadyImported`
-  // server-side, but our local list is the source of truth for selection).
   const courseByApiId = useMemo(() => {
     const m = new Map<string, Course>();
-    for (const c of courses) if (c.course_api_id) m.set(c.course_api_id, c);
+    for (const c of localCourses) if (c.course_api_id) m.set(c.course_api_id, c);
     return m;
-  }, [courses]);
+  }, [localCourses]);
 
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return courses;
-    return courses.filter((c) => {
-      return (
-        c.name.toLowerCase().includes(q) ||
-        (c.club_name?.toLowerCase().includes(q) ?? false) ||
-        (c.city?.toLowerCase().includes(q) ?? false)
-      );
-    });
-  }, [courses, search]);
+  const query = search.trim();
+  if (!query) return null;
 
-  const onSearchOnline = () => {
-    const q = search.trim();
-    if (!q) return;
-    searchOnline.mutate(q);
-  };
-
-  const onUseApiResult = (courseApiId: string) => {
-    // If already imported, just select the local row — no need to round-trip.
+  const onUse = (courseApiId: string) => {
+    // Already in the library — no round-trip, just move on.
     const existing = courseByApiId.get(courseApiId);
     if (existing) {
-      onSelect(existing.id);
+      onImported(existing.id);
       return;
     }
     setImportingId(courseApiId);
     importCourse.mutate(courseApiId, {
       onSuccess: async (res) => {
-        // Refresh the user's course list, then select the newly imported row.
         await queryClient.invalidateQueries({ queryKey: ['courses', userId] });
-        onSelect(res.course.id);
         setImportingId(null);
+        onImported(res.course.id);
       },
       onError: () => setImportingId(null)
     });
   };
 
   return (
-    <Stack spacing={1.5} mt={2}>
-      <TextField
-        placeholder="Search courses"
-        value={search}
-        onChange={(e) => onSearchChange(e.target.value)}
+    <Box sx={{ pt: 1 }}>
+      <Button
+        variant="outlined"
         size="small"
-        fullWidth
-        slotProps={{
-          input: {
-            startAdornment: (
-              <InputAdornment position="start">
-                <SearchRoundedIcon fontSize="small" />
-              </InputAdornment>
-            )
-          }
-        }}
-      />
-      {filtered.length === 0 ? (
-        <Box sx={{ py: 3, textAlign: 'center' }}>
-          <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-            {search.trim()
-              ? `No courses match "${search.trim()}".`
-              : 'No courses yet. Add your first one.'}
+        startIcon={<TravelExploreRoundedIcon />}
+        onClick={() => searchOnline.mutate(query)}
+        disabled={searchOnline.isPending}
+        sx={{ minHeight: 40 }}
+      >
+        {searchOnline.isPending ? 'Searching online…' : `Search online for "${query}"`}
+      </Button>
+
+      {searchOnline.error && (
+        <Alert severity="error" sx={{ mt: 1 }}>
+          {(searchOnline.error as Error).message}
+        </Alert>
+      )}
+      {importCourse.error && (
+        <Alert severity="error" sx={{ mt: 1 }}>
+          {(importCourse.error as Error).message}
+        </Alert>
+      )}
+      {searchOnline.data?.results.length === 0 && (
+        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
+          No results from GolfCourseAPI.
+        </Typography>
+      )}
+
+      {searchOnline.data && searchOnline.data.results.length > 0 && (
+        <Stack spacing={1} sx={{ mt: 1 }}>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
+          >
+            Online results
           </Typography>
-          <Button
-            variant="outlined"
-            startIcon={<AddRoundedIcon />}
-            onClick={onAddManually}
-            sx={{ minHeight: 48 }}
-          >
-            {search.trim() ? 'Add this course manually' : 'Add a course manually'}
-          </Button>
-        </Box>
-      ) : (
-        <Stack spacing={1}>
-          {/* Cap the visible list at 4 rows; anything beyond scrolls inside
-              this Box without growing the page. Each course card is ~72px
-              tall incl. the 8px Stack gap, so 4 rows ≈ 304px. Disabled when
-              there are 4 or fewer courses so short lists don't get a
-              redundant scrollbar. */}
-          <Box
-            sx={
-              filtered.length > 4
-                ? {
-                    maxHeight: 304,
-                    overflowY: 'auto',
-                    WebkitOverflowScrolling: 'touch',
-                    // Tiny right padding so the scrollbar gutter doesn't
-                    // clip the card border.
-                    pr: 0.5
-                  }
-                : undefined
-            }
-          >
-            <Stack spacing={1}>
-              {filtered.map((c) => {
-                const isVerified = !!c.verified;
-                const isSelected = c.id === value;
-                const subtitle = [c.club_name, [c.city, c.state].filter(Boolean).join(', ')]
-                  .filter(Boolean)
-                  .join(' · ');
-                return (
+          {searchOnline.data.results.map((r) => {
+            const alreadyHere = !!courseByApiId.get(r.courseApiId) || r.alreadyImported;
+            const isImporting = importingId === r.courseApiId;
+            const subtitle = [r.clubName, [r.city, r.state].filter(Boolean).join(', ')]
+              .filter(Boolean)
+              .join(' · ');
+            return (
               <Card
-                key={c.id}
+                key={r.courseApiId}
                 elevation={0}
                 sx={{
                   bgcolor: 'background.default',
                   border: 1,
-                  borderColor: isSelected ? 'primary.main' : 'divider'
+                  borderColor: 'divider',
+                  borderRadius: '5px'
                 }}
               >
-                <CardActionArea onClick={() => onSelect(c.id)} sx={{ minHeight: 56 }}>
-                  <CardContent sx={{ py: 1.25 }}>
-                    <Box sx={{ minWidth: 0 }}>
-                      <Stack direction="row" alignItems="center" spacing={0.75}>
-                        <Typography variant="body1" sx={{ fontWeight: 500 }} noWrap>
-                          {c.name}
-                        </Typography>
-                        {isVerified && (
-                          <Chip
-                            size="small"
-                            color="primary"
-                            variant="outlined"
-                            icon={<VerifiedRoundedIcon sx={{ fontSize: 14 }} />}
-                            label="Verified"
-                            sx={{
-                              height: 20,
-                              '.MuiChip-label': { px: 0.75, fontSize: '0.7rem' }
-                            }}
-                          />
-                        )}
-                      </Stack>
+                <CardContent sx={{ py: 1.25, '&:last-child': { pb: 1.25 } }}>
+                  <Stack direction="row" alignItems="center" spacing={1} sx={{ minWidth: 0 }}>
+                    <Box sx={{ flex: 1, minWidth: 0 }}>
+                      <Typography variant="body1" sx={{ fontWeight: 500 }} noWrap>
+                        {r.name}
+                      </Typography>
                       {subtitle && (
-                        <Typography
-                          variant="caption"
-                          color="text.secondary"
-                          noWrap
-                          display="block"
-                        >
+                        <Typography variant="caption" color="text.secondary" noWrap display="block">
                           {subtitle}
                         </Typography>
                       )}
                     </Box>
-                  </CardContent>
-                </CardActionArea>
+                    <Button
+                      variant={alreadyHere ? 'outlined' : 'contained'}
+                      size="small"
+                      disabled={isImporting}
+                      onClick={() => onUse(r.courseApiId)}
+                      sx={{ minHeight: 40, flexShrink: 0 }}
+                    >
+                      {isImporting ? 'Adding…' : alreadyHere ? 'Select' : 'Use'}
+                    </Button>
+                  </Stack>
+                </CardContent>
               </Card>
             );
-              })}
-            </Stack>
-          </Box>
-          {search.trim() && (
-            <Button
-              variant="text"
-              size="small"
-              startIcon={<AddRoundedIcon />}
-              onClick={onAddManually}
-              sx={{ alignSelf: 'flex-start', minHeight: 40 }}
-            >
-              Add "{search.trim()}" manually
-            </Button>
-          )}
+          })}
         </Stack>
       )}
-
-      {/* Online search via GolfCourseAPI. Explicit button rather than typing-
-          triggered to avoid hammering the API key. Shown whenever there's a
-          search query, regardless of whether the local list found matches. */}
-      {search.trim() && (
-        <Box sx={{ pt: 1 }}>
-          <Button
-            variant="outlined"
-            size="small"
-            startIcon={<TravelExploreRoundedIcon />}
-            onClick={onSearchOnline}
-            disabled={searchOnline.isPending}
-            sx={{ minHeight: 40 }}
-          >
-            {searchOnline.isPending
-              ? 'Searching online…'
-              : `Search GolfCourseAPI for "${search.trim()}"`}
-          </Button>
-          {searchOnline.error && (
-            <Alert severity="error" sx={{ mt: 1 }}>
-              {(searchOnline.error as Error).message}
-            </Alert>
-          )}
-          {importCourse.error && (
-            <Alert severity="error" sx={{ mt: 1 }}>
-              {(importCourse.error as Error).message}
-            </Alert>
-          )}
-          {searchOnline.data && searchOnline.data.results.length === 0 && (
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-              No results from GolfCourseAPI.
-            </Typography>
-          )}
-          {searchOnline.data && searchOnline.data.results.length > 0 && (
-            <Stack spacing={1} sx={{ mt: 1 }}>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ textTransform: 'uppercase', letterSpacing: 0.5 }}
-              >
-                GolfCourseAPI results
-              </Typography>
-              {searchOnline.data.results.map((r) => {
-                const localExisting = courseByApiId.get(r.courseApiId);
-                const alreadyHere = !!localExisting || r.alreadyImported;
-                const isImporting = importingId === r.courseApiId;
-                const subtitle = [r.clubName, [r.city, r.state].filter(Boolean).join(', ')]
-                  .filter(Boolean)
-                  .join(' · ');
-                return (
-                  <Card
-                    key={r.courseApiId}
-                    elevation={0}
-                    sx={{
-                      bgcolor: 'background.default',
-                      border: 1,
-                      borderColor: 'divider'
-                    }}
-                  >
-                    <CardContent sx={{ py: 1.25, '&:last-child': { pb: 1.25 } }}>
-                      <Stack
-                        direction="row"
-                        alignItems="center"
-                        spacing={1}
-                        sx={{ minWidth: 0 }}
-                      >
-                        <Box sx={{ flex: 1, minWidth: 0 }}>
-                          <Stack direction="row" alignItems="center" spacing={0.75}>
-                            <Typography variant="body1" sx={{ fontWeight: 500 }} noWrap>
-                              {r.name}
-                            </Typography>
-                            <Chip
-                              size="small"
-                              color="primary"
-                              variant="outlined"
-                              icon={<VerifiedRoundedIcon sx={{ fontSize: 14 }} />}
-                              label="API"
-                              sx={{
-                                height: 20,
-                                '.MuiChip-label': { px: 0.75, fontSize: '0.7rem' }
-                              }}
-                            />
-                          </Stack>
-                          {subtitle && (
-                            <Typography
-                              variant="caption"
-                              color="text.secondary"
-                              noWrap
-                              display="block"
-                            >
-                              {subtitle}
-                            </Typography>
-                          )}
-                        </Box>
-                        <Button
-                          variant={alreadyHere ? 'outlined' : 'contained'}
-                          size="small"
-                          disabled={isImporting}
-                          onClick={() => onUseApiResult(r.courseApiId)}
-                          sx={{ minHeight: 40, flexShrink: 0 }}
-                        >
-                          {isImporting
-                            ? 'Adding…'
-                            : alreadyHere
-                              ? 'Select'
-                              : 'Use'}
-                        </Button>
-                      </Stack>
-                    </CardContent>
-                  </Card>
-                );
-              })}
-            </Stack>
-          )}
-        </Box>
-      )}
-    </Stack>
+    </Box>
   );
-}
-
-/** YYYY-MM-DD in the user's local timezone — what <input type="date"> wants. */
-function toLocalDateInput(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
-/**
- * Convert a date-input string (YYYY-MM-DD, local time) to an ISO timestamp
- * anchored at noon local time. Noon is safe — it can't drift to the wrong
- * calendar day in any UTC offset (max swing is ±14h, so 12:00 local stays
- * within the day in UTC even for Pacific/Kiritimati / Pacific/Pago_Pago).
- * Returns null for an empty input.
- */
-function localDateInputToIso(s: string): string | null {
-  if (!s) return null;
-  const [y, m, d] = s.split('-').map(Number);
-  if (!y || !m || !d) return null;
-  return new Date(y, m - 1, d, 12, 0, 0, 0).toISOString();
-}
-
-function numberOrNull(s: string): number | null {
-  if (s.trim() === '') return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : null;
-}
-
-function integerOrNull(s: string): number | null {
-  if (s.trim() === '') return null;
-  const n = Number(s);
-  return Number.isFinite(n) ? Math.round(n) : null;
-}
-
-// ---------------------------------------------------------------------------
-// Tee picker
-// ---------------------------------------------------------------------------
-
-interface TeePickerProps {
-  tees: CourseTee[];
-  value: string;
-  onSelect: (id: string) => void;
-}
-
-function TeePicker({ tees, value, onSelect }: TeePickerProps) {
-  return (
-    <Stack spacing={1} mt={2}>
-      {tees.map((t) => {
-        const isSelected = t.id === value;
-        const meta = [
-          t.total_yards ? `${t.total_yards.toLocaleString()} yds` : null,
-          t.course_rating != null && t.slope_rating != null
-            ? `${t.course_rating.toFixed(1)} / ${t.slope_rating}`
-            : null
-        ]
-          .filter(Boolean)
-          .join('  ·  ');
-        return (
-          <Card
-            key={t.id}
-            elevation={0}
-            sx={{
-              bgcolor: 'background.default',
-              border: 1,
-              borderColor: isSelected ? 'primary.main' : 'divider'
-            }}
-          >
-            <CardActionArea onClick={() => onSelect(t.id)} sx={{ minHeight: 52 }}>
-              <CardContent sx={{ py: 1.25 }}>
-                <Stack direction="row" alignItems="center" spacing={0.75}>
-                  <Typography variant="body1" sx={{ fontWeight: 500 }} noWrap>
-                    {t.tee_name}
-                  </Typography>
-                  {t.gender && (
-                    <Chip
-                      size="small"
-                      variant="outlined"
-                      label={t.gender === 'female' ? "Women's" : "Men's"}
-                      sx={{ height: 20, '.MuiChip-label': { px: 0.75, fontSize: '0.7rem' } }}
-                    />
-                  )}
-                </Stack>
-                {meta && (
-                  <Typography variant="caption" color="text.secondary" display="block">
-                    {meta}
-                  </Typography>
-                )}
-              </CardContent>
-            </CardActionArea>
-          </Card>
-        );
-      })}
-    </Stack>
-  );
-}
-
-/**
- * Pick a sensible default tee: a "White"/"Regular"-named men's tee if present,
- * otherwise the middle of the (yardage-desc) list — i.e. a mid-length tee rather
- * than the championship or forward extreme.
- */
-function defaultTee(tees: CourseTee[]): CourseTee {
-  const named = tees.find((t) => /white|regular/i.test(t.tee_name) && t.gender !== 'female');
-  if (named) return named;
-  return tees[Math.floor(tees.length / 2)] ?? tees[0];
-}
-
-/** Map a tee's per-hole detail to { [holeNumber]: yardage } (index 0 = hole 1). */
-function teeHoleYardages(tee: CourseTee): Record<number, number> {
-  const out: Record<number, number> = {};
-  (tee.holes ?? []).forEach((h, i) => {
-    if (h?.yardage != null) out[i + 1] = h.yardage;
-  });
-  return out;
 }

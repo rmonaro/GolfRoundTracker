@@ -12,6 +12,8 @@ import { HomePage } from '@/pages/HomePage';
 import { BagPage } from '@/pages/bag/BagPage';
 import { RoundHomePage } from '@/pages/round/RoundHomePage';
 import { StartRoundPage } from '@/pages/round/StartRoundPage';
+import { RoundSetupPage } from '@/pages/round/RoundSetupPage';
+import { ManualCoursePage } from '@/pages/round/ManualCoursePage';
 import { HoleTrackingPage } from '@/pages/round/HoleTrackingPage';
 import { RoundSummaryPage } from '@/pages/round/RoundSummaryPage';
 import { PastRoundsPage } from '@/pages/round/PastRoundsPage';
@@ -93,12 +95,36 @@ export function AppRouter() {
         }
       />
 
+      {/* Starting a round is three screens: pick the course, then set the tee
+          and hole count, then play. `manual` is the escape hatch for a course
+          that's in neither the library nor GolfCourseAPI — it's declared before
+          the `:courseId` route so "manual" isn't swallowed as a course id. */}
       <Route
         path="/round/start"
         element={
           <AuthGuard>
             <RequireMode mode="rounds">
               <StartRoundPage />
+            </RequireMode>
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/round/start/manual"
+        element={
+          <AuthGuard>
+            <RequireMode mode="rounds">
+              <ManualCoursePage />
+            </RequireMode>
+          </AuthGuard>
+        }
+      />
+      <Route
+        path="/round/start/:courseId"
+        element={
+          <AuthGuard>
+            <RequireMode mode="rounds">
+              <RoundSetupPage />
             </RequireMode>
           </AuthGuard>
         }

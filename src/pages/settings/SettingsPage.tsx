@@ -28,6 +28,7 @@ import { OfflineCoursesCard } from '@/features/offline/OfflineCoursesCard';
 import { isSimulatedOffline, setSimulatedOffline } from '@/services/connectivity';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
+import { bottomNavSx } from '@/components/layout/bottomNavStyles';
 import { watchName } from '@/utils/platform';
 import { useAuthStore } from '@/stores/authStore';
 import { useSettingsStore } from '@/stores/settingsStore';
@@ -409,8 +410,9 @@ export function SettingsPage() {
       {/* Section switcher, rendered IN PLACE OF the app's bottom nav —
           `MobileShell` hides its own nav for /settings (see `ownsBottomBar`)
           so these two never stack. Styling deliberately mirrors the nav it
-          replaces: same Paper surface, same 80px row, same safe-area padding,
-          so switching sections feels like the nav rather than a second bar. */}
+          replaces — same Paper surface, same row geometry (shared
+          `bottomNavSx`), same safe-area padding — so switching sections feels
+          like the nav rather than a second bar. */}
       <Paper
         elevation={8}
         sx={{
@@ -432,30 +434,22 @@ export function SettingsPage() {
           // and leave `tab` untouched, so coming back lands where you left.
           onChange={(_, v) => (v === 'admin' ? navigate('/admin') : setTab(v))}
           showLabels
-          sx={{
-            height: 80,
-            paddingTop: '10px',
-            alignItems: 'flex-start',
-            bgcolor: 'transparent'
-          }}
+          sx={bottomNavSx}
         >
           <BottomNavigationAction
             value="profile"
             label="Profile"
             icon={<PersonRoundedIcon />}
-            sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
           />
           <BottomNavigationAction
             value="settings"
             label="Settings"
             icon={<TuneRoundedIcon />}
-            sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
           />
           <BottomNavigationAction
             value="courses"
             label="Courses"
             icon={<CloudDownloadRoundedIcon />}
-            sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
           />
           {/* BottomNavigation skips non-element children, so `false` is safe. */}
           {isAdmin && (
@@ -463,7 +457,6 @@ export function SettingsPage() {
               value="admin"
               label="Admin"
               icon={<AdminPanelSettingsRoundedIcon />}
-              sx={{ minWidth: 'unset', fontSize: '0.75rem' }}
             />
           )}
         </BottomNavigation>
