@@ -1,6 +1,7 @@
 import { supabase } from '@/lib/supabase';
 import type {
   Round,
+  RoundInsert,
   RoundHole,
   Shot,
   FairwayResult,
@@ -19,7 +20,7 @@ export const roundRepo = {
    * is an UPSERT rather than an insert — replaying it after a failed or queued
    * attempt updates the same row instead of creating a second round.
    */
-  async create(payload: Omit<Round, 'id'> & { id: string }): Promise<Round> {
+  async create(payload: RoundInsert): Promise<Round> {
     const { data, error } = await supabase
       .from('rounds')
       .upsert(payload, { onConflict: 'id' })
@@ -50,14 +51,58 @@ export const roundRepo = {
     if (error) throw toAppError(error, 'Could not delete round');
   },
 
+  /**
+   * A user's own rounds — history, stats and handicap all read this.
+   *
+   * Excludes marker cards THIS user recorded for somebody else. While a
+   * scorekeeper is tracking (and until an unclaimed card is claimed) they are
+   * `rounds.user_id`, so without this filter a scorer's own history and
+   * handicap would absorb the four players they scored.
+   *
+   * A marker card the user OWNS but somebody else recorded is deliberately kept:
+   * that's their tournament round, transferred to them after the round, and it
+   * belongs in their history.
+   */
   async listForUser(userId: string): Promise<Round[]> {
     const { data, error } = await supabase
       .from('rounds')
       .select('*')
       .eq('user_id', userId)
+      // NOT (scoring_mode = 'MARKER' AND scored_by_user_id = userId)
+      .or(
+        `scoring_mode.eq.SELF,scored_by_user_id.is.null,scored_by_user_id.neq.${userId}`
+      )
       .order('started_at', { ascending: false });
     if (error) throw toAppError(error, 'Could not load rounds');
     return data ?? [];
+  },
+
+  /**
+   * Athlete signs off on a card a scorekeeper kept for them — the app's version
+   * of signing the marker's scorecard.
+   *
+   * Confirming also freezes it: the scorer's write policy (migration 034) is
+   * conditioned on `athlete_confirmed_at is null`, so once this lands they can
+   * still read the card but no longer change it.
+   */
+  async confirmMarkerCard(roundId: string): Promise<void> {
+    const { error } = await supabase
+      .from('rounds')
+      .update({ athlete_confirmed_at: new Date().toISOString(), athlete_dispute_note: null })
+      .eq('id', roundId);
+    if (error) throw toAppError(error, 'Could not confirm this scorecard');
+  },
+
+  /**
+   * Athlete flags a disagreement. Deliberately does NOT stamp
+   * athlete_confirmed_at, which is what keeps the scorer able to correct it.
+   */
+  async disputeMarkerCard(roundId: string, note: string): Promise<void> {
+    const { error } = await supabase
+      .from('rounds')
+      .update({ athlete_dispute_note: note, athlete_confirmed_at: null })
+      .eq('id', roundId);
+    if (error) throw toAppError(error, 'Could not flag this scorecard');
   },
 
   async getById(roundId: string): Promise<Round | null> {

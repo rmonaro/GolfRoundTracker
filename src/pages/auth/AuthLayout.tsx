@@ -1,20 +1,20 @@
-import { Box, Stack, Typography } from '@mui/material';
-import { Outlet } from 'react-router-dom';
-import appIconUrl from '@/app/assets/AppIcon.png';
+import { Box, Stack, Typography } from "@mui/material";
+import { Outlet } from "react-router-dom";
+import appIconUrl from "@/app/assets/AppIcon.png";
 
 export function AuthLayout() {
   return (
     <Box
       sx={{
-        minHeight: '100dvh',
-        display: 'flex',
-        flexDirection: 'column',
-        justifyContent: 'space-between',
-        bgcolor: 'background.default',
+        minHeight: "100dvh",
+        display: "flex",
+        flexDirection: "column",
+        justifyContent: "space-between",
+        bgcolor: "background.default",
         px: 3,
         py: 6,
         backgroundImage:
-          'radial-gradient(ellipse at top, rgba(46,125,50,0.25), transparent 60%), radial-gradient(ellipse at bottom, rgba(76,175,80,0.18), transparent 70%)'
+          "radial-gradient(ellipse at top, rgba(46,125,50,0.25), transparent 60%), radial-gradient(ellipse at bottom, rgba(76,175,80,0.18), transparent 70%)",
       }}
     >
       <Stack alignItems="center" spacing={1} mt={2}>
@@ -26,18 +26,28 @@ export function AuthLayout() {
             width: 64,
             height: 64,
             borderRadius: 4,
-            objectFit: 'cover',
-            display: 'block'
+            objectFit: "cover",
+            display: "block",
           }}
         />
-        <Typography variant="h5" sx={{ fontWeight: 900, fontSize: '32px' }}>Golf Round Tracker</Typography>
+        <Typography variant="h5" sx={{ fontWeight: 900, fontSize: "32px" }}>
+          RoundIQ
+        </Typography>
         <Typography variant="body2" color="text.secondary">
-          Score, shot, and handicap in one place.
+          TRACK EVERY ROUND. PLAY YOUR BEST.
         </Typography>
       </Stack>
 
-      <Box sx={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', py: 4 }}>
-        <Box sx={{ width: '100%', maxWidth: 420 }}>
+      <Box
+        sx={{
+          flex: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          py: 4,
+        }}
+      >
+        <Box sx={{ width: "100%", maxWidth: 420 }}>
           <Outlet />
         </Box>
       </Box>

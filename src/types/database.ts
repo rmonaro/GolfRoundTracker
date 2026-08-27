@@ -215,7 +215,43 @@ export interface RoundRow {
   // Selected tee set (migration 029). Null for manual/free-text tee rounds.
   tee_id: string | null;
   tee_name: string | null;
+  // Scorer mode (migration 034). See docs/SCORER_MODE.md. Every one of these is
+  // null / 'SELF' for a round a golfer tracked themselves.
+  /** Who recorded the round, when it wasn't the owner. */
+  scored_by_user_id: string | null;
+  /** 'SELF' = tracked by the golfer; 'MARKER' = recorded by a scorekeeper. */
+  scoring_mode: 'SELF' | 'MARKER';
+  /** Claim keys, set while a marker round has no linked GRT athlete. */
+  pending_athlete_email: string | null;
+  pending_registration_id: string | null;
+  /** Athlete sign-off on a marker's card. Null = not yet confirmed. */
+  athlete_confirmed_at: string | null;
+  athlete_dispute_note: string | null;
+  /** Which card feeds TM's leaderboard when both a self and a marker card exist. */
+  tm_card_role: 'PRIMARY' | 'MARKER_BACKUP' | null;
 }
+
+/**
+ * Columns added by migration 034 (scorer mode). Every one has a database
+ * default, and `roundRepo.create` is an UPSERT with a partial payload — so a
+ * writer that omits them leaves whatever is already stored untouched. That is
+ * deliberate: the reconciler re-pushes the round row on every sync pass, and
+ * listing these there would blank a marker round's recorder on the first
+ * reconcile after it was set.
+ */
+export type RoundScorerField =
+  | 'scored_by_user_id'
+  | 'scoring_mode'
+  | 'pending_athlete_email'
+  | 'pending_registration_id'
+  | 'athlete_confirmed_at'
+  | 'athlete_dispute_note'
+  | 'tm_card_role';
+
+/** Payload shape for writing a round: scorer-mode columns optional. */
+export type RoundInsert = Omit<RoundRow, 'id' | RoundScorerField> & { id: string } & Partial<
+    Pick<RoundRow, RoundScorerField>
+  >;
 
 export interface RoundHoleRow {
   id: string;
@@ -473,7 +509,7 @@ export interface Database {
       clubs: { Row: ClubRow; Insert: Omit<ClubRow, 'id'> & { id?: string }; Update: Partial<ClubRow> };
       user_bag: { Row: UserBagRow; Insert: Omit<UserBagRow, 'id'> & { id?: string }; Update: Partial<UserBagRow> };
       courses: { Row: CourseRow; Insert: Omit<CourseRow, 'id'> & { id?: string }; Update: Partial<CourseRow> };
-      rounds: { Row: RoundRow; Insert: Omit<RoundRow, 'id'> & { id?: string }; Update: Partial<RoundRow> };
+      rounds: { Row: RoundRow; Insert: RoundInsert; Update: Partial<RoundRow> };
       round_holes: { Row: RoundHoleRow; Insert: Omit<RoundHoleRow, 'id'> & { id?: string }; Update: Partial<RoundHoleRow> };
       shots: { Row: ShotRow; Insert: Omit<ShotRow, 'id' | 'created_at'> & { id?: string; created_at?: string }; Update: Partial<ShotRow> };
       swing_sessions: { Row: SwingSessionRow; Insert: Omit<SwingSessionRow, 'id'> & { id?: string }; Update: Partial<SwingSessionRow> };

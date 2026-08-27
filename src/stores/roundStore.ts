@@ -3,6 +3,7 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import { createIdbStorage } from '@/lib/idbStorage';
 import { isUuid, newId } from '@/lib/ids';
 import type {
+  BagClub,
   DistanceUnit,
   FairwayResult,
   Lie,
@@ -129,6 +130,42 @@ export interface ActiveRound {
   teeId?: string | null;
   teeName?: string | null;
 
+  /**
+   * Scorer mode (migration 034, docs/SCORER_MODE.md). Absent on every round a
+   * golfer tracks themselves.
+   *
+   * While tracking, `userId` is the SCOREKEEPER — they own every row they write,
+   * which is what lets the reconciler run unchanged. `athleteName` and
+   * `pendingAthleteEmail` say who the card is actually for.
+   */
+  scoringMode?: 'SELF' | 'MARKER';
+  /** The scorekeeper's user id. Equals `userId` until the card is transferred. */
+  scoredByUserId?: string | null;
+  /** Athlete this card belongs to, for the player tabs. */
+  athleteName?: string | null;
+  /** Claim key: set when the athlete has no GRT account yet. */
+  pendingAthleteEmail?: string | null;
+  /** TM tee group this round is being scored under. */
+  teeGroupId?: string | null;
+  /**
+   * The ATHLETE's bag, so the scorer records the club that player actually
+   * carries — with that player's own typical carry distances, which is what
+   * lets a tapped shot distance suggest a club.
+   *
+   * Snapshotted onto the round rather than fetched on demand because scoring
+   * has to work with no signal, and a live query would leave the club picker
+   * empty in a dead zone. Falls back to the standard club catalog (no
+   * distances) for a player with no GRT account or an empty bag.
+   */
+  athleteBag?: BagClub[];
+  /**
+   * Whether this card feeds TM's leaderboard. 'MARKER_BACKUP' means the athlete
+   * is tracking their own round and theirs won — the scorer's entries are still
+   * recorded here, they just stop being forwarded. Set from the push response;
+   * the server owns this decision.
+   */
+  tmCardRole?: 'PRIMARY' | 'MARKER_BACKUP' | null;
+
   // --- sync bookkeeping (Phase 5) ---
 
   /**
@@ -150,9 +187,49 @@ export interface ActiveRound {
 }
 
 interface RoundState {
+  /**
+   * False until the persisted round has been read back from IndexedDB.
+   *
+   * That read is ASYNC, so the first render after a reload always shows
+   * `active: null` — indistinguishable from "no round in progress" unless a
+   * screen waits for this. Not persisted (see partialize): it describes this
+   * session, not the round.
+   */
+  hydrated: boolean;
   active: ActiveRound | null;
+  /**
+   * Other live rounds, parked while a different one is on screen. Keyed by
+   * roundId. **Empty for every flow except scorer mode** (docs/SCORER_MODE.md),
+   * where one scorekeeper tracks 2-4 players at once.
+   *
+   * Deliberately a sibling of `active` rather than `active` becoming an array:
+   * every mutator below keeps operating on `active` exactly as it did, so a
+   * golfer tracking their own round runs the same code as before, and the
+   * persisted payload for a single round is unchanged — no version bump, and
+   * nothing to migrate on a phone that updates mid-round.
+   */
+  parked: Record<string, ActiveRound>;
   startRound: (round: ActiveRound) => void;
   endRound: () => void;
+  /** Add a live round WITHOUT displacing the one on screen. Scorer mode only. */
+  addParallelRound: (round: ActiveRound) => void;
+  /** Put `roundId` on screen and park whatever was there. */
+  switchRound: (roundId: string) => void;
+  /**
+   * Drop a live round. When it's the one on screen another parked round takes
+   * its place, so a scorer who finishes one player stays inside the group.
+   */
+  closeRound: (roundId: string) => void;
+  /**
+   * Attach the athlete's bag to a live round. Backfills a group opened before
+   * bags were captured, or one whose fetch failed while offline.
+   */
+  setAthleteBag: (roundId: string, bag: BagClub[]) => void;
+  /**
+   * Record whether this card feeds the leaderboard. The server decides it —
+   * an offline scorer can't know the athlete started tracking themselves.
+   */
+  setCardRole: (roundId: string, role: 'PRIMARY' | 'MARKER_BACKUP') => void;
   setCurrentHole: (idx: number) => void;
   updateHole: (holeNumber: number, patch: Partial<LocalHole>) => void;
   addShot: (holeNumber: number, shot: LocalShot) => void;
@@ -168,18 +245,52 @@ interface RoundState {
   hydrateFromRemote: (round: Round, holes: RoundHole[], shots: Shot[]) => void;
 
   // --- sync bookkeeping (Phase 5) ---
+  //
+  // These three take an OPTIONAL roundId. Omitted (every pre-scorer-mode call
+  // site) it means the round on screen, exactly as before. The reconciler
+  // passes it explicitly so it can stamp a parked round it just pushed.
 
   /** Record that the `rounds` row now exists remotely. */
-  markRoundSynced: () => void;
+  markRoundSynced: (roundId?: string) => void;
   /**
    * Remember a deleted shot so the reconciler can delete it remotely too.
    * A no-op for a shot the server never saw — there's nothing to tombstone.
    */
   recordShotDeletion: (shotId: string, wasSynced: boolean) => void;
   /** Drop tombstones whose remote deletes have been confirmed. */
-  clearShotTombstones: (shotIds: string[]) => void;
+  clearShotTombstones: (shotIds: string[], roundId?: string) => void;
   /** Bulk-stamp shots and holes as synced after a successful reconcile. */
-  markSynced: (holeIds: string[], shotIds: string[]) => void;
+  markSynced: (holeIds: string[], shotIds: string[], roundId?: string) => void;
+}
+
+/**
+ * Apply `fn` to one live round — the one on screen by default, or a parked one
+ * when `roundId` names it. Returns the state unchanged when there's no such
+ * round, so a stamp arriving for a round that was just closed is a no-op rather
+ * than a crash.
+ */
+function applyToRound(
+  s: RoundState,
+  roundId: string | undefined,
+  fn: (round: ActiveRound) => ActiveRound
+): RoundState | Pick<RoundState, 'active'> | Pick<RoundState, 'parked'> {
+  if (!roundId || s.active?.roundId === roundId) {
+    return s.active ? { active: fn(s.active) } : s;
+  }
+  const parked = s.parked[roundId];
+  if (!parked) return s;
+  return { parked: { ...s.parked, [roundId]: fn(parked) } };
+}
+
+/**
+ * Every round currently being tracked — the one on screen plus any parked.
+ *
+ * Builds a new array per call, so read it imperatively (`getState()`) from the
+ * reconciler rather than using it as a component selector, which would re-render
+ * on every store write.
+ */
+export function liveRounds(s: RoundState): ActiveRound[] {
+  return s.active ? [s.active, ...Object.values(s.parked)] : Object.values(s.parked);
 }
 
 /** v1 = client-minted UUIDs (`id` + `syncedAt`) replacing `tempId`/`remoteId`. */
@@ -201,8 +312,14 @@ export const PERSIST_VERSION = 1;
  * Holes with no `holeId` (never persisted) get one minted, so shots can attach
  * offline without waiting for the server to name their parent.
  */
-export function migratePersistedRound(persisted: unknown, version: number): { active: ActiveRound | null } {
-  const state = (persisted ?? {}) as { active: ActiveRound | null };
+export function migratePersistedRound(
+  persisted: unknown,
+  version: number
+): { active: ActiveRound | null; parked?: Record<string, ActiveRound> } {
+  const state = (persisted ?? {}) as {
+    active: ActiveRound | null;
+    parked?: Record<string, ActiveRound>;
+  };
   if (version >= PERSIST_VERSION || !state.active) return state;
 
   type LegacyShot = LocalShot & { tempId?: string; remoteId?: string };
@@ -225,17 +342,58 @@ export function migratePersistedRound(persisted: unknown, version: number): { ac
     })
   }));
 
-  return { active: { ...state.active, holes } };
+  // Spread `state` so anything else persisted (notably `parked`) survives a
+  // future version bump instead of being silently dropped by this rebuild.
+  return { ...state, active: { ...state.active, holes } };
 }
 
 export const useRoundStore = create<RoundState>()(
   persist(
     (set) => ({
+      hydrated: false,
       active: null,
+      parked: {},
 
       startRound: (round) => set({ active: round }),
 
+      // Clears only what's on screen. A scorer finishing one player uses
+      // closeRound instead, which keeps the rest of the group alive.
       endRound: () => set({ active: null }),
+
+      addParallelRound: (round) =>
+        set((s) => {
+          if (s.active?.roundId === round.roundId) return s;
+          return { parked: { ...s.parked, [round.roundId]: round } };
+        }),
+
+      switchRound: (roundId) =>
+        set((s) => {
+          if (s.active?.roundId === roundId) return s;
+          const target = s.parked[roundId];
+          if (!target) return s;
+          const parked = { ...s.parked };
+          delete parked[roundId];
+          if (s.active) parked[s.active.roundId] = s.active;
+          return { active: target, parked };
+        }),
+
+      closeRound: (roundId) =>
+        set((s) => {
+          if (s.active?.roundId === roundId) {
+            // Promote a parked round so the scorer lands on the next player
+            // rather than on an empty screen.
+            const parked = { ...s.parked };
+            const nextId = Object.keys(parked)[0];
+            if (!nextId) return { active: null, parked };
+            const next = parked[nextId];
+            delete parked[nextId];
+            return { active: next, parked };
+          }
+          if (!s.parked[roundId]) return s;
+          const parked = { ...s.parked };
+          delete parked[roundId];
+          return { parked };
+        }),
 
       setCurrentHole: (idx) =>
         set((s) => (s.active ? { active: { ...s.active, currentHoleIndex: idx } } : s)),
@@ -331,9 +489,18 @@ export const useRoundStore = create<RoundState>()(
           return { active: { ...s.active, holes } };
         }),
 
-      markRoundSynced: () =>
+      setAthleteBag: (roundId, bag) =>
+        set((s) => applyToRound(s, roundId, (r) => ({ ...r, athleteBag: bag }))),
+
+      setCardRole: (roundId, role) =>
+        set((s) => applyToRound(s, roundId, (r) => ({ ...r, tmCardRole: role }))),
+
+      markRoundSynced: (roundId) =>
         set((s) =>
-          s.active ? { active: { ...s.active, roundSyncedAt: new Date().toISOString() } } : s
+          applyToRound(s, roundId, (r) => ({
+            ...r,
+            roundSyncedAt: new Date().toISOString()
+          }))
         ),
 
       recordShotDeletion: (shotId, wasSynced) =>
@@ -345,37 +512,35 @@ export const useRoundStore = create<RoundState>()(
           return { active: { ...s.active, deletedShotIds: [...existing, shotId] } };
         }),
 
-      clearShotTombstones: (shotIds) =>
+      clearShotTombstones: (shotIds, roundId) =>
         set((s) => {
-          if (!s.active) return s;
           const done = new Set(shotIds);
-          return {
-            active: {
-              ...s.active,
-              deletedShotIds: (s.active.deletedShotIds ?? []).filter((id) => !done.has(id))
-            }
-          };
+          return applyToRound(s, roundId, (r) => ({
+            ...r,
+            deletedShotIds: (r.deletedShotIds ?? []).filter((id) => !done.has(id))
+          }));
         }),
 
-      markSynced: (holeIds, shotIds) =>
+      markSynced: (holeIds, shotIds, roundId) =>
         set((s) => {
-          if (!s.active) return s;
           const now = new Date().toISOString();
           const holeSet = new Set(holeIds);
           const shotSet = new Set(shotIds);
-          const holes = s.active.holes.map((h) => {
-            const holeHit = holeSet.has(h.holeId);
-            const shots = h.shots.map((sh) =>
-              shotSet.has(sh.id) ? { ...sh, syncedAt: now } : sh
-            );
-            if (!holeHit && shots === h.shots) return h;
-            return {
-              ...h,
-              shots,
-              ...(holeHit ? { syncedAt: now, dirty: false } : {})
-            };
-          });
-          return { active: { ...s.active, holes } };
+          return applyToRound(s, roundId, (r) => ({
+            ...r,
+            holes: r.holes.map((h) => {
+              const holeHit = holeSet.has(h.holeId);
+              const shots = h.shots.map((sh) =>
+                shotSet.has(sh.id) ? { ...sh, syncedAt: now } : sh
+              );
+              if (!holeHit && shots === h.shots) return h;
+              return {
+                ...h,
+                shots,
+                ...(holeHit ? { syncedAt: now, dirty: false } : {})
+              };
+            })
+          }));
         }),
 
       applyHoleIds: (remoteHoles) =>
@@ -399,7 +564,7 @@ export const useRoundStore = create<RoundState>()(
           return { active: { ...s.active, holes } };
         }),
 
-      reset: () => set({ active: null }),
+      reset: () => set({ active: null, parked: {} }),
 
       hydrateFromRemote: (round, holes, shots) => {
         const holeById = new Map(holes.map((h) => [h.id, h]));
@@ -510,9 +675,20 @@ export const useRoundStore = create<RoundState>()(
       // must survive storage pressure. Existing localStorage rounds are lifted
       // across automatically on first read (see createIdbStorage).
       storage: createJSONStorage(() => createIdbStorage('grt-active-round')),
-      partialize: (state) => ({ active: state.active }),
+      // `parked` is persisted too: a scorer's other 1-3 players are unsynced
+      // data exactly like the one on screen, and must survive an app restart
+      // mid-round. A payload written before scorer mode simply has no `parked`
+      // key, and zustand's shallow merge leaves the initial {} in place — which
+      // is why this needed no version bump.
+      partialize: (state) => ({ active: state.active, parked: state.parked }),
       version: PERSIST_VERSION,
-      migrate: migratePersistedRound
+      migrate: migratePersistedRound,
+      // Fires after the IndexedDB read settles, whether or not anything was
+      // stored. Screens gate their "nothing in progress" empty state on this so
+      // a reload doesn't flash it before the round comes back.
+      onRehydrateStorage: () => () => {
+        useRoundStore.setState({ hydrated: true });
+      }
     }
   )
 );

@@ -7,7 +7,6 @@ import {
   Card,
   CardActionArea,
   CardContent,
-  Chip,
   Dialog,
   DialogActions,
   DialogContent,
@@ -19,18 +18,13 @@ import {
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
 import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import HistoryRoundedIcon from '@mui/icons-material/HistoryRounded';
-import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import { useNavigate } from 'react-router-dom';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
-import { HomeTournamentCard } from '@/components/home/HomeTournamentCard';
 import { useRoundStore } from '@/stores/roundStore';
 import { useAuthStore } from '@/stores/authStore';
-import { tmLinksRepo } from '@/services/tmIntegration/tmLinksRepo';
 import { useTournamentResumeReconcile } from '@/features/tournaments/useTournamentResumeReconcile';
-import { useMyTournaments, useCachedTournaments } from '@/features/tournaments/useMyTournaments';
-import { selectHomeTournament } from '@/features/tournaments/selectHomeTournament';
 import { useRounds } from '@/features/stats/useRounds';
 import { scoreVsPar } from '@/utils/format';
 import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
@@ -46,28 +40,11 @@ export function RoundHomePage() {
   const lastRound = (rounds ?? []).filter((r) => r.completed_at)[0];
   const [confirmDelete, setConfirmDelete] = useState(false);
 
-  // Surface a live/upcoming tournament in place of the big "Start a round" card,
-  // mirroring the Home screen. Falls back to the cached snapshot so it paints
-  // offline / on the first frame.
-  const { data: tournaments } = useMyTournaments();
-  const { data: cachedTournaments } = useCachedTournaments();
-  const homeTournament = selectHomeTournament(
-    tournaments?.tournaments ?? cachedTournaments,
-    rounds
-  );
-
   // If the active round is a tournament round, reconcile it against the DB so a
   // stale/empty local store (e.g. a duplicate round) is healed to the real one.
+  // Kept on this side too: a round started on the tournament side is still the
+  // round being resumed here, and healing it is about data, not presentation.
   useTournamentResumeReconcile();
-
-  // When the active round is a tournament round, pull its TM link so the card
-  // can show the tournament name + round number.
-  const tmRegistrationId = active?.tmRegistrationId ?? null;
-  const { data: tmLink } = useQuery({
-    queryKey: ['tm', 'link', userId, tmRegistrationId],
-    enabled: !!userId && !!tmRegistrationId,
-    queryFn: () => tmLinksRepo.getByRegistration(userId!, tmRegistrationId!)
-  });
 
   // Tombstones the active round: deletes the row in Supabase (schema cascade
   // drops round_holes + shots) and clears the local store so the resume card
@@ -86,11 +63,9 @@ export function RoundHomePage() {
     <Box>
       <PageHeader title="Round" subtitle="Start a new round or resume" back="/" />
       <Stack spacing={2} px={2} pb={3}>
-        {/* A tournament round is surfaced by the tournament card below instead,
-            so we hide the generic active-round card for it — but only when that
-            card is actually available, so a tournament round is never left
-            without a resume affordance. */}
-        {active && !(active.tmRegistrationId && homeTournament) && (
+        {/* The active round shows here whatever its origin. Any tournament
+            labelling is stripped — this side of the app doesn't name events. */}
+        {active && (
           <Card
             elevation={0}
             sx={{
@@ -119,36 +94,13 @@ export function RoundHomePage() {
               <DeleteOutlineRoundedIcon fontSize="small" />
             </IconButton>
             <CardContent sx={{ pr: 5 }}>
-              <Stack direction="row" alignItems="center" spacing={1}>
-                <Typography
-                  variant="caption"
-                  color="primary"
-                  sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
-                >
-                  Active Round
-                </Typography>
-                {active.tmRegistrationId && (
-                  <Chip
-                    size="small"
-                    color="warning"
-                    icon={<EmojiEventsRoundedIcon sx={{ fontSize: 14 }} />}
-                    label="Tournament"
-                    sx={{ height: 20, '.MuiChip-label': { px: 0.75, fontSize: '0.7rem' } }}
-                  />
-                )}
-              </Stack>
-              {active.tmRegistrationId && (tmLink?.tournament_name || active.tmRoundNumber != null) && (
-                <Typography
-                  variant="body2"
-                  color="warning.main"
-                  sx={{ fontWeight: 600, mt: 0.25 }}
-                  noWrap
-                >
-                  {tmLink?.tournament_name ?? 'Tournament'}
-                  {active.tmRoundNumber != null ? ` · Round ${active.tmRoundNumber}` : ''}
-                  {tmLink?.division_name ? ` · ${tmLink.division_name}` : ''}
-                </Typography>
-              )}
+              <Typography
+                variant="caption"
+                color="primary"
+                sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+              >
+                Active Round
+              </Typography>
               <Typography variant="h5" sx={{ mt: 0.5 }}>
                 {active.courseName}
               </Typography>
@@ -184,65 +136,38 @@ export function RoundHomePage() {
           </Card>
         )}
 
-        {homeTournament ? (
-          // A tournament is active/upcoming — show the same banner as Home, with
-          // a smaller "Start a round" button tucked underneath.
-          <>
-            <HomeTournamentCard
-              selection={homeTournament}
-              localRounds={rounds}
-              onClick={() => {
-                // If the surfaced round is the one already in progress, resume
-                // play directly; otherwise open My Tournaments to start/manage.
-                const isActiveRound =
-                  active?.tmRegistrationId === homeTournament.entry.registration_id &&
-                  active?.tmRoundNumber === homeTournament.round.round_number;
-                navigate(isActiveRound ? '/round/play' : '/tournaments');
-              }}
-            />
-            <Button
-              variant="outlined"
-              startIcon={<PlayArrowRoundedIcon />}
-              onClick={() => navigate('/round/start')}
-              sx={{ alignSelf: 'center', borderRadius: '5px' }}
-            >
-              {active ? 'Start another round' : 'Start a round'}
-            </Button>
-          </>
-        ) : (
-          <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
-            <CardContent>
-              <Stack alignItems="center" spacing={1.5} py={2}>
-                <Box
-                  sx={{
-                    width: 72,
-                    height: 72,
-                    borderRadius: '50%',
-                    bgcolor: 'primary.main',
-                    color: 'primary.contrastText',
-                    display: 'grid',
-                    placeItems: 'center'
-                  }}
-                >
-                  <GolfCourseRoundedIcon sx={{ fontSize: 36 }} />
-                </Box>
-                <Typography variant="h6">{active ? 'Start another round' : 'Tee it up'}</Typography>
-                <Typography variant="body2" color="text.secondary" align="center">
-                  Pick a course, your tee box and number of holes.
-                </Typography>
-                <Button
-                  variant="contained"
-                  size="large"
-                  fullWidth
-                  onClick={() => navigate('/round/start')}
-                  sx={{ mt: 1, minHeight: 60 }}
-                >
-                  Start New Round
-                </Button>
-              </Stack>
-            </CardContent>
-          </Card>
-        )}
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+          <CardContent>
+            <Stack alignItems="center" spacing={1.5} py={2}>
+              <Box
+                sx={{
+                  width: 72,
+                  height: 72,
+                  borderRadius: '50%',
+                  bgcolor: 'primary.main',
+                  color: 'primary.contrastText',
+                  display: 'grid',
+                  placeItems: 'center'
+                }}
+              >
+                <GolfCourseRoundedIcon sx={{ fontSize: 36 }} />
+              </Box>
+              <Typography variant="h6">{active ? 'Start another round' : 'Tee it up'}</Typography>
+              <Typography variant="body2" color="text.secondary" align="center">
+                Pick a course, your tee box and number of holes.
+              </Typography>
+              <Button
+                variant="contained"
+                size="large"
+                fullWidth
+                onClick={() => navigate('/round/start')}
+                sx={{ mt: 1, minHeight: 60 }}
+              >
+                Start New Round
+              </Button>
+            </Stack>
+          </CardContent>
+        </Card>
 
         {lastRound && (
           <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
@@ -285,17 +210,6 @@ export function RoundHomePage() {
             </CardActionArea>
           </Card>
         )}
-
-        <Button
-          variant="outlined"
-          size="large"
-          fullWidth
-          startIcon={<EmojiEventsRoundedIcon />}
-          onClick={() => navigate('/tournaments')}
-          sx={{ minHeight: 56, borderRadius: '5px' }}
-        >
-          My Tournaments
-        </Button>
 
         <Button
           variant="outlined"

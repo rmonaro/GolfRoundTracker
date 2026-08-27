@@ -34,8 +34,14 @@ vi.mock('@/lib/supabase', () => ({
   supabase: { auth: { refreshSession: async () => ({ error: null }) } }
 }));
 
-const { syncRound, pendingCount } = await import('./roundSync');
+const { syncRound, pendingCount, reconcileLiveRounds, drainOutbox } = await import('./roundSync');
 const { roundRepo } = await import('./roundRepo');
+const { useRoundStore } = await import('@/stores/roundStore');
+const { useOutboxStore } = await import('@/stores/outboxStore');
+
+function completion() {
+  return { score: 80, scoreVsPar: 8, completedAt: '2026-07-31T15:00:00Z' };
+}
 
 function shot(id: string, syncedAt: string | null = null) {
   return {
@@ -154,6 +160,63 @@ describe('syncRound', () => {
   });
 });
 
+describe('scorer-mode columns on the round upsert', () => {
+  it('omits them entirely for an ordinary self-tracked round', async () => {
+    // roundRepo.create is an UPSERT with a partial payload, so any key present
+    // here is written. Sending `scored_by_user_id: null` on every reconcile of
+    // every round would blank the recorder on any card that had one.
+    await syncRound(round());
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('scoring_mode');
+    expect(payload).not.toHaveProperty('scored_by_user_id');
+    expect(payload).not.toHaveProperty('pending_athlete_email');
+  });
+
+  it('sends them for a marker round', async () => {
+    await syncRound(
+      round({
+        scoringMode: 'MARKER',
+        scoredByUserId: 'scorer-1',
+        pendingAthleteEmail: 'jack@example.com',
+        tmRegistrationId: 'reg-1'
+      })
+    );
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.scoring_mode).toBe('MARKER');
+    expect(payload.scored_by_user_id).toBe('scorer-1');
+    expect(payload.pending_athlete_email).toBe('jack@example.com');
+    expect(payload.pending_registration_id).toBe('reg-1');
+  });
+
+  it('omits tm_card_role until the server has decided one', async () => {
+    // The edge function owns precedence. Sending null on every reconcile would
+    // clear a MARKER_BACKUP demotion it had just written.
+    await syncRound(round({ scoringMode: 'MARKER', scoredByUserId: 'scorer-1' }));
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('tm_card_role');
+  });
+
+  it('sends tm_card_role once it is known', async () => {
+    await syncRound(
+      round({
+        scoringMode: 'MARKER',
+        scoredByUserId: 'scorer-1',
+        tmCardRole: 'MARKER_BACKUP'
+      })
+    );
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.tm_card_role).toBe('MARKER_BACKUP');
+  });
+
+  it('carries the claim key as null once the athlete has a GRT account', async () => {
+    await syncRound(
+      round({ scoringMode: 'MARKER', scoredByUserId: 'scorer-1', tmRegistrationId: 'reg-1' })
+    );
+    const payload = vi.mocked(roundRepo.create).mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.pending_athlete_email).toBeNull();
+  });
+});
+
 describe('pendingCount', () => {
   it('is zero for a fully synced round', () => {
     const r = round({ roundSyncedAt: '2026-07-31T10:05:00Z' });
@@ -176,5 +239,118 @@ describe('pendingCount', () => {
 
   it('is zero with no round', () => {
     expect(pendingCount(null)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// reconcileLiveRounds — usually one round; in scorer mode the 2-4 players in a
+// tee group, which must sync independently of one another.
+// ---------------------------------------------------------------------------
+describe('reconcileLiveRounds', () => {
+  beforeEach(() => {
+    useRoundStore.setState({ active: null, parked: {} });
+    useOutboxStore.setState({ pending: [] });
+  });
+
+  function seedGroup() {
+    const store = useRoundStore.getState();
+    store.startRound(round({ roundId: 'r1' }));
+    store.addParallelRound(round({ roundId: 'r2' }));
+    store.addParallelRound(round({ roundId: 'r3' }));
+  }
+
+  it('pushes every live round, not just the one on screen', async () => {
+    seedGroup();
+    const result = await reconcileLiveRounds();
+    expect(result.ok).toBe(true);
+    // Three rounds × (round + holes + shot).
+    expect(calls.filter((c) => c === 'round')).toHaveLength(3);
+    expect(result.syncedShots).toBe(3);
+  });
+
+  it('stamps each round separately', async () => {
+    seedGroup();
+    await reconcileLiveRounds();
+    const s = useRoundStore.getState();
+    expect(s.active?.roundSyncedAt).toBeTruthy();
+    expect(s.parked.r2.roundSyncedAt).toBeTruthy();
+    expect(s.parked.r3.roundSyncedAt).toBeTruthy();
+    expect(s.parked.r2.holes[0].shots[0].syncedAt).toBeTruthy();
+  });
+
+  it('does not strand the rest of the group when one player fails', async () => {
+    // The rounds are independent — a failure on one says nothing about the
+    // others, unlike the ordered outbox where stopping early is correct.
+    seedGroup();
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('network down'));
+    const result = await reconcileLiveRounds();
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain('network down');
+    // All three were attempted; the two healthy ones still landed.
+    expect(roundRepo.create).toHaveBeenCalledTimes(3);
+    expect(result.syncedShots).toBe(2);
+    expect(calls.filter((c) => c === 'shot')).toHaveLength(2);
+  });
+
+  it('stops early on an expired session', async () => {
+    // Every remaining round would fail identically; retrying just burns
+    // round-trips and battery.
+    seedGroup();
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('JWT expired'));
+    const result = await reconcileLiveRounds();
+    expect(result.needsAuth).toBe(true);
+    // Only the round that failed was attempted — the other two were abandoned.
+    expect(roundRepo.create).toHaveBeenCalledTimes(1);
+    expect(calls).toEqual([]);
+  });
+
+  it('skips rounds that have nothing pending', async () => {
+    const synced = round({ roundId: 'r1', roundSyncedAt: 'x' });
+    synced.holes[0].syncedAt = 'x';
+    synced.holes[0].shots = [shot('s1', 'x')];
+    useRoundStore.getState().startRound(synced);
+    useRoundStore.getState().addParallelRound(round({ roundId: 'r2' }));
+    await reconcileLiveRounds();
+    expect(calls.filter((c) => c === 'round')).toHaveLength(1);
+  });
+
+  it('does not let one queued round block the rest of a finished group', async () => {
+    // Finishing a tee group enqueues up to four rounds at once. One failing for
+    // its own reason must not hold three other players' rounds hostage.
+    useOutboxStore.setState({
+      pending: [
+        { round: round({ roundId: 'q1' }), completion: completion(), queuedAt: 'x', attempts: 0 },
+        { round: round({ roundId: 'q2' }), completion: completion(), queuedAt: 'x', attempts: 0 },
+        { round: round({ roundId: 'q3' }), completion: completion(), queuedAt: 'x', attempts: 0 }
+      ]
+    });
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('bad row'));
+
+    const result = await drainOutbox();
+    expect(result.ok).toBe(false);
+    expect(roundRepo.create).toHaveBeenCalledTimes(3);
+    // The two healthy ones cleared; only the failed one is still queued.
+    expect(useOutboxStore.getState().pending.map((p) => p.round.roundId)).toEqual(['q1']);
+  });
+
+  it('still stops the drain on an expired session', async () => {
+    useOutboxStore.setState({
+      pending: [
+        { round: round({ roundId: 'q1' }), completion: completion(), queuedAt: 'x', attempts: 0 },
+        { round: round({ roundId: 'q2' }), completion: completion(), queuedAt: 'x', attempts: 0 }
+      ]
+    });
+    vi.mocked(roundRepo.create).mockRejectedValueOnce(new Error('JWT expired'));
+
+    const result = await drainOutbox();
+    expect(result.needsAuth).toBe(true);
+    expect(roundRepo.create).toHaveBeenCalledTimes(1);
+    expect(useOutboxStore.getState().pending).toHaveLength(2);
+  });
+
+  it('is a no-op with no rounds at all', async () => {
+    const result = await reconcileLiveRounds();
+    expect(result).toEqual({ ok: true, syncedShots: 0 });
+    expect(calls).toEqual([]);
   });
 });

@@ -16,7 +16,7 @@
 import { roundRepo } from './roundRepo';
 import { supabase } from '@/lib/supabase';
 import { isUsablyOnline, refreshConnectivity } from './connectivity';
-import { useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
+import { liveRounds, useRoundStore, type ActiveRound, type LocalHole } from '@/stores/roundStore';
 import { useOutboxStore, type PendingRound } from '@/stores/outboxStore';
 
 export interface SyncResult {
@@ -67,7 +67,7 @@ function holePayload(round: ActiveRound, h: LocalHole) {
 }
 
 function roundPayload(round: ActiveRound, completion?: PendingRound['completion']) {
-  return {
+  const base = {
     id: round.roundId,
     user_id: round.userId,
     course_id: round.courseId,
@@ -87,6 +87,23 @@ function roundPayload(round: ActiveRound, completion?: PendingRound['completion'
     tm_tournament_slug: round.tmTournamentSlug ?? null,
     tee_id: round.teeId ?? null,
     tee_name: round.teeName ?? null
+  };
+
+  // Scorer-mode columns are sent ONLY for marker rounds. Listing them
+  // unconditionally would push `scored_by_user_id: null` on every reconcile of
+  // every ordinary round — and since this is an upsert, that would blank the
+  // recorder on any card that had one. Omitted keys are left untouched by
+  // PostgREST, which is exactly the behaviour we want here.
+  if (round.scoringMode !== 'MARKER') return base;
+  return {
+    ...base,
+    scoring_mode: 'MARKER' as const,
+    scored_by_user_id: round.scoredByUserId ?? null,
+    pending_athlete_email: round.pendingAthleteEmail ?? null,
+    pending_registration_id: round.tmRegistrationId ?? null,
+    // Only ever written once the server has decided it. Sending null on every
+    // reconcile would clear a demotion the edge function had just recorded.
+    ...(round.tmCardRole ? { tm_card_role: round.tmCardRole } : {})
   };
 }
 
@@ -174,38 +191,98 @@ export async function syncRound(
   }
 }
 
-/** Push the in-progress round and stamp what landed. */
-export async function reconcileActiveRound(): Promise<SyncResult> {
-  const store = useRoundStore.getState();
-  const round = store.active;
-  if (!round) return { ok: true, syncedShots: 0 };
-  if (pendingCount(round) === 0) return { ok: true, syncedShots: 0 };
-
-  const result = await syncRound(round);
-  if (!result.ok) return result;
-
-  store.markRoundSynced();
-  store.markSynced(result.syncedHoleIds, result.syncedShotIds);
-  if (result.deletedIds.length > 0) store.clearShotTombstones(result.deletedIds);
-  return { ok: true, syncedShots: result.syncedShots };
+/** Everything waiting to go up across every round being tracked right now. */
+export function livePendingCount(): number {
+  return liveRounds(useRoundStore.getState()).reduce((n, r) => n + pendingCount(r), 0);
 }
 
-/** Push every finished-but-unsynced round, oldest first. */
+/**
+ * Push every in-progress round and stamp what landed.
+ *
+ * Usually that's exactly one round. In scorer mode it's the 2-4 players in a
+ * tee group, and one failing player must NOT strand the others — unlike
+ * drainOutbox, where stopping early is right because the queue is ordered and
+ * a shared cause (expired token, no signal) will fail the rest identically.
+ * Here the rounds are independent, so each is attempted and the worst outcome
+ * is reported.
+ */
+export async function reconcileLiveRounds(): Promise<SyncResult> {
+  const rounds = liveRounds(useRoundStore.getState()).filter((r) => pendingCount(r) > 0);
+  if (rounds.length === 0) return { ok: true, syncedShots: 0 };
+
+  let synced = 0;
+  let failure: SyncResult | null = null;
+
+  for (const round of rounds) {
+    const result = await syncRound(round);
+    if (!result.ok) {
+      // Keep the first failure to report, but carry on with the other players.
+      failure ??= result;
+      // An expired session fails every remaining round the same way, and each
+      // attempt is a doomed round-trip. Stop and let the caller surface it.
+      if (result.needsAuth) break;
+      continue;
+    }
+    synced += result.syncedShots;
+
+    // Stamp by round id: `store` must be re-read each pass, since the previous
+    // iteration's writes have already replaced the snapshot.
+    const store = useRoundStore.getState();
+    store.markRoundSynced(round.roundId);
+    store.markSynced(result.syncedHoleIds, result.syncedShotIds, round.roundId);
+    if (result.deletedIds.length > 0) {
+      store.clearShotTombstones(result.deletedIds, round.roundId);
+    }
+  }
+
+  if (failure) {
+    return {
+      ok: false,
+      syncedShots: synced,
+      needsAuth: failure.needsAuth,
+      error: failure.error
+    };
+  }
+  return { ok: true, syncedShots: synced };
+}
+
+/**
+ * Push every finished-but-unsynced round, oldest first.
+ *
+ * Stops immediately on an auth failure: every remaining entry fails the same
+ * way and it needs the user, not more attempts.
+ *
+ * Other failures no longer abort the drain. That mattered less when the queue
+ * held one golfer's round at a time, but finishing a tee group enqueues up to
+ * four at once — and a single entry failing for its own reason would have held
+ * three other players' rounds hostage indefinitely. Each is independent, so
+ * each gets its own attempt.
+ */
 export async function drainOutbox(): Promise<SyncResult> {
   const outbox = useOutboxStore.getState();
   let synced = 0;
+  let failure: SyncResult | null = null;
 
   for (const entry of [...outbox.pending]) {
     const result = await syncRound(entry.round, entry.completion);
     if (result.ok) {
       synced += result.syncedShots;
       useOutboxStore.getState().remove(entry.round.roundId);
-    } else {
-      useOutboxStore.getState().recordFailure(entry.round.roundId, result.error ?? 'unknown');
-      // Stop on the first failure — the rest will fail the same way, and an
-      // auth problem in particular wants the user rather than more attempts.
-      return { ok: false, syncedShots: synced, needsAuth: result.needsAuth, error: result.error };
+      continue;
     }
+
+    useOutboxStore.getState().recordFailure(entry.round.roundId, result.error ?? 'unknown');
+    failure ??= result;
+    if (result.needsAuth) break;
+  }
+
+  if (failure) {
+    return {
+      ok: false,
+      syncedShots: synced,
+      needsAuth: failure.needsAuth,
+      error: failure.error
+    };
   }
   return { ok: true, syncedShots: synced };
 }
@@ -242,13 +319,13 @@ export function syncAll(): Promise<SyncResult> {
       }
 
       const outboxResult = await drainOutbox();
-      const activeResult = await reconcileActiveRound();
+      const liveResult = await reconcileLiveRounds();
 
       return {
-        ok: outboxResult.ok && activeResult.ok,
-        syncedShots: outboxResult.syncedShots + activeResult.syncedShots,
-        needsAuth: outboxResult.needsAuth || activeResult.needsAuth,
-        error: outboxResult.error ?? activeResult.error
+        ok: outboxResult.ok && liveResult.ok,
+        syncedShots: outboxResult.syncedShots + liveResult.syncedShots,
+        needsAuth: outboxResult.needsAuth || liveResult.needsAuth,
+        error: outboxResult.error ?? liveResult.error
       };
     } finally {
       inFlight = null;

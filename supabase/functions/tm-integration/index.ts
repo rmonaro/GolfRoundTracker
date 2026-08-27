@@ -8,12 +8,24 @@
 //
 //   { action: 'entitlements' }                    → GET  {TM}/api/integration/players/tournaments
 //   { action: 'link' }                            → POST {TM}/api/integration/link
+//   { action: 'scorer_assignments' }              → GET  {TM}/api/integration/scorers/assignments
 //   { action: 'scores', ...scoreBody }            → POST {TM}/api/integration/scores
 //   { action: 'shots',  ...shotBody }             → POST {TM}/api/integration/shots
 //
-// `grt_athlete_id` is always the caller's Supabase auth user id (we never trust
-// a client-supplied id), and `email` is read from the caller's profile — so a
-// user can only ever pull/attribute their own tournaments.
+// The caller's identity is always resolved server-side — `grt_athlete_id` from
+// the verified JWT, `email` from their profile — so a client can never claim to
+// be someone else.
+//
+// Two kinds of push are authorized here (see docs/SCORER_MODE.md):
+//
+//   SELF   — the golfer pushing their own round. Attributed to the caller.
+//   SCORER — an assigned scorekeeper pushing for one of the 2-4 players in a
+//            tee group they were assigned to in TM. Attributed to the ATHLETE,
+//            never the caller.
+//
+// That distinction is the sharpest edge in this file. A scorer push stamped
+// with the caller's id would resolve to the SCORER's registration on the TM
+// side and land a player's strokes on the wrong leaderboard row.
 //
 // Deploy:
 //   supabase functions deploy tm-integration --no-verify-jwt
@@ -148,6 +160,10 @@ Deno.serve(async (req) => {
         return await handleEntitlements(db, email, grtAthleteId);
       case 'link':
         return await handleLink(db, email, grtAthleteId);
+      case 'scorer_assignments':
+        return await handleScorerAssignments(db, email, grtAthleteId);
+      case 'transfer_marker_rounds':
+        return await handleTransferMarkerRounds(db, grtAthleteId, args);
       case 'scores':
         return await handlePush(db, 'scores', args, grtAthleteId);
       case 'shots':
@@ -227,16 +243,131 @@ async function handleLink(
 }
 
 // ---------------------------------------------------------------------------
-// scores / shots — forward the client body to TM. Before forwarding we verify
-// the caller actually owns what they're attributing to (the registration is in
-// their tm_links, or the round_tracking_round_id is one of their rounds), so a
-// user can't push into someone else's scorecard.
+// scorer_assignments — the tee groups this user was assigned to SCORE, and the
+// 2-4 players in each. Mirrors handleEntitlements, including the link-on-read
+// side effect (TM stamps our user id onto the assignment rows) and the local
+// cache write, which is what lets the group list render with no signal.
+// ---------------------------------------------------------------------------
+async function handleScorerAssignments(
+  db: ReturnType<typeof serviceClient>,
+  email: string,
+  userId: string
+): Promise<Response> {
+  if (!email) return errorResponse(400, 'Caller has no email on file');
+
+  const path =
+    `/api/integration/scorers/assignments` +
+    `?email=${encodeURIComponent(email)}&grt_user_id=${encodeURIComponent(userId)}`;
+  const res = await tmFetch(path, { headers: tmHeaders() });
+  if (!res.ok) return await relay(res);
+
+  const payload = (await res.json()) as { data?: { assignments?: TmAssignment[] } };
+  const assignments = payload?.data?.assignments ?? [];
+  await upsertScorerAssignments(db, userId, assignments);
+
+  return jsonResponse(payload, 200);
+}
+
+// ---------------------------------------------------------------------------
+// transfer_marker_rounds — hand finished cards to the athletes they belong to.
+//
+// This runs here, with the service role, rather than as a client-callable RPC
+// on purpose. Transferring means writing somebody else's user id onto a round;
+// exposing that to the client would mean trusting a client-supplied athlete id,
+// which would let a scorer push a fabricated card into any user's history. The
+// only id we accept is the one TM recorded on the registration.
+//
+// A player with no GRT account can't be transferred to anyone, so their card
+// stays with the scorer carrying pending_athlete_email — the state
+// claim_marker_rounds() resolves when they eventually sign up.
+// ---------------------------------------------------------------------------
+async function handleTransferMarkerRounds(
+  db: ReturnType<typeof serviceClient>,
+  callerId: string,
+  args: Record<string, unknown>
+): Promise<Response> {
+  const roundIds = Array.isArray(args.round_ids)
+    ? (args.round_ids as unknown[]).filter((v): v is string => typeof v === 'string')
+    : [];
+  if (!roundIds.length) return errorResponse(400, 'round_ids is required');
+
+  let transferred = 0;
+  let pending = 0;
+  const errors: string[] = [];
+
+  for (const roundId of roundIds) {
+    const { data: round } = await db
+      .from('rounds')
+      .select('id, user_id, scoring_mode, scored_by_user_id, tm_registration_id')
+      .eq('id', roundId)
+      .maybeSingle();
+
+    if (!round) {
+      errors.push(`${roundId}: not found`);
+      continue;
+    }
+    // Only the scorekeeper who recorded a marker card may hand it over.
+    if (round.scoring_mode !== 'MARKER' || round.scored_by_user_id !== callerId) {
+      errors.push(`${roundId}: not yours to transfer`);
+      continue;
+    }
+
+    const assigned = await scorerAssignmentFor(db, callerId, round.tm_registration_id ?? null);
+    const athleteId = assigned?.athleteGrtId ?? null;
+
+    if (!athleteId) {
+      pending += 1;
+      continue;
+    }
+
+    // The id comes from TM, which stores whatever GRT stamped on the
+    // registration. If that account no longer exists here, assigning it would
+    // fail on the foreign key — so leave the card claimable instead.
+    const { data: profile } = await db
+      .from('profiles')
+      .select('id')
+      .eq('id', athleteId)
+      .maybeSingle();
+    if (!profile) {
+      pending += 1;
+      continue;
+    }
+
+    // One UPDATE moves the whole round graph: round_holes and shots derive
+    // their RLS from the parent round's user_id.
+    const { error } = await db
+      .from('rounds')
+      .update({
+        user_id: athleteId,
+        pending_athlete_email: null,
+        pending_registration_id: round.tm_registration_id ?? null
+      })
+      .eq('id', roundId);
+
+    if (error) {
+      errors.push(`${roundId}: ${error.message}`);
+      continue;
+    }
+    transferred += 1;
+  }
+
+  return jsonResponse({ data: { transferred, pending, errors } }, 200);
+}
+
+// ---------------------------------------------------------------------------
+// scores / shots — forward the client body to TM.
+//
+// Before forwarding we resolve WHO the push belongs to. Two things come out of
+// that: whether the caller is allowed to push at all, and which athlete id to
+// attribute it to. Getting the second wrong is worse than getting the first
+// wrong — a rejected push shows an error, a misattributed one silently posts a
+// player's score to somebody else's leaderboard row.
 // ---------------------------------------------------------------------------
 async function handlePush(
   db: ReturnType<typeof serviceClient>,
   endpoint: 'scores' | 'shots',
   args: Record<string, unknown>,
-  grtAthleteId: string
+  callerId: string
 ): Promise<Response> {
   const registrationId =
     typeof args.registration_id === 'string' ? args.registration_id : null;
@@ -245,13 +376,58 @@ async function handlePush(
       ? args.round_tracking_round_id
       : null;
 
-  const owns = await callerOwnsTarget(db, grtAthleteId, registrationId, rtrid);
-  if (!owns) {
-    return errorResponse(403, 'You can only push scores for your own rounds');
+  const auth = await resolvePushAuth(db, callerId, registrationId, rtrid);
+  if (!auth) {
+    return errorResponse(
+      403,
+      'You can only push scores for your own rounds, or for players in a tee group you were assigned to score'
+    );
   }
 
-  // Always stamp our athlete id so TM can resolve/link by it as a fallback.
-  const outbound = { ...args, grt_athlete_id: grtAthleteId };
+  const roundNumber =
+    typeof args.round_number === 'number' ? args.round_number : null;
+
+  // ---- Precedence: the athlete's own card wins ----------------------------
+  //
+  // If a player is tracking their own round, theirs is the record and the
+  // scorekeeper's becomes a marker backup. Resolved HERE, not on the device:
+  // a scorer standing in a dead zone has no way to know the player started
+  // their own round ten minutes ago.
+  //
+  // The backup's writes are still accepted into GRT — they're a second,
+  // independent record of the same round, which is the point of a marker — they
+  // just stop being forwarded to the leaderboard. Holes the athlete hasn't
+  // reached keep whatever the scorer already pushed, simply because nothing
+  // overwrites them; no merging is attempted.
+  if (auth.kind === 'SCORER' && registrationId && roundNumber != null) {
+    if (await athleteIsTracking(db, registrationId, roundNumber)) {
+      if (rtrid) {
+        await db.from('rounds').update({ tm_card_role: 'MARKER_BACKUP' }).eq('id', rtrid);
+      }
+      return jsonResponse(
+        { data: { primary: false, reason: 'athlete_is_tracking' } },
+        200
+      );
+    }
+  }
+
+  // A self push on a tournament round is the primary card by definition.
+  if (auth.kind === 'SELF' && rtrid) {
+    await db.from('rounds').update({ tm_card_role: 'PRIMARY' }).eq('id', rtrid);
+  }
+
+  // Attribution. For a SELF push this is the caller, exactly as before. For a
+  // SCORER push it is the ATHLETE — and when that athlete has never opened GRT
+  // there is no id to send, so the field is OMITTED rather than defaulted to
+  // the caller. TM resolves fine without it: registration_id and
+  // round_tracking_round_id both come earlier in its resolution order.
+  const outbound: Record<string, unknown> = { ...args };
+  if (auth.athleteGrtId) {
+    outbound.grt_athlete_id = auth.athleteGrtId;
+  } else {
+    delete outbound.grt_athlete_id;
+  }
+
   const res = await tmFetch(`/api/integration/${endpoint}`, {
     method: 'POST',
     headers: tmHeaders(),
@@ -260,31 +436,130 @@ async function handlePush(
   return await relay(res);
 }
 
-async function callerOwnsTarget(
+/**
+ * Is the athlete recording this tournament round themselves?
+ *
+ * Requires evidence of actual play, not merely that a SELF round row exists. A
+ * player who tapped Start and walked away would otherwise silently demote their
+ * scorekeeper's card and stall the leaderboard for the rest of the round.
+ */
+async function athleteIsTracking(
   db: ReturnType<typeof serviceClient>,
-  grtAthleteId: string,
+  registrationId: string,
+  roundNumber: number
+): Promise<boolean> {
+  const { data: selfRounds } = await db
+    .from('rounds')
+    .select('id')
+    .eq('tm_registration_id', registrationId)
+    .eq('tm_round_number', roundNumber)
+    .eq('scoring_mode', 'SELF');
+  if (!selfRounds?.length) return false;
+
+  const { data: played } = await db
+    .from('round_holes')
+    .select('id')
+    .in(
+      'round_id',
+      selfRounds.map((r) => r.id)
+    )
+    .gt('strokes', 0)
+    .limit(1);
+  return !!played?.length;
+}
+
+interface PushAuth {
+  kind: 'SELF' | 'SCORER';
+  /** Athlete id to attribute to. Null means "omit it and let TM resolve". */
+  athleteGrtId: string | null;
+}
+
+/**
+ * Decide whether this caller may push, and on whose behalf. Returns null when
+ * they may not.
+ */
+async function resolvePushAuth(
+  db: ReturnType<typeof serviceClient>,
+  callerId: string,
   registrationId: string | null,
   rtrid: string | null
-): Promise<boolean> {
+): Promise<PushAuth | null> {
+  // 1. The round row is the most specific evidence available, so it is checked
+  //    first. It also disambiguates a case a plain ownership test gets wrong:
+  //    while a scorer is tracking, they ARE rounds.user_id (see the ownership
+  //    model in migration 034), so "user_id = caller" alone would classify a
+  //    marker push as SELF and stamp the scorer's own athlete id.
+  if (rtrid) {
+    const { data: round } = await db
+      .from('rounds')
+      .select('user_id, scoring_mode, scored_by_user_id, tm_registration_id')
+      .eq('id', rtrid)
+      .maybeSingle();
+
+    if (round) {
+      if (round.scoring_mode === 'MARKER') {
+        if (round.scored_by_user_id !== callerId) return null;
+        const regId = registrationId ?? round.tm_registration_id ?? null;
+        const assigned = await scorerAssignmentFor(db, callerId, regId);
+        // The round says marker and names this caller as its recorder, so the
+        // push is legitimate even if the assignment cache has since gone stale
+        // (a group reshuffled mid-round shouldn't strand recorded strokes).
+        return { kind: 'SCORER', athleteGrtId: assigned?.athleteGrtId ?? null };
+      }
+      if (round.user_id === callerId) {
+        return { kind: 'SELF', athleteGrtId: callerId };
+      }
+      return null;
+    }
+  }
+
   if (registrationId) {
-    const { data } = await db
+    // 2. The caller's own registration — the original, unchanged path.
+    const { data: link } = await db
       .from('tm_links')
       .select('id')
-      .eq('user_id', grtAthleteId)
+      .eq('user_id', callerId)
       .eq('registration_id', registrationId)
       .maybeSingle();
-    if (data) return true;
+    if (link) return { kind: 'SELF', athleteGrtId: callerId };
+
+    // 3. A player in a tee group this caller was assigned to score.
+    const assigned = await scorerAssignmentFor(db, callerId, registrationId);
+    if (assigned) return { kind: 'SCORER', athleteGrtId: assigned.athleteGrtId };
   }
-  if (rtrid) {
-    const { data } = await db
-      .from('rounds')
-      .select('id')
-      .eq('id', rtrid)
-      .eq('user_id', grtAthleteId)
-      .maybeSingle();
-    if (data) return true;
-  }
-  return false;
+
+  return null;
+}
+
+/**
+ * Is `registrationId` one of the players in a tee group this user is assigned
+ * to score? Returns the player's GRT athlete id (null when they have never
+ * opened GRT), or null when there is no such assignment.
+ */
+async function scorerAssignmentFor(
+  db: ReturnType<typeof serviceClient>,
+  callerId: string,
+  registrationId: string | null
+): Promise<{ athleteGrtId: string | null } | null> {
+  if (!registrationId) return null;
+
+  // NOT maybeSingle(): one scorer is routinely assigned to the same players for
+  // round 1 and round 2 of a tournament, which is two rows containing this
+  // registration. The athlete's id is the same in both, so the first will do.
+  const { data } = await db
+    .from('tm_scorer_assignments')
+    .select('players')
+    .eq('user_id', callerId)
+    .contains('players', [{ registration_id: registrationId }])
+    .limit(1);
+
+  const row = data?.[0];
+  if (!row) return null;
+
+  const player = (row.players as TmAssignmentPlayer[] | null)?.find(
+    (p) => p.registration_id === registrationId
+  );
+  return { athleteGrtId: player?.grt_athlete_id ?? null };
 }
 
 // ---------------------------------------------------------------------------
@@ -329,4 +604,58 @@ interface TmLinkReg {
   id: string;
   tournament_id?: string;
   status?: string;
+}
+
+/**
+ * Cache the scorer's assignments locally. This is not only a render cache —
+ * `players` is what resolvePushAuth checks a scorer push against, so a stale or
+ * missing row costs a scorer the ability to push. Refreshed on every pull.
+ */
+async function upsertScorerAssignments(
+  db: ReturnType<typeof serviceClient>,
+  userId: string,
+  assignments: TmAssignment[]
+): Promise<void> {
+  if (!assignments.length) return;
+  const rows = assignments.map((a) => ({
+    user_id: userId,
+    tee_group_id: a.tee_group_id,
+    tournament_id: a.tournament?.id ?? null,
+    tournament_slug: a.tournament?.slug ?? null,
+    tournament_name: a.tournament?.name ?? null,
+    round_number: a.round_number ?? null,
+    tee_time: a.tee_time ?? null,
+    starting_hole: a.starting_hole ?? null,
+    external_course_id: a.tournament?.external_course_id ?? null,
+    players: a.players ?? [],
+    snapshot: a,
+    updated_at: new Date().toISOString()
+  }));
+  await db
+    .from('tm_scorer_assignments')
+    .upsert(rows, { onConflict: 'user_id,tee_group_id' });
+}
+
+interface TmAssignmentPlayer {
+  registration_id: string;
+  first_name?: string;
+  last_name?: string;
+  email?: string | null;
+  /** Null when this player has never opened GRT — the round is claimed later. */
+  grt_athlete_id?: string | null;
+}
+
+interface TmAssignment {
+  tee_group_id: string;
+  round_number?: number;
+  tee_time?: string | null;
+  starting_hole?: number | null;
+  tournament?: {
+    id?: string;
+    name?: string;
+    slug?: string;
+    status?: string;
+    external_course_id?: string | null;
+  };
+  players?: TmAssignmentPlayer[];
 }

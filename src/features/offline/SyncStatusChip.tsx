@@ -17,11 +17,19 @@ import { pendingCount, syncAll } from '@/services/roundSync';
 export function SyncStatusChip({ compact = false }: { compact?: boolean }) {
   const { isOnline } = useConnectivity();
   const active = useRoundStore((s) => s.active);
+  // Two selectors rather than one liveRounds(s) call: each returns a stable
+  // reference, where building an array in a selector would re-render on every
+  // store write. `parked` is empty outside scorer mode.
+  const parked = useRoundStore((s) => s.parked);
   const outbox = useOutboxStore((s) => s.pending);
   const [syncing, setSyncing] = useState(false);
   const [needsAuth, setNeedsAuth] = useState(false);
 
-  const activePending = pendingCount(active);
+  // Counts the whole group in scorer mode — "3 unsynced" has to mean the
+  // scorekeeper's 3, not just the player currently on screen.
+  const activePending =
+    pendingCount(active) +
+    Object.values(parked).reduce((n, r) => n + pendingCount(r), 0);
   const outboxPending = outbox.length;
   const total = activePending + outboxPending;
 
