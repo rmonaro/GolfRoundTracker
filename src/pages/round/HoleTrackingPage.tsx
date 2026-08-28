@@ -82,6 +82,7 @@ import { bearingDeg } from '@/services/weatherService';
 import { watchBridge, type WatchInboundMessage } from '@/services/watchBridge';
 import { computeCompletedTotals, computeTotalScore } from '@/features/round/computeRoundTotals';
 import { scoreVsPar } from '@/utils/format';
+import { lockDocumentScroll } from '@/utils/scrollLock';
 import { roundRepo } from '@/services/roundRepo';
 import { newId } from '@/lib/ids';
 import { enqueueFinishedRound, syncRound } from '@/services/roundSync';
@@ -2248,51 +2249,13 @@ export function HoleTrackingPage() {
     navigate(`/round/summary/${active.roundId}`);
   };
 
-  // Lock the document scroll while the hole tracking page is mounted. The
-  // page itself is height: 100dvh + overflow: hidden, but on iOS PWAs the
-  // body still rubber-bands without position:fixed — even with
-  // overscroll-behavior: none. Anchor body via top/right/bottom/left: 0 so
-  // it reliably extends through the safe areas (height: 100% alone doesn't
-  // include them on iOS). Snapshot + restore on unmount so other roots
-  // (Settings, Bag, etc.) keep their scroll.
-  useEffect(() => {
-    const html = document.documentElement;
-    const body = document.body;
-    const prev = {
-      htmlOverflow: html.style.overflow,
-      bodyPosition: body.style.position,
-      bodyOverflow: body.style.overflow,
-      bodyTop: body.style.top,
-      bodyRight: body.style.right,
-      bodyBottom: body.style.bottom,
-      bodyLeft: body.style.left,
-      bodyWidth: body.style.width,
-      bodyHeight: body.style.height,
-      bodyTouchAction: body.style.touchAction
-    };
-    html.style.overflow = 'hidden';
-    body.style.position = 'fixed';
-    body.style.overflow = 'hidden';
-    body.style.top = '0';
-    body.style.right = '0';
-    body.style.bottom = '0';
-    body.style.left = '0';
-    body.style.width = '';
-    body.style.height = '';
-    body.style.touchAction = 'none';
-    return () => {
-      html.style.overflow = prev.htmlOverflow;
-      body.style.position = prev.bodyPosition;
-      body.style.overflow = prev.bodyOverflow;
-      body.style.top = prev.bodyTop;
-      body.style.right = prev.bodyRight;
-      body.style.bottom = prev.bodyBottom;
-      body.style.left = prev.bodyLeft;
-      body.style.width = prev.bodyWidth;
-      body.style.height = prev.bodyHeight;
-      body.style.touchAction = prev.bodyTouchAction;
-    };
-  }, []);
+  // Lock the document scroll while the hole tracking page is mounted. The page
+  // itself is height: 100dvh + overflow: hidden, but on iOS PWAs the body still
+  // rubber-bands without position: fixed — even with overscroll-behavior: none.
+  // `blockTouch` additionally kills panning gestures: this screen is a map and
+  // owns every gesture on it. Refcounted so overlapping mounts can't leave the
+  // document locked (see `lockDocumentScroll`).
+  useEffect(() => lockDocumentScroll({ blockTouch: true }), []);
 
   // Auto-finish the round when a putt is holed on the final hole. Guarded by
   // a ref so it only fires once per page lifetime — if the user returns to

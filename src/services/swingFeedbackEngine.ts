@@ -6,14 +6,22 @@
 // feedback only and never claims absolute ball/club geometry.
 
 import type { FatigueTrend, SwingFeedback, SwingMetric } from '@/types/swing';
-import { SWING_DISCLAIMER, TEMPO_IDEAL } from '@/utils/swingLabels';
+import { SWING_DISCLAIMER, TEMPO_GOOD_BAND, tempoTargetFor } from '@/utils/swingLabels';
 
 const fb = (
   level: SwingFeedback['level'],
   code: string,
   message: string,
-  swingId: string | null = null
-): SwingFeedback => ({ swingId, level, code, message, disclaimer: SWING_DISCLAIMER });
+  swingId: string | null = null,
+  explanation?: string
+): SwingFeedback => ({
+  swingId,
+  level,
+  code,
+  message,
+  disclaimer: SWING_DISCLAIMER,
+  ...(explanation ? { explanation } : {})
+});
 
 // Plain-language explanation for each feedback code, shown when the user taps a
 // feedback chip. Relative/estimated framing only — never absolute geometry.
@@ -21,9 +29,9 @@ const FEEDBACK_EXPLANATIONS: Record<string, string> = {
   TEMPO_GOOD:
     'Your backswing-to-downswing ratio was close to the classic ~3:1. A repeatable tempo is the foundation of consistent ball-striking.',
   BACKSWING_RUSHED:
-    'Your backswing was quick relative to your downswing (ratio under ~2.2:1). Rushing the takeaway often costs control and sequencing — try a slower, smoother start back.',
+    'Your backswing was quick relative to your downswing. Rushing the takeaway often costs control and sequencing — try a slower, smoother start back.',
   BACKSWING_SLOW:
-    'Your backswing was long/slow relative to a fast downswing (ratio over ~4:1). Not necessarily bad, but a big gap can hurt timing — aim for a smoother, more proportional change of direction.',
+    'Your backswing was long/slow relative to a fast downswing. Not necessarily bad, but a big gap can hurt timing — aim for a smoother, more proportional change of direction.',
   TRANSITION_AGGRESSIVE:
     'The change of direction at the top was abrupt. A smoother transition lets the club load and sequence properly instead of throwing speed away early.',
   TRANSITION_SMOOTH:
@@ -55,6 +63,22 @@ export function feedbackExplanation(code: string): string {
   return FEEDBACK_EXPLANATIONS[code] ?? '';
 }
 
+/**
+ * Putting is taught at a 2:1 ratio, not the full swing's 3:1, so the tempo
+ * chips need their own wording on a putt — the generic copy names the wrong
+ * number and calls the stroke back a "backswing". Attached to the feedback
+ * item at creation (where the swing type is known) rather than looked up by
+ * code later, since the chip UI only ever sees the code.
+ */
+const PUTT_TEMPO_EXPLANATIONS: Record<string, string> = {
+  TEMPO_GOOD:
+    'Your backstroke-to-forward-stroke ratio was close to the 2:1 putting standard — the forward stroke moving through the ball about twice as fast as the stroke back. Repeatable stroke tempo is what controls distance.',
+  BACKSWING_RUSHED:
+    'Your backstroke was short/quick relative to the forward stroke (under the 2:1 putting standard). A stroke that goes back too fast usually gets decelerated or steered coming through — let it move back slower and accelerate through the ball.',
+  BACKSWING_SLOW:
+    'Your backstroke was long/slow relative to the forward stroke (over the 2:1 putting standard). Taking it back too far usually means having to quit on it through impact — a shorter backstroke you can accelerate through gives better distance control.'
+};
+
 // --- per-swing -------------------------------------------------------------
 
 /**
@@ -67,6 +91,12 @@ export interface PerSwingRuleInputs {
   tempoRatio?: number | null;
   transitionScore?: number | null;
   finishStabilityScore?: number | null;
+  /**
+   * full | pitch | chip | putt | air. Only the tempo rule reads it, to pick the
+   * target ratio — putting is judged against 2:1, everything else against 3:1.
+   * Absent → treated as a full swing.
+   */
+  swingType?: string | null;
 }
 
 /**
@@ -80,14 +110,38 @@ export function evaluateSwingMetrics(
 ): SwingFeedback[] {
   const out: SwingFeedback[] = [];
 
-  // Tempo ratio.
+  // Tempo ratio, judged against the target for THIS kind of swing: 3:1 for a
+  // full swing, 2:1 for a putt. The rushed / slow thresholds are offsets from
+  // the target rather than absolutes — the old fixed 2.2 and 4.0 called a
+  // textbook 2:1 putt a rushed takeaway. Full-swing behaviour is unchanged
+  // (3.0 − 0.8 = 2.2, 3.0 + 1.0 = 4.0).
   if (m.tempoRatio != null) {
-    if (Math.abs(m.tempoRatio - TEMPO_IDEAL) <= 0.5) {
-      out.push(fb('positive', 'TEMPO_GOOD', 'Great tempo', swingId));
-    } else if (m.tempoRatio > 0 && m.tempoRatio < 2.2) {
-      out.push(fb('attention', 'BACKSWING_RUSHED', 'Backswing was rushed', swingId));
-    } else if (m.tempoRatio > 4.0) {
-      out.push(fb('neutral', 'BACKSWING_SLOW', 'Backswing was slow relative to downswing', swingId));
+    const isPutt = m.swingType === 'putt';
+    const target = tempoTargetFor(m.swingType);
+    const puttNote = (code: string) => (isPutt ? PUTT_TEMPO_EXPLANATIONS[code] : undefined);
+    const phase = isPutt ? 'Backstroke' : 'Backswing';
+    if (Math.abs(m.tempoRatio - target) <= TEMPO_GOOD_BAND) {
+      out.push(fb('positive', 'TEMPO_GOOD', 'Great tempo', swingId, puttNote('TEMPO_GOOD')));
+    } else if (m.tempoRatio > 0 && m.tempoRatio < target - 0.8) {
+      out.push(
+        fb(
+          'attention',
+          'BACKSWING_RUSHED',
+          `${phase} was rushed`,
+          swingId,
+          puttNote('BACKSWING_RUSHED')
+        )
+      );
+    } else if (m.tempoRatio > target + 1.0) {
+      out.push(
+        fb(
+          'neutral',
+          'BACKSWING_SLOW',
+          `${phase} was slow relative to the ${isPutt ? 'forward stroke' : 'downswing'}`,
+          swingId,
+          puttNote('BACKSWING_SLOW')
+        )
+      );
     }
   }
 

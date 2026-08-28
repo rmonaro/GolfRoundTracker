@@ -110,7 +110,17 @@ interface HoleLayoutProps {
    * preformatted string (e.g. "158y", "18ft"). Optional — when absent the dots
    * render bare (just the number).
    */
-  shotLabels?: Array<{ club: string | null; distance: string | null }>;
+  shotLabels?: Array<{
+    club: string | null;
+    distance: string | null;
+    /**
+     * Unit the `distance` string is expressed in. Only consulted while a dot is
+     * being DRAGGED, when the map recomputes the yardage live from the anchor
+     * (previous shot, or the tee on shot 1) and has to re-format it itself.
+     * Defaults to yards.
+     */
+    distanceUnit?: 'yards' | 'feet';
+  }>;
   /**
    * Suppress the aim UI (handle, line, distance label) WITHOUT falling back
    * to the walkback markers. Used while the player has a pending landing
@@ -186,7 +196,25 @@ interface HoleLayoutProps {
    *  callback fires with the shot's index and the new [lng, lat] when
    *  the user releases the drag. Used by the Round Summary map dialog
    *  so the player can correct mis-recorded shot positions. */
-  onShotEndPointMoved?: (index: number, newPos: [number, number]) => void;
+  onShotEndPointMoved?: (
+    index: number,
+    newPos: [number, number],
+    /**
+     * Geometry the map already had to compute to keep the live drag label
+     * honest, handed back so the caller doesn't recompute it:
+     *  • `anchor` — where this shot was played FROM (the previous shot's
+     *    landing point, or the tee when it's the first shot).
+     *  • `distanceFromAnchorM` — anchor → the dropped position.
+     *  • `nextDistanceM` — the dropped position → the FOLLOWING shot's landing
+     *    point, which moving this dot also changes. Null when this is the last
+     *    shot on the hole.
+     */
+    geometry: {
+      anchor: [number, number] | null;
+      distanceFromAnchorM: number | null;
+      nextDistanceM: number | null;
+    }
+  ) => void;
   /**
    * Recap replay trigger. Each time this value changes to a fresh positive
    * number, the map animates a "shot replay": an amber line grows from the
@@ -1940,6 +1968,12 @@ export function HoleLayout({
     const moveCb = onShotEndPointMovedRef.current;
     const shotDots: HTMLDivElement[] = [];
     const shotBoxes: (HTMLDivElement | null)[] = [];
+    // The orange distance cell of each info box, so a drag can rewrite the
+    // yardage live, and the markers themselves, so the anchor for shot N is
+    // read from where dot N-1 CURRENTLY sits rather than from the (possibly
+    // already-stale) `shotEndPoints` prop this effect was built with.
+    const distSegs: (HTMLDivElement | null)[] = [];
+    const shotMarkers: mapboxgl.Marker[] = [];
 
     // Build one segment of the info box: a padded cell with its own bg + text
     // color. e.g. makeSeg('7I', '#2e7d32', '#ffffff').
@@ -1955,6 +1989,28 @@ export function HoleLayout({
         color
       } as Partial<CSSStyleDeclaration>);
       return seg;
+    };
+
+    // Where shot `i` was played FROM: the previous shot's dot for i > 0, the
+    // tee for the first shot. `centerlineCoords` is oriented tee→green, so [0]
+    // is the tee end (same anchor the recap path starts from). Read live from
+    // the markers so dragging dot 2 immediately re-measures dot 3.
+    const anchorFor = (i: number): [number, number] | null => {
+      if (i > 0) {
+        const prev = shotMarkers[i - 1];
+        if (!prev) return null;
+        const ll = prev.getLngLat();
+        return [ll.lng, ll.lat];
+      }
+      return centerlineCoords[0] ?? null;
+    };
+    /** Distance in meters shot `i` covered, anchor → its dot's current spot. */
+    const distanceFromAnchorM = (i: number): number | null => {
+      const marker = shotMarkers[i];
+      const anchor = anchorFor(i);
+      if (!marker || !anchor) return null;
+      const ll = marker.getLngLat();
+      return haversineMetersFE(anchor, [ll.lng, ll.lat]);
     };
 
     for (let i = 0; i < shotEndPoints.length; i++) {
@@ -2040,9 +2096,16 @@ export function HoleLayout({
         boxInner.appendChild(makeSeg(String(i + 1), '#ffffff', '#0b1410'));
         // Club — green bg, white text.
         if (label.club) boxInner.appendChild(makeSeg(label.club, '#2e7d32', '#ffffff'));
-        // Distance (yards) — #FB7B34 bg, black text.
-        if (label.distance) {
-          boxInner.appendChild(makeSeg(label.distance, '#FB7B34', '#0b1410'));
+        // Distance (yards) — #FB7B34 bg, black text. Built even when the shot
+        // has no recorded distance IF the dots are draggable: dragging derives
+        // one from the map, and the segment has to already exist to receive it.
+        // Hidden (not absent) until it has text so the pill doesn't show an
+        // empty orange stub.
+        if (label.distance || moveCb) {
+          const seg = makeSeg(label.distance ?? '', '#FB7B34', '#0b1410');
+          if (!label.distance) seg.style.display = 'none';
+          boxInner.appendChild(seg);
+          distSegs[i] = seg;
         }
 
         boxWrap.appendChild(boxInner);
@@ -2059,11 +2122,42 @@ export function HoleLayout({
         .addTo(map);
       // Store the INNER disk — that's what the recap animation shows/hides.
       shotDots.push(inner);
+      shotMarkers.push(marker);
       if (moveCb) {
         const index = i;
+        // Re-label dot `at` with the distance it was played over, measured from
+        // wherever its anchor dot sits right now. Cheap enough to run on every
+        // drag frame (two DOM writes).
+        const refreshLabel = (at: number) => {
+          const seg = distSegs[at];
+          if (!seg) return;
+          const m = distanceFromAnchorM(at);
+          if (m == null) {
+            seg.style.display = 'none';
+            return;
+          }
+          const unit = shotLabels[at]?.distanceUnit ?? 'yards';
+          seg.textContent =
+            unit === 'feet'
+              ? `${Math.round(m / 0.3048)}ft`
+              : `${Math.round(m / 0.9144)}y`;
+          // Back to `flex` (not ''), which is what makeSeg set — the cell's
+          // text centering depends on it.
+          seg.style.display = 'flex';
+        };
+        marker.on('drag', () => {
+          // Moving a dot changes TWO yardages: the shot that ended here, and
+          // the shot that was played FROM here.
+          refreshLabel(index);
+          refreshLabel(index + 1);
+        });
         marker.on('dragend', () => {
           const ll = marker.getLngLat();
-          onShotEndPointMovedRef.current?.(index, [ll.lng, ll.lat]);
+          onShotEndPointMovedRef.current?.(index, [ll.lng, ll.lat], {
+            anchor: anchorFor(index),
+            distanceFromAnchorM: distanceFromAnchorM(index),
+            nextDistanceM: distanceFromAnchorM(index + 1)
+          });
         });
       }
     }

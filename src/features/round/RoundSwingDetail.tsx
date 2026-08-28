@@ -19,7 +19,7 @@ import type { RoundSwingMetrics, SwingTypeValue } from '@/models';
 import { backswingLengthLabel } from '@/components/swing/SwingMetricDisplay';
 import { FeedbackChips } from '@/features/practice/FeedbackChips';
 import { evaluateSwingMetrics } from '@/services/swingFeedbackEngine';
-import { SWING_DISCLAIMER } from '@/utils/swingLabels';
+import { SWING_DISCLAIMER, tempoVsTarget } from '@/utils/swingLabels';
 import { brand } from '@/theme/theme';
 
 const SWING_TYPE_LABEL: Record<string, string> = {
@@ -148,10 +148,19 @@ function HeroCard({
  * Tempo — the ratio, then the backswing/downswing split drawn to scale so the
  * two phases can be compared by eye rather than by reading two numbers.
  */
-function TempoCard({ metrics }: { metrics: RoundSwingMetrics }) {
+function TempoCard({
+  metrics,
+  swingType
+}: {
+  metrics: RoundSwingMetrics;
+  swingType: SwingTypeValue | string | null;
+}) {
   const back = metrics.backswingTimeMs;
   const down = metrics.downswingTimeMs;
   const hasSplit = back != null && down != null && back > 0 && down > 0;
+  const isPutt = swingType === 'putt';
+  const vs =
+    metrics.tempoRatio != null ? tempoVsTarget(metrics.tempoRatio, swingType) : null;
 
   return (
     <HeroCard
@@ -191,6 +200,43 @@ function TempoCard({ metrics }: { metrics: RoundSwingMetrics }) {
           : 1
         </Typography>
       </Stack>
+
+      {/* What it should have been, and by how much this swing missed it. The
+          ratio on its own is unreadable without the reference — the golfer has
+          no way to know 2.4 is a rushed takeaway and 3.1 is fine. Band and
+          wording match the rules engine so this and the feedback chips can't
+          contradict each other. */}
+      {vs && (
+        <Stack direction="row" alignItems="center" spacing={0.75} sx={{ mt: 0.75 }}>
+          <Typography
+            variant="caption"
+            sx={{ color: 'text.secondary', fontVariantNumeric: 'tabular-nums' }}
+          >
+            Target {vs.target.toFixed(1)} : 1
+          </Typography>
+          <Box
+            component="span"
+            sx={{
+              px: 0.75,
+              py: 0.125,
+              borderRadius: RADIUS,
+              fontSize: '0.68rem',
+              fontWeight: 800,
+              whiteSpace: 'nowrap',
+              fontVariantNumeric: 'tabular-nums',
+              color: vs.within ? 'success.main' : 'warning.main',
+              bgcolor: (t) =>
+                `${vs.within ? t.palette.success.main : t.palette.warning.main}1f`
+            }}
+          >
+            {vs.within
+              ? 'on target'
+              : `${vs.delta > 0 ? '+' : '−'}${Math.abs(vs.delta).toFixed(1)} ${
+                  vs.direction === 'quick' ? 'quick' : 'long'
+                } ${vs.phase}`}
+          </Box>
+        </Stack>
+      )}
 
       {hasSplit && (
         <>
@@ -244,7 +290,9 @@ function TempoCard({ metrics }: { metrics: RoundSwingMetrics }) {
       )}
 
       <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1.5 }}>
-        Backswing to downswing ratio
+        {isPutt
+          ? 'Backstroke to forward-stroke ratio · target is the 2 : 1 putting standard (the forward stroke moves through the ball about twice as fast), not a measurement of your ideal stroke'
+          : 'Backswing to downswing ratio · target is the classic 3 : 1 coaching heuristic, not a measurement of your ideal swing'}
       </Typography>
     </HeroCard>
   );
@@ -470,7 +518,9 @@ export function RoundSwingDetail({
 }) {
   // Feedback rules tolerate missing inputs — a shot with only tempo still gets
   // its tempo verdict, and nothing else fires.
-  const feedback = evaluateSwingMetrics(metrics);
+  // Swing type steers the tempo target (putting is judged at 2:1, not 3:1), so
+  // it has to reach the rules engine — not just the cards.
+  const feedback = evaluateSwingMetrics({ ...metrics, swingType });
   const typeLabel = swingType ? SWING_TYPE_LABEL[swingType] ?? swingType : null;
 
   // The paired top row — tempo and heart rate, the two at-a-glance numbers.
@@ -481,7 +531,7 @@ export function RoundSwingDetail({
     metrics.backswingTimeMs != null ||
     metrics.downswingTimeMs != null
   ) {
-    topCards.push(<TempoCard key="tempo" metrics={metrics} />);
+    topCards.push(<TempoCard key="tempo" metrics={metrics} swingType={swingType} />);
   }
   if (metrics.heartRate != null) {
     topCards.push(<HeartRateCard key="hr" bpm={metrics.heartRate} />);

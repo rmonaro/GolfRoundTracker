@@ -46,6 +46,7 @@ struct GolfWatchApp: App {
 struct RootView: View {
     @EnvironmentObject var session: WatchSession
     @ObservedObject private var practice = PracticeController.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         Group {
@@ -65,6 +66,14 @@ struct RootView: View {
                 }
             }
         }
+        .onChange(of: scenePhase) { _, phase in
+            // HealthKit can only present its authorization sheet — and reliably
+            // start a workout session — while we're in the foreground. Round
+            // detection is started from a background WCSession delivery, so
+            // this is the only moment the round can actually ask. Without it
+            // the round's heart rate stayed 0 for every shot.
+            if phase == .active { RoundShotController.shared.ensureHealthAuthorized() }
+        }
         .onChange(of: session.state.active) { _, isActive in
             if isActive {
                 session.startContinuousLocation()
@@ -74,6 +83,9 @@ struct RootView: View {
                 // channel the round needs for shot recording. endSession()
                 // also notifies the phone so its session is finalized.
                 PracticeController.shared.endSession()
+                // The round just went live while we're on screen — ask for
+                // Health access now, while the sheet can actually be shown.
+                RoundShotController.shared.ensureHealthAuthorized()
             } else {
                 session.stopContinuousLocation()
             }
@@ -85,6 +97,7 @@ struct RootView: View {
             if session.state.active {
                 session.startContinuousLocation()
                 PracticeController.shared.endSession()
+                RoundShotController.shared.ensureHealthAuthorized()
             }
         }
     }

@@ -1151,6 +1151,11 @@ final class RoundShotController: ObservableObject {
         // Keep motion alive wrist-down. No-ops if HealthKit isn't authorized;
         // the standard CMMotionManager path still works while foreground.
         Task { await workout.startSession() }
+        // Heart rate has to survive the workout session failing to start — which
+        // is the common case here, since `start()` is usually reached from a
+        // background WCSession delivery. The stream reads the watch's own
+        // all-day samples and is pushed to us by HealthKit.
+        workout.startHeartRateStream()
         startHeartRateUpkeep()
     }
 
@@ -1160,7 +1165,32 @@ final class RoundShotController: ObservableObject {
         motion.stop()
         heartRateTask?.cancel()
         heartRateTask = nil
+        workout.stopHeartRateStream()
         Task { _ = await workout.stopSession() }
+    }
+
+    /// Present the HealthKit permission sheet if it has never been shown, and
+    /// (re)start anything that failed while backgrounded.
+    ///
+    /// Must be called from a FOREGROUND path. `start()` runs off a WCSession
+    /// application-context delivery, which normally lands with the watch app in
+    /// the background — where HealthKit can neither present its authorization
+    /// sheet nor start a workout session. That is why round shots carried no
+    /// heart rate while practice, which is started by a foreground tap, did:
+    /// the round never got a chance to ask. The watch UI calls this whenever it
+    /// comes to the front during a live round.
+    func ensureHealthAuthorized() {
+        guard isRunning else { return }
+        Task {
+            if !workout.hasRequestedAuthorization {
+                await workout.requestAuthorization()
+            }
+            if !workout.isCollecting {
+                await workout.startSession()
+            }
+            workout.startHeartRateStream()
+            workout.refreshRecentHeartRate()
+        }
     }
 
     /// Keep a heart rate available for the whole round.

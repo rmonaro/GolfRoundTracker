@@ -31,6 +31,13 @@ final class WorkoutManager: NSObject, ObservableObject {
     private let healthStore = HKHealthStore()
     private var session: HKWorkoutSession?
     private var builder: HKLiveWorkoutBuilder?
+    /// Long-running heart-rate observer (see `startHeartRateStream`). Held so it
+    /// can be stopped, and so a second start doesn't stack duplicate queries.
+    private var hrStreamQuery: HKAnchoredObjectQuery?
+    /// True once HealthKit has actually answered an authorization request in a
+    /// context that could present its sheet. Distinct from `isCollecting`: we
+    /// can be authorized and still have no workout running.
+    private var didRequestAuthorization = false
 
     private let hrType = HKQuantityType.quantityType(forIdentifier: .heartRate)!
     private let hrvType = HKQuantityType.quantityType(forIdentifier: .heartRateVariabilitySDNN)!
@@ -73,11 +80,7 @@ final class WorkoutManager: NSObject, ObservableObject {
         guard HKHealthStore.isHealthDataAvailable() else { return false }
         if isCollecting, session != nil { return true }
 
-        let toShare: Set = [HKQuantityType.workoutType()]
-        let toRead: Set<HKObjectType> = [hrType, hrvType, calType]
-        do {
-            try await healthStore.requestAuthorization(toShare: toShare, read: toRead)
-        } catch {
+        guard await requestAuthorization() else {
             // Can't collect live, but stored samples may still be readable.
             refreshRecentHeartRate()
             return false
@@ -118,6 +121,90 @@ final class WorkoutManager: NSObject, ObservableObject {
             return false
         }
     }
+
+    /// Ask HealthKit for the permissions this manager needs, independently of
+    /// starting a workout.
+    ///
+    /// Split out because WHERE this is called from decides whether the user
+    /// ever sees the permission sheet. Round mode's detector is started from a
+    /// `WCSession` application-context delivery, which normally arrives with
+    /// the watch app in the BACKGROUND — HealthKit can't present its sheet
+    /// there, so authorization silently never happened and every round shot
+    /// carried 0 bpm while practice (started by a foreground tap) worked fine.
+    /// Callers now also invoke this from a foreground path so the prompt is
+    /// actually shown.
+    ///
+    /// Returns false only when the request itself failed. HealthKit never
+    /// reports READ denial — a refused read looks exactly like "no data" — so
+    /// a true return is not a promise that samples will arrive.
+    @discardableResult
+    func requestAuthorization() async -> Bool {
+        guard HKHealthStore.isHealthDataAvailable() else { return false }
+        let toShare: Set = [HKQuantityType.workoutType()]
+        let toRead: Set<HKObjectType> = [hrType, hrvType, calType]
+        do {
+            try await healthStore.requestAuthorization(toShare: toShare, read: toRead)
+            didRequestAuthorization = true
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    /// Keep `recentHeartRate` warm for the whole round via a long-running
+    /// anchored query rather than a poll.
+    ///
+    /// The watch samples heart rate on its own all-day schedule, so HealthKit
+    /// has data whether or not our workout session ever started. A polling
+    /// `Task.sleep` loop can't collect it: with no workout running the app has
+    /// no background runtime, gets suspended between strikes, and the timer
+    /// simply doesn't fire. An anchored query's update handler is delivered by
+    /// HealthKit — with background delivery it wakes us — so the fallback stays
+    /// current in exactly the situation the poll was useless in.
+    ///
+    /// Idempotent: a second call while the stream is live is a no-op.
+    func startHeartRateStream() {
+        guard HKHealthStore.isHealthDataAvailable(), hrStreamQuery == nil else { return }
+        let handler: (HKAnchoredObjectQuery, [HKSample]?, [HKDeletedObject]?, HKQueryAnchor?, Error?) -> Void = {
+            [weak self] _, samples, _, _, _ in
+            guard let newest = samples?
+                .compactMap({ $0 as? HKQuantitySample })
+                .max(by: { $0.endDate < $1.endDate }) else { return }
+            let bpm = newest.quantity.doubleValue(for: HKUnit.count().unitDivided(by: .minute()))
+            guard bpm > 0 else { return }
+            Task { @MainActor in self?.recentHeartRate = bpm }
+        }
+        // Only samples from now on — history would just churn the handler.
+        let predicate = HKQuery.predicateForSamples(withStart: Date(), end: nil, options: .strictStartDate)
+        let query = HKAnchoredObjectQuery(
+            type: hrType,
+            predicate: predicate,
+            anchor: nil,
+            limit: HKObjectQueryNoLimit,
+            resultsHandler: handler
+        )
+        query.updateHandler = handler
+        hrStreamQuery = query
+        healthStore.execute(query)
+        // Entitled for it (`com.apple.developer.healthkit.background-delivery`)
+        // — failure here is non-fatal, the stream still delivers while awake.
+        healthStore.enableBackgroundDelivery(for: hrType, frequency: .immediate) { _, _ in }
+        // Seed from storage so a strike in the first seconds isn't blank.
+        refreshRecentHeartRate()
+    }
+
+    /// Tear down the heart-rate stream started by `startHeartRateStream`.
+    func stopHeartRateStream() {
+        if let q = hrStreamQuery {
+            healthStore.stop(q)
+            hrStreamQuery = nil
+        }
+        healthStore.disableBackgroundDelivery(for: hrType) { _, _ in }
+    }
+
+    /// Whether authorization has been requested from somewhere that could show
+    /// the sheet. Callers use it to avoid re-prompting on every foreground.
+    var hasRequestedAuthorization: Bool { didRequestAuthorization }
 
     /// Read the most recent stored heart-rate sample (last 15 minutes) into
     /// `recentHeartRate`. This is what makes a heart rate available when the

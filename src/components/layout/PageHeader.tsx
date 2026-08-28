@@ -8,6 +8,14 @@ interface PageHeaderProps {
   title: string;
   subtitle?: string;
   back?: boolean | string;
+  /**
+   * Replace the current history entry instead of pushing when `back` is a path.
+   *
+   * For a multi-screen flow that should behave like ONE step in history — the
+   * start-a-round screens, say — so that whatever the flow lands on can't be
+   * backed into from its destination.
+   */
+  backReplace?: boolean;
   action?: ReactNode;
 }
 
@@ -15,13 +23,32 @@ interface PageHeaderProps {
 // 'never'), so the title would otherwise sit under the iOS status bar / time.
 // Push it below the safe area + a small gap so it clears the time on every
 // device. Web build keeps the default `pt: 2`.
+//
+// This padding is also what covers the safe area once the header is pinned —
+// see the sticky block below — which is why `MobileShell`'s scroll container
+// no longer applies a top inset of its own. Every screen inside the shell
+// renders a PageHeader, so nothing is left uninset.
 const isNative = Capacitor.isNativePlatform();
 
-export function PageHeader({ title, subtitle, back, action }: PageHeaderProps) {
+export function PageHeader({ title, subtitle, back, backReplace, action }: PageHeaderProps) {
   const navigate = useNavigate();
   return (
     <Box
       sx={{
+        // Pinned: the header stays put and the page scrolls beneath it. Sticky
+        // rather than fixed so it keeps its place in the flow — it needs no
+        // spacer element, and it works unchanged whether the scroll container
+        // is the document (standalone routes) or MobileShell's inner Box.
+        // Every consumer renders this as the first child of a plain root Box,
+        // so there is no clipping/transformed ancestor to break it.
+        position: 'sticky',
+        top: 0,
+        // Above page content, below MUI's modal layer (Dialog 1300 / Drawer
+        // 1200) so sheets and dialogs still cover the header.
+        zIndex: (t) => t.zIndex.appBar,
+        // Opaque, or the content scrolling underneath shows through. Matches
+        // the app background every consumer sits on.
+        bgcolor: 'background.default',
         display: 'flex',
         alignItems: 'center',
         gap: 1,
@@ -33,7 +60,9 @@ export function PageHeader({ title, subtitle, back, action }: PageHeaderProps) {
       {back && (
         <IconButton
           aria-label="Back"
-          onClick={() => (typeof back === 'string' ? navigate(back) : navigate(-1))}
+          onClick={() =>
+            typeof back === 'string' ? navigate(back, { replace: backReplace }) : navigate(-1)
+          }
           sx={{ ml: -1 }}
         >
           <ArrowBackRoundedIcon />

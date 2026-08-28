@@ -127,6 +127,14 @@ export interface SwingFeedback {
   level: 'positive' | 'neutral' | 'attention';
   code: string;
   message: string;
+  /**
+   * Plain-language detail for this specific item, when the generic per-code
+   * copy would be wrong. Set by the rules engine where it knows something the
+   * chip UI doesn't — a putt's tempo is judged against 2:1, so its explanation
+   * can't come from the shared by-code map. Falls back to
+   * `feedbackExplanation(code)` when absent.
+   */
+  explanation?: string;
   /** Always present — compliance labeling. */
   disclaimer: typeof SWING_DISCLAIMER;
 }
