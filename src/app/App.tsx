@@ -8,7 +8,7 @@ import { AppRouter } from '@/router/AppRouter';
 import { AuthProvider } from '@/features/auth/AuthProvider';
 import { SessionHydrator } from '@/features/auth/SessionHydrator';
 import { initMapbox } from '@/features/course/mapbox';
-import { initConnectivity } from '@/services/connectivity';
+import { initConnectivity, isUsablyOnline } from '@/services/connectivity';
 import { initPmtilesProvider } from '@/features/course/pmtilesSetup';
 import { useWatchSync } from '@/features/watch/useWatchSync';
 import { usePracticeWatchSync } from '@/features/practice/usePracticeWatchSync';
@@ -34,7 +34,10 @@ const queryClient = new QueryClient({
       staleTime: 1000 * 30,
       gcTime: 1000 * 60 * 5,
       refetchOnWindowFocus: false,
-      retry: 1
+      // One retry when the network is worth another try — none when we already
+      // know it isn't. A blind retry offline just doubles every spinner, since
+      // each attempt has to burn the full request deadline before it gives up.
+      retry: (failureCount: number) => failureCount < 1 && isUsablyOnline()
     }
   }
 });

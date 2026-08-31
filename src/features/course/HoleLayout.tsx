@@ -11,7 +11,7 @@ import {
 } from './projectHoleCoords';
 import { hasMapbox, mapboxgl } from './mapbox';
 import { useConnectivity } from '@/features/offline/useConnectivity';
-import { useImagerySource } from './useImagerySource';
+import { useImagerySource, reportMapboxUnusable } from './useImagerySource';
 import { TILE_SIZE as PMTILES_TILE_SIZE } from './pmtilesProvider';
 import { formatDistance } from './distance';
 
@@ -232,6 +232,16 @@ interface HoleLayoutProps {
 // Mapbox fills sit on top of satellite imagery, so they're semi-transparent.
 const IMAGERY_SOURCE_ID = 'grt-imagery';
 const IMAGERY_LAYER_ID = 'grt-imagery-layer';
+
+/**
+ * How long a Mapbox-tier map gets to draw before we assume it never will.
+ *
+ * Generous on purpose — this fires against a working-but-slow connection too,
+ * and the cost of being wrong is imagery a zoom level shallower for five
+ * minutes. The cost of NOT having it is a golfer staring at an empty map for
+ * the rest of the round with a downloaded pack on the phone.
+ */
+const MAP_LOAD_TIMEOUT_MS = 12_000;
 
 /**
  * A valid but empty Mapbox style.
@@ -1131,6 +1141,11 @@ export function HoleLayout({
 
     map.on('error', (e) => {
       console.warn('[mapbox] runtime error', e);
+      // On the Mapbox tier a failure is evidence about mapbox.com specifically,
+      // which the Supabase-based connectivity probe cannot see. Say so, and the
+      // tier list re-runs and can hand us a downloaded pack instead of dropping
+      // to the schematic SVG with real imagery sitting on the device.
+      if (imagery.kind === 'mapbox') reportMapboxUnusable();
       // A pack covers the course bbox and nothing else, so panning to its edge
       // MISSES tiles by design and fires one error event per miss. Those are
       // expected, not a broken map — and `mapErrored` is sticky while offline
@@ -1145,9 +1160,28 @@ export function HoleLayout({
       setMapErrored(true);
     });
 
+    // Deadline for the map to actually draw — see the watchdog just below.
+    let loadWatchdog: ReturnType<typeof setTimeout> | null = null;
+
     // Records that tiles actually arrived, which is what lets the map survive a
     // later loss of signal instead of dropping to the SVG mid-round.
-    map.on('load', () => setMapEverLoaded(true));
+    map.on('load', () => {
+      if (loadWatchdog) clearTimeout(loadWatchdog);
+      loadWatchdog = null;
+      setMapEverLoaded(true);
+    });
+
+    // The silent failure, and the one that produced the endless spinner: on a
+    // weak connection Mapbox's tile requests don't error, they just never come
+    // back, so neither `load` nor `error` ever fires and the map sits there
+    // empty. Nothing else in the system notices. Give it a deadline.
+    if (imagery.kind === 'mapbox') {
+      loadWatchdog = setTimeout(() => {
+        loadWatchdog = null;
+        console.warn('[mapbox] no tiles after', MAP_LOAD_TIMEOUT_MS, 'ms — demoting tier');
+        reportMapboxUnusable();
+      }, MAP_LOAD_TIMEOUT_MS);
+    }
 
     // With our own imagery the style starts blank, so the basemap is a raster
     // layer over the PMTiles archive. Added before every other layer so the
@@ -2288,6 +2322,7 @@ export function HoleLayout({
       userMarkerRef.current?.remove();
       userMarkerRef.current = null;
       if (recenterRef) recenterRef.current = null;
+      if (loadWatchdog) clearTimeout(loadWatchdog);
       containerResizeObserver.disconnect();
       container.removeEventListener('pointerdown', markUserMoved);
       container.removeEventListener('wheel', markUserMoved);

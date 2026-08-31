@@ -25,6 +25,45 @@ const PROBE_TIMEOUT_MS = 4000;
 /** Dev-only override, persisted so it survives a reload while testing. */
 const SIMULATE_KEY = 'grt-simulate-offline';
 
+/**
+ * Deadline for an ordinary API request (see `lib/supabase.ts`).
+ *
+ * The reason this exists at all: `fetch` has NO timeout, and one bar of LTE is
+ * a connection that accepts the SYN and then stalls. Without a deadline the
+ * hole screen sits on a spinner for as long as the OS keeps the socket alive —
+ * minutes — even though a complete copy of the course is already on the device.
+ * A request nobody is waiting for is better dead.
+ */
+export const REQUEST_TIMEOUT_MS = 8000;
+
+/**
+ * Edge functions and storage do real work (OSM sync, multi-MB packs) and are
+ * legitimately slow, so they get their own, much longer deadline. They still
+ * get one: a hung upload should end, eventually.
+ */
+export const SLOW_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * Foreground heartbeat. Platform events cover the interface going up and down,
+ * but signal FADING fires nothing at all — the radio stays "connected" while
+ * throughput goes to zero. Without a poll, a golfer walking from the car park
+ * into the trees keeps a stale `online` for the rest of the round.
+ */
+const HEARTBEAT_ONLINE_MS = 45_000;
+/** Poll harder once we think we're degraded so recovery is noticed quickly. */
+const HEARTBEAT_UNHEALTHY_MS = 15_000;
+
+/**
+ * After a real request times out, ignore probe SUCCESSES for this long.
+ *
+ * The probe is a single tiny no-cors GET; on a weak link it can sail through
+ * while a real PostgREST query stalls. Without this, connectivity would flap
+ * online→degraded→online every few seconds, rebuilding the map each time and
+ * sending repos back to the network that just failed them. A genuine request
+ * success still clears it immediately — that's stronger evidence than a probe.
+ */
+const DEGRADED_COOLDOWN_MS = 30_000;
+
 interface ConnectivityState {
   status: ConnectivityStatus;
   /** 'wifi' | 'cellular' | 'none' | 'unknown' — from the platform. */
@@ -40,6 +79,12 @@ let state: ConnectivityState = {
 };
 
 const listeners = new Set<() => void>();
+
+/** While `Date.now()` is below this, a passing probe cannot promote to online. */
+let degradedUntil = 0;
+/** De-dupes overlapping refreshes (heartbeat + event + a failed request). */
+let inflightRefresh: Promise<ConnectivityStatus> | null = null;
+let heartbeatTimer: ReturnType<typeof setTimeout> | null = null;
 
 function emit() {
   for (const l of listeners) l();
@@ -152,9 +197,22 @@ async function probe(): Promise<boolean> {
 
 /**
  * Re-evaluate connectivity now. Called on platform change events, on app resume,
- * and by callers that just saw a request fail unexpectedly.
+ * on the foreground heartbeat, and by callers that just saw a request fail.
+ *
+ * Concurrent calls share one probe — the heartbeat, a network event and a failed
+ * request routinely land together, and three probes down a link that's already
+ * struggling is exactly the wrong thing to do.
  */
-export async function refreshConnectivity(): Promise<ConnectivityStatus> {
+export function refreshConnectivity(): Promise<ConnectivityStatus> {
+  if (!inflightRefresh) {
+    inflightRefresh = runRefresh().finally(() => {
+      inflightRefresh = null;
+    });
+  }
+  return inflightRefresh;
+}
+
+async function runRefresh(): Promise<ConnectivityStatus> {
   if (simulatedOffline()) {
     setState({ status: 'offline', connectionType: 'none' });
     return 'offline';
@@ -177,13 +235,83 @@ export async function refreshConnectivity(): Promise<ConnectivityStatus> {
   }
 
   const reachable = await probe();
-  const status: ConnectivityStatus = reachable ? 'online' : 'degraded';
+  // A probe that passes during the cooldown doesn't get to overrule a real
+  // request that just timed out — see DEGRADED_COOLDOWN_MS.
+  const healthy = reachable && Date.now() >= degradedUntil;
+  const status: ConnectivityStatus = healthy ? 'online' : 'degraded';
   setState({
     status,
     connectionType,
     lastOnlineAt: reachable ? Date.now() : state.lastOnlineAt
   });
   return status;
+}
+
+// --- traffic-driven signal -------------------------------------------------
+//
+// Probing on a timer can only ever be a coarse sample. The app's OWN requests
+// are the best connectivity sensor it has: they run constantly, they use the
+// same host and the same transport, and when one of them stalls the user is
+// already waiting. `lib/supabase.ts` reports every request through here.
+
+/**
+ * A request completed (any HTTP status — a 404 still proves the packets flow).
+ * Cheap and called often, so it must stay allocation-free on the hot path.
+ */
+export function reportRequestSuccess(): void {
+  if (simulatedOffline()) return;
+  degradedUntil = 0;
+  const now = Date.now();
+  // Only churn state when something actually changed. `lastOnlineAt` is
+  // deliberately throttled: every request updating it would re-render every
+  // `useConnectivity` consumer on the page.
+  if (state.status === 'online' && now - (state.lastOnlineAt ?? 0) < 10_000) return;
+  setState({ status: 'online', lastOnlineAt: now });
+}
+
+/**
+ * A request died at the transport layer — timed out, or `fetch` rejected.
+ *
+ * Demote IMMEDIATELY rather than waiting for the probe to come back: the point
+ * is that the next repo call reads its cache instead of queueing behind another
+ * stalled socket. The probe still runs, to sort "gone" from "slow" and to find
+ * the way back.
+ */
+export function reportRequestFailure(reason: 'timeout' | 'network'): void {
+  if (simulatedOffline()) return;
+  if (reason === 'timeout') degradedUntil = Date.now() + DEGRADED_COOLDOWN_MS;
+  if (state.status === 'online') setState({ status: 'degraded' });
+  void refreshConnectivity();
+}
+
+// --- heartbeat -------------------------------------------------------------
+
+function heartbeatDelay(): number {
+  return state.status === 'online' ? HEARTBEAT_ONLINE_MS : HEARTBEAT_UNHEALTHY_MS;
+}
+
+function stopHeartbeat() {
+  if (heartbeatTimer) clearTimeout(heartbeatTimer);
+  heartbeatTimer = null;
+}
+
+/**
+ * Self-rescheduling poll (not setInterval — the cadence depends on the status
+ * the previous tick produced). Runs only while the app is visible; a phone in a
+ * pocket mid-round shouldn't be waking the radio, and `visibilitychange`
+ * already forces a fresh check the moment it comes back out.
+ */
+function startHeartbeat() {
+  stopHeartbeat();
+  if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+  heartbeatTimer = setTimeout(() => {
+    // Recent real traffic is proof enough — skip the probe and save the round
+    // trip. Only an idle app actually needs the heartbeat.
+    const quiet = Date.now() - (state.lastOnlineAt ?? 0) >= HEARTBEAT_ONLINE_MS;
+    const skip = state.status === 'online' && !quiet;
+    const check = skip ? Promise.resolve(state.status) : refreshConnectivity();
+    void check.finally(startHeartbeat);
+  }, heartbeatDelay());
 }
 
 let initialized = false;
@@ -216,6 +344,13 @@ export function initConnectivity() {
   // Coming back from background is the single most likely moment for
   // connectivity to have changed without an event firing.
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') void refreshConnectivity();
+    if (document.visibilityState === 'visible') {
+      void refreshConnectivity();
+      startHeartbeat();
+    } else {
+      stopHeartbeat();
+    }
   });
+
+  startHeartbeat();
 }
