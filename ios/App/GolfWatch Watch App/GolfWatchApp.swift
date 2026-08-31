@@ -99,6 +99,11 @@ struct RootView: View {
             } else {
                 session.stopContinuousLocation()
                 RoundShotController.shared.endRound()
+                #if DEBUG
+                // Never let a simulated position outlive the round that was
+                // being tested with it.
+                SimulatedRoundWalk.shared.reset()
+                #endif
             }
         }
         .onAppear {

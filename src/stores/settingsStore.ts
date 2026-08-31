@@ -23,6 +23,30 @@ interface SettingsState {
    */
   watchShotDetectionEnabled: boolean;
   /**
+   * Draw the current hole as a satellite map behind the watch's on-course
+   * screen. On by default. Turning it off keeps every yardage, control and the
+   * shot detector exactly as they are — the watch just skips MapKit, which
+   * saves the imagery fetches and per-frame polygon rendering on a device that
+   * has to last 18 holes.
+   */
+  watchCourseMapEnabled: boolean;
+  /**
+   * Ask for satellite imagery on the watch map rather than the standard base
+   * map.
+   *
+   * OFF by default, because on current watchOS it does nothing: Apple documents
+   * that watchOS may render the Standard style even when Imagery is requested,
+   * and testing on a physical Apple Watch confirms it always does — its own Maps
+   * app offers no satellite view either.
+   *
+   * The toggle is kept rather than removed because the watch-side overlay
+   * opacities key off it, and because a future watchOS that honours the request
+   * would need only this flipped. Leaving it ON today is actively worse: the
+   * overlays thin themselves out to let a photograph show through, and then no
+   * photograph arrives.
+   */
+  watchMapSatellite: boolean;
+  /**
    * One-time guided tour of the round (hole-tracking) screen. Defaults to
    * false; the first time a user opens the round screen the walkthrough auto-
    * runs, then this flips true so it never auto-opens again. The in-app help
@@ -34,6 +58,8 @@ interface SettingsState {
   setWatchMode: (v: boolean) => void;
   setGpsEnabled: (v: boolean) => void;
   setWatchShotDetection: (v: boolean) => void;
+  setWatchCourseMap: (v: boolean) => void;
+  setWatchMapSatellite: (v: boolean) => void;
   setRoundTourCompleted: (v: boolean) => void;
 }
 
@@ -44,6 +70,8 @@ export const useSettingsStore = create<SettingsState>()(
       watchModeEnabled: false,
       gpsEnabled: false,
       watchShotDetectionEnabled: true,
+      watchCourseMapEnabled: true,
+      watchMapSatellite: false,
       roundTourCompleted: false,
       setThemeMode: (themeMode) => set({ themeMode }),
       toggleTheme: () =>
@@ -52,6 +80,8 @@ export const useSettingsStore = create<SettingsState>()(
       setGpsEnabled: (gpsEnabled) => set({ gpsEnabled }),
       setWatchShotDetection: (watchShotDetectionEnabled) =>
         set({ watchShotDetectionEnabled }),
+      setWatchCourseMap: (watchCourseMapEnabled) => set({ watchCourseMapEnabled }),
+      setWatchMapSatellite: (watchMapSatellite) => set({ watchMapSatellite }),
       setRoundTourCompleted: (roundTourCompleted) => set({ roundTourCompleted })
     }),
     { name: 'grt-settings' }

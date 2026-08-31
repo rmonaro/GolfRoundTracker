@@ -43,11 +43,24 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         CAPPluginMethod(name: "activate", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "isReachable", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "sendState", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "sendCourseMapHole", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "launchWatch", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "endWatchPractice", returnType: CAPPluginReturnPromise)
     ]
 
     private let healthStore = HKHealthStore()
+
+    /// Course-geometry messages accepted from JS before WatchConnectivity was
+    /// ready to take them, flushed in order once it is.
+    ///
+    /// Exists for the same reason `pendingState` does, and was originally — and
+    /// wrongly — omitted: `activate()` is async and JS offers the geometry from
+    /// a sibling effect on the same render as round start, so the session is
+    /// still activating at exactly that moment. Resolving "activating" and
+    /// giving up meant the map was never sent for the whole round.
+    ///
+    /// Order matters (hole 1 first), so this is a queue, not latest-wins.
+    private var pendingCourseMapHoles: [[String: Any]] = []
 
     /// Latest snapshot received from JS while the session was still
     /// activating. WCSession.activate() is async — the JS layer can (and
@@ -210,6 +223,105 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         }
     }
 
+    /// Send ONE hole of course geometry to the watch.
+    ///
+    /// Per-hole `transferUserInfo`, not a single `transferFile`. The file
+    /// transfer was queued successfully by the phone and simply never arrived on
+    /// the watch — reproducibly between paired simulators, and with no way to
+    /// confirm it on device. `transferUserInfo` is the queued, guaranteed, FIFO
+    /// channel this app already moves every watch→phone shot over, and splitting
+    /// by hole keeps each message small enough that payload size is never in
+    /// question. FIFO also means the watch can draw hole 1 while the back nine
+    /// is still in flight.
+    ///
+    /// Best-effort in every failure mode: no watch, not paired, app not
+    /// installed all resolve rather than throw. A golfer without a watch must
+    /// never see this fail.
+    @objc func sendCourseMapHole(_ call: CAPPluginCall) {
+        guard let courseId = call.getString("courseId"),
+              let json = call.getString("json"),
+              !json.isEmpty else {
+            call.reject("sendCourseMapHole requires `courseId` and non-empty `json`")
+            return
+        }
+        guard WCSession.isSupported() else {
+            call.resolve(["sent": false, "reason": "unsupported"])
+            return
+        }
+        let session = WCSession.default
+        if session.delegate == nil { session.delegate = self }
+        if session.activationState == .notActivated { session.activate() }
+
+        let info: [String: Any] = [
+            "kind": "courseMapHole",
+            "courseId": courseId,
+            "courseName": call.getString("courseName") ?? "",
+            "v": call.getInt("v") ?? 1,
+            "total": call.getInt("total") ?? 0,
+            "json": json
+        ]
+
+        if sessionReadyForTransfer() {
+            flushPendingCourseMapHoles()
+            session.transferUserInfo(info)
+            call.resolve([
+                "sent": true,
+                "reason": "queuedToWatch(\(sessionDiagnostics()))",
+                "bytes": json.utf8.count
+            ])
+        } else {
+            queueLock.lock()
+            // Bounded so a phone that never sees a watch can't grow this without
+            // limit — one course is 18 holes, two is already more than anyone
+            // needs queued.
+            if pendingCourseMapHoles.count < 40 { pendingCourseMapHoles.append(info) }
+            queueLock.unlock()
+            call.resolve([
+                "sent": true,
+                "reason": "deferred(\(sessionDiagnostics()))",
+                "bytes": json.utf8.count
+            ])
+        }
+    }
+
+    /// Whether `transferUserInfo` can be handed a message.
+    ///
+    /// Activation ONLY — deliberately not `isPaired` / `isWatchAppInstalled`.
+    /// Those belong on `updateApplicationContext`, which carries live state
+    /// that a missing watch app has no use for. `transferUserInfo` is the
+    /// opposite: it is a queued, deferred-delivery channel whose whole purpose
+    /// is to hold messages until the counterpart shows up, so gating it on the
+    /// counterpart being there right now defeats the mechanism.
+    ///
+    /// It also broke the feature outright. `isWatchAppInstalled` reports false
+    /// on the simulator even with the watch app installed and running, so every
+    /// hole was deferred, the flush re-checked the same false condition, and the
+    /// course was never sent — while the phone cheerfully reported success.
+    private func sessionReadyForTransfer() -> Bool {
+        WCSession.default.activationState == .activated
+    }
+
+    /// Session state, for the status string the watch displays. Cheap, and it
+    /// turns "the map didn't arrive" into a fact instead of a guess.
+    private func sessionDiagnostics() -> String {
+        let session = WCSession.default
+        return "act\(session.activationState.rawValue)"
+            + ",p\(session.isPaired ? 1 : 0)"
+            + ",i\(session.isWatchAppInstalled ? 1 : 0)"
+            + ",r\(session.isReachable ? 1 : 0)"
+    }
+
+    /// Send geometry messages that were held back, oldest first so the watch
+    /// still receives the holes in order.
+    private func flushPendingCourseMapHoles() {
+        guard sessionReadyForTransfer() else { return }
+        queueLock.lock()
+        let queued = pendingCourseMapHoles
+        pendingCourseMapHoles.removeAll()
+        queueLock.unlock()
+        for info in queued { WCSession.default.transferUserInfo(info) }
+    }
+
     // MARK: - WCSessionDelegate
 
     public func session(
@@ -225,6 +337,10 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         // flight. Latest-wins: only the most recent pending snapshot is
         // applied, matching updateApplicationContext's own coalescing.
         if activationState == .activated {
+            // The course geometry is offered at round start, which is normally
+            // BEFORE this callback — flushing it here is what actually gets it
+            // to the watch.
+            flushPendingCourseMapHoles()
             queueLock.lock()
             let toFlush = pendingState
             pendingState = nil
@@ -253,6 +369,13 @@ public class WatchBridgePlugin: CAPPlugin, CAPBridgedPlugin, WCSessionDelegate {
         // activate so we're ready for the next session.
         WCSession.default.activate()
         notifyListeners("sessionStateChanged", data: ["state": "deactivated"])
+    }
+
+    /// Pairing / watch-app-installed state changed. The other moment a held
+    /// transfer becomes sendable: the golfer installed the watch app, or paired
+    /// a watch, after the round had already started.
+    public func sessionWatchStateDidChange(_ session: WCSession) {
+        flushPendingCourseMapHoles()
     }
 
     public func sessionReachabilityDidChange(_ session: WCSession) {

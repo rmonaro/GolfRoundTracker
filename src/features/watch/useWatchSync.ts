@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '@/lib/supabase';
 import { useRoundStore } from '@/stores/roundStore';
@@ -14,6 +14,7 @@ import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
 import { useSettingsStore } from '@/stores/settingsStore';
 import { isUsablyOnline } from '@/services/connectivity';
 import { getCachedCourse } from '@/services/courseCacheRepo';
+import { buildWatchCourseMap, type WatchCourseMap } from '@/services/watchCourseMap';
 
 /**
  * Subscribe the watch to the current round. Activates WCSession on mount and
@@ -37,6 +38,8 @@ export function useWatchSync() {
   const liveSuggestedClubId = useWatchHintsStore((s) => s.liveSuggestedClubId);
   const liveOnGreen = useWatchHintsStore((s) => s.liveOnGreen);
   const shotDetection = useSettingsStore((s) => s.watchShotDetectionEnabled);
+  const courseMapEnabled = useSettingsStore((s) => s.watchCourseMapEnabled);
+  const mapSatellite = useSettingsStore((s) => s.watchMapSatellite);
 
   // Layout query for the current hole — gives us the OSM par + centerline
   // distance for the distance-to-pin reading. Skips when there's no round.
@@ -105,6 +108,102 @@ export function useWatchSync() {
     });
   }, []);
 
+  // Ship the course's hole geometry to the watch ONCE per course, so the watch
+  // can draw the hole behind its on-course screen on its own.
+  //
+  // Deliberately not part of the snapshot: this is bulk reference data, not
+  // live state. It goes out as a queued file transfer (see
+  // `watchBridge.sendCourseMap`), which means it survives the phone being
+  // killed and lands whenever the watch is next reachable — so a golfer who
+  // starts a round in the car park has the map by the first tee even if the
+  // watch was asleep at the moment we sent it.
+  //
+  // Fires on courseId, not on every round: the geometry for a course doesn't
+  // change between rounds, and the watch keeps its own on-disk copy.
+  const sentCourseMapRef = useRef<string | null>(null);
+  // What happened to the course-map transfer, mirrored to the watch so a
+  // missing map can say WHY instead of just being absent.
+  const [courseMapStatus, setCourseMapStatus] = useState<string | null>(null);
+  // The built course, kept so the CURRENT hole's geometry can ride along on the
+  // ordinary state snapshot.
+  //
+  // Belt-and-braces on top of the per-hole transfer, because two separate
+  // queued-delivery APIs (`transferFile`, then `transferUserInfo`) were accepted
+  // by the phone and never arrived on the watch, while `updateApplicationContext`
+  // — the channel every yardage on that screen already rides — worked
+  // throughout. Sending the hole you are standing on over the proven channel
+  // means the map is correct for the hole that matters even if the bulk
+  // transfer never lands. The bulk transfer is still what gives all 18 holes
+  // offline and survives a phone that's switched off.
+  const [builtCourseMap, setBuiltCourseMap] = useState<WatchCourseMap | null>(null);
+  const courseId = active?.courseId ?? null;
+  useEffect(() => {
+    if (!courseMapEnabled) return;
+    if (!courseId) return;
+    if (sentCourseMapRef.current === courseId) return;
+    sentCourseMapRef.current = courseId;
+    setBuiltCourseMap((prev) => (prev?.courseId === courseId ? prev : null));
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // Retry rather than give up on a failure.
+    //
+    // The original code reset the ref on failure and assumed "something will
+    // re-run this" — nothing does: the effect's only deps are courseId and the
+    // setting, neither of which changes again during a round. So a single
+    // transient failure meant the geometry was never sent at all, for the whole
+    // round. Attempts are bounded and spaced, because the failures worth
+    // retrying (WCSession still activating, watch app not yet installed) all
+    // resolve within seconds, and the ones that don't (course has no geometry)
+    // are not retried at all.
+    const attempt = async (remaining: number) => {
+      try {
+        const map = await buildWatchCourseMap(courseId);
+        if (cancelled) return;
+        if (map) setBuiltCourseMap(map);
+        if (!map) {
+          // Nothing to send — this course has no synced geometry. Not a
+          // failure, and retrying would never produce a different answer.
+          setCourseMapStatus('noGeometry');
+          return;
+        }
+        const res = await watchBridge.sendCourseMap(courseId, map);
+        if (cancelled) return;
+        if (res.sent) {
+          // Keep the native reason verbatim — it carries the WCSession state
+          // (activation / paired / installed / reachable), which is the only
+          // thing that distinguishes "handed to WatchConnectivity" from "still
+          // sitting in our own queue". Collapsing them made those two look
+          // identical on the watch and hid exactly the bug that was happening.
+          setCourseMapStatus(res.reason ?? 'sent');
+          return;
+        }
+        setCourseMapStatus(`retry:${res.reason ?? 'failed'}`);
+        if (remaining > 0) {
+          retryTimer = setTimeout(() => void attempt(remaining - 1), 4000);
+        } else {
+          setCourseMapStatus(`failed:${res.reason ?? 'unknown'}`);
+          sentCourseMapRef.current = null;
+        }
+      } catch (err) {
+        console.warn('[watch-sync] course map send failed', err);
+        if (cancelled) return;
+        if (remaining > 0) {
+          retryTimer = setTimeout(() => void attempt(remaining - 1), 4000);
+        } else {
+          setCourseMapStatus('failed:build');
+          sentCourseMapRef.current = null;
+        }
+      }
+    };
+    void attempt(3);
+
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [courseId, courseMapEnabled]);
+
   // Build a fresh snapshot every render (cheap) and only ship if it diverges
   // from the previous one. JSON.stringify diff is fine here: payloads are
   // ~1KB and the comparison is microseconds vs. the cost of a watch wake.
@@ -144,7 +243,11 @@ export function useWatchSync() {
       liveOnGreen,
       holesMeta: holesMetaQuery.data ?? null,
       pinLat,
-      pinLng
+      pinLng,
+      courseMapEnabled,
+      courseMapStatus,
+      builtCourseMap,
+      mapSatellite
     });
     const serialized = JSON.stringify(snapshot);
     if (serialized === lastSentRef.current) return;
@@ -165,7 +268,11 @@ export function useWatchSync() {
     lastShotSummary,
     liveSuggestedClubId,
     liveOnGreen,
-    holesMetaQuery.data
+    holesMetaQuery.data,
+    courseMapEnabled,
+    courseMapStatus,
+    builtCourseMap,
+    mapSatellite
   ]);
 }
 
@@ -204,6 +311,14 @@ interface SnapshotInputs {
   holesMeta: Record<number, HoleMeta> | null;
   pinLat: number | null;
   pinLng: number | null;
+  /** User setting — mirrored so the watch can skip MapKit entirely when off. */
+  courseMapEnabled: boolean;
+  /** Outcome of the course-map transfer, so a watch with no map can say why. */
+  courseMapStatus: string | null;
+  /** Full course geometry, when it has been built for this round. */
+  builtCourseMap: WatchCourseMap | null;
+  /** Ask the watch for satellite imagery rather than the standard base map. */
+  mapSatellite: boolean;
 }
 
 function buildSnapshot({
@@ -222,7 +337,11 @@ function buildSnapshot({
   liveOnGreen,
   holesMeta,
   pinLat,
-  pinLng
+  pinLng,
+  courseMapEnabled,
+  courseMapStatus,
+  builtCourseMap,
+  mapSatellite
 }: SnapshotInputs): WatchRoundState {
   // Slim the bag down to what the watch UI actually renders. Computed up front
   // so it's available even with no active round — practice mode runs off-round
@@ -322,6 +441,13 @@ function buildSnapshot({
       ? liveSuggestedClubId
       : (suggested?.clubId ?? null);
 
+  // Geometry for the hole in play, picked out of the course we already built
+  // for the bulk transfer — no extra work, just a different delivery route.
+  const currentHoleGeometry =
+    courseMapEnabled && builtCourseMap?.courseId === active.courseId
+      ? builtCourseMap.holes.find((h) => h.n === currentHole.holeNumber) ?? null
+      : null;
+
   // Per-hole array so the watch can navigate holes locally (and show tee
   // yardage + suggested club) without a phone roundtrip. Mirrors the
   // current-hole math above for EVERY hole, using the batch OSM meta for
@@ -363,12 +489,20 @@ function buildSnapshot({
       pinLng:
         h.holeNumber === currentHole.holeNumber
           ? pinLng
-          : h.pinLng ?? meta?.pinLng ?? meta?.greenLng ?? null
+          : h.pinLng ?? meta?.pinLng ?? meta?.greenLng ?? null,
+      // Landing positions for this hole's recorded shots, in play order, so the
+      // watch map can dot them and join them into a shot-progress line. Shots
+      // with no GPS are simply absent — the watch is never handed a made-up
+      // position (which is also why this can be shorter than `shots`).
+      shotPoints: h.shots
+        .filter((s) => s.endLat != null && s.endLng != null)
+        .map((s) => ({ lat: s.endLat as number, lng: s.endLng as number }))
     };
   });
 
   return {
     active: true,
+    courseId: active.courseId ?? null,
     courseName: active.courseName,
     holeNumber: currentHole.holeNumber,
     holesPlayed: active.holesPlayed,
@@ -394,6 +528,15 @@ function buildSnapshot({
     holes: holesPreview,
     pinLat,
     pinLng,
+    courseMapEnabled,
+    mapSatellite,
+    courseMapStatus,
+    // Geometry for the hole being played, on the state channel. Only the
+    // current hole: the whole course would be re-sent on every yardage tick,
+    // and one hole is a few KB against an application-context budget of ~256 KB.
+    // `holeGeometryHole` lets the watch skip re-decoding a hole it already has.
+    holeGeometryHole: currentHoleGeometry?.n ?? null,
+    holeGeometry: currentHoleGeometry ? JSON.stringify(currentHoleGeometry) : null,
     bag: slimBag
   };
 }

@@ -8,6 +8,10 @@ import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor
 export interface WatchRoundState {
   /** Null when no round is active — watch shows the "no round" view. */
   active: boolean;
+  /** Course the round is on. The watch keys its cached hole geometry on this,
+   *  so it can tell "I already have this course's map" from "this is a course
+   *  I've never received" without guessing from the name. */
+  courseId?: string | null;
   courseName?: string;
   holeNumber?: number;
   holesPlayed?: number;
@@ -101,7 +105,45 @@ export interface WatchRoundState {
     putts?: number;
     pinLat?: number | null;
     pinLng?: number | null;
+    /**
+     * Where each recorded shot on this hole FINISHED, in play order — the watch
+     * draws them as small numbered dots on its course map and joins them into a
+     * `shotProgressPath`. Only shots that actually carry GPS appear; the watch
+     * is never asked to invent a position for one that doesn't.
+     *
+     * Explicit `lat`/`lng` keys, not a pair, because the phone stores GeoJSON
+     * `[lng, lat]` and the watch builds `CLLocationCoordinate2D(latitude:...)` —
+     * naming them is what keeps that conversion honest.
+     */
+    shotPoints?: Array<{ lat: number; lng: number }>;
   }>;
+  /**
+   * User's "course map on the watch" setting. False → the watch keeps its
+   * existing plain background and skips MapKit entirely (no imagery fetches,
+   * no polygon tessellation, no camera work). Absent → treated as enabled.
+   */
+  courseMapEnabled?: boolean;
+  /** Ask the watch for satellite imagery rather than the standard base map.
+   *  watchOS may still render Standard regardless — see the watch-side note. */
+  mapSatellite?: boolean;
+  /**
+   * What happened to this course's geometry transfer: `sent` | `queued` |
+   * `noGeometry` | `retry:<reason>` | `failed:<reason>`. Purely diagnostic —
+   * the watch surfaces it in DEBUG so an absent map can name its cause instead
+   * of being indistinguishable from every other reason it might be absent.
+   */
+  courseMapStatus?: string | null;
+  /**
+   * Geometry for the hole currently being played, serialized, delivered on the
+   * state channel rather than as a queued transfer. Redundant with the per-hole
+   * transfer by design — see the note in `useWatchSync`: this is the delivery
+   * route that is known to work, so the hole the golfer is standing on draws
+   * even when the bulk transfer never arrives.
+   */
+  holeGeometry?: string | null;
+  /** Hole number `holeGeometry` describes, so the watch can skip re-decoding
+   *  a hole it already holds. */
+  holeGeometryHole?: number | null;
   /**
    * Slim club list the watch can render. Putters land in their own bucket on
    * the watch UI so we mark them; everything else is just name + (optional)
@@ -284,6 +326,16 @@ interface WatchBridgeRawPlugin {
   }>;
   isReachable(): Promise<{ reachable: boolean }>;
   sendState(args: { state: WatchRoundState }): Promise<void>;
+  sendCourseMapHole(args: {
+    courseId: string;
+    courseName: string;
+    v: number;
+    total: number;
+    /** One serialized hole of a `WatchCourseMap`. A JSON string rather than an
+     *  object so the payload crossing both the Capacitor bridge and
+     *  WatchConnectivity is a single plist-safe scalar. */
+    json: string;
+  }): Promise<{ sent: boolean; reason?: string; bytes?: number }>;
   launchWatch(args: { startPractice: boolean }): Promise<{ launched: boolean; reason?: string }>;
   endWatchPractice(): Promise<{ sent: boolean }>;
   addListener(
@@ -384,6 +436,61 @@ export const watchBridge = {
     // via `dict["x"] as? T` returning nil).
     const cleaned = stripNulls(state) as WatchRoundState;
     await Raw.sendState({ state: cleaned });
+  },
+
+  /**
+   * Ship the course's hole geometry to the watch so it can draw the hole behind
+   * the on-course screen without the phone.
+   *
+   * Sent HOLE BY HOLE over `transferUserInfo`. The first implementation sent the
+   * whole course as one `transferFile`; the phone queued it successfully and the
+   * watch never received it — reproducibly between paired simulators, and with
+   * no way to confirm delivery on device. `transferUserInfo` is the queued,
+   * guaranteed, FIFO channel this app already moves every watch→phone shot over,
+   * and one hole per message keeps each payload small enough that size is never
+   * the question. FIFO ordering also means the watch can draw hole 1 while the
+   * back nine is still in flight, instead of waiting for an all-or-nothing
+   * document.
+   *
+   * Not an application context: that channel is latest-wins live state, and
+   * re-sending every polygon on each yardage tick would be pure waste. This is
+   * one-shot reference data — the watch persists it and re-reads it on later
+   * launches, so it's normally sent once per course, ever.
+   */
+  async sendCourseMap(
+    courseId: string,
+    map: unknown
+  ): Promise<{ sent: boolean; reason?: string; bytes?: number }> {
+    if (!isIOSNative) return { sent: false, reason: 'notNative' };
+    const course = map as {
+      v?: number;
+      courseName?: string | null;
+      holes?: unknown[];
+    };
+    const holes = course.holes ?? [];
+    if (holes.length === 0) return { sent: false, reason: 'noHoles' };
+    let bytes = 0;
+    try {
+      for (const hole of holes) {
+        const json = JSON.stringify(hole);
+        bytes += json.length;
+        const res = await Raw.sendCourseMapHole({
+          courseId,
+          courseName: course.courseName ?? '',
+          v: course.v ?? 1,
+          total: holes.length,
+          json
+        });
+        // Stop at the first refusal rather than queueing 17 more messages that
+        // will meet the same wall; the caller retries the whole course.
+        if (!res?.sent) return { sent: false, reason: res?.reason ?? 'failed', bytes };
+      }
+      return { sent: true, bytes };
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'failed';
+      console.warn('[watch] sendCourseMap failed', err);
+      return { sent: false, reason, bytes };
+    }
   },
 
   /**

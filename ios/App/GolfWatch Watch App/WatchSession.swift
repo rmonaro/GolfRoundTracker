@@ -2,6 +2,7 @@ import Foundation
 import WatchConnectivity
 import CoreLocation
 import Combine
+import os
 
 /// Round-state snapshot received from the phone. Mirrors the JS-side
 /// `WatchRoundState` interface in `src/services/watchBridge.ts` — keep the
@@ -38,7 +39,34 @@ struct WatchHole: Equatable, Identifiable {
     let putts: Int?
     let pinLat: Double?
     let pinLng: Double?
+    /// Where each recorded shot on this hole came to rest, in play order — the
+    /// map's shot dots and `shotProgressPath`. Only shots that actually carry
+    /// GPS are sent, so this can be SHORTER than `shots`; the watch never
+    /// invents a position for a stroke that has none.
+    let shotPoints: [CLLocationCoordinate2D]
     var id: Int { holeNumber }
+
+    /// Hand-written because `CLLocationCoordinate2D` is not `Equatable`, so
+    /// synthesis can't reach `shotPoints`. This matters more than it looks:
+    /// `WatchRoundState` equality is what stops a redundant snapshot from
+    /// re-rendering the whole round screen (and re-framing the map), so the
+    /// comparison has to actually cover the shot positions — otherwise a hole
+    /// whose only change was a new shot would compare equal and the dot would
+    /// never appear.
+    static func == (a: WatchHole, b: WatchHole) -> Bool {
+        a.holeNumber == b.holeNumber
+            && a.par == b.par
+            && a.yardage == b.yardage
+            && a.suggestedClubId == b.suggestedClubId
+            && a.shots == b.shots
+            && a.putts == b.putts
+            && a.pinLat == b.pinLat
+            && a.pinLng == b.pinLng
+            && a.shotPoints.count == b.shotPoints.count
+            && zip(a.shotPoints, b.shotPoints).allSatisfy {
+                $0.latitude == $1.latitude && $0.longitude == $1.longitude
+            }
+    }
 
     init?(dict: [String: Any]) {
         guard let holeNumber = dict["holeNumber"] as? Int else { return nil }
@@ -50,11 +78,28 @@ struct WatchHole: Equatable, Identifiable {
         self.putts = dict["putts"] as? Int
         self.pinLat = dict["pinLat"] as? Double
         self.pinLng = dict["pinLng"] as? Double
+        // Explicit lat/lng keys, not an array pair: the phone stores GeoJSON
+        // [lng, lat] and this builds a CLLocationCoordinate2D. Anything that
+        // isn't a valid, non-null-island coordinate is dropped rather than
+        // plotted somewhere in the Atlantic.
+        if let raw = dict["shotPoints"] as? [[String: Any]] {
+            self.shotPoints = raw.compactMap { p in
+                guard let lat = p["lat"] as? Double, let lng = p["lng"] as? Double,
+                      lat.isFinite, lng.isFinite, !(lat == 0 && lng == 0) else { return nil }
+                let c = CLLocationCoordinate2D(latitude: lat, longitude: lng)
+                return CLLocationCoordinate2DIsValid(c) ? c : nil
+            }
+        } else {
+            self.shotPoints = []
+        }
     }
 }
 
 struct WatchRoundState: Equatable {
     let active: Bool
+    /// Course the round is on — the key the watch's cached hole geometry is
+    /// filed under. Nil for a manually-entered course with no geometry.
+    let courseId: String?
     let courseName: String?
     let holeNumber: Int?
     let holesPlayed: Int?
@@ -90,10 +135,27 @@ struct WatchRoundState: Equatable {
     let holes: [WatchHole]
     let pinLat: Double?
     let pinLng: Double?
+    /// User setting. False → the watch skips MapKit entirely and keeps its
+    /// plain background: no imagery fetches, no polygon tessellation, no camera
+    /// work. Absent → treated as enabled.
+    let courseMapEnabled: Bool
+    /// Phone's report on the geometry transfer — `sent` / `queued` /
+    /// `noGeometry` / `failed:<reason>`. Diagnostic only; the watch never
+    /// changes behaviour on it, it just says it out loud in DEBUG.
+    /// Ask MapKit for satellite imagery rather than the standard base map.
+    /// A request only — watchOS may render Standard regardless.
+    let mapSatellite: Bool
+    let courseMapStatus: String?
+    /// Serialized geometry for the hole in play, delivered on the state channel
+    /// (see the note on the JS side). Redundant with the queued per-hole
+    /// transfer on purpose — this is the route known to arrive.
+    let holeGeometry: String?
+    let holeGeometryHole: Int?
     let bag: [WatchClub]
 
     static let empty = WatchRoundState(
         active: false,
+        courseId: nil,
         courseName: nil, holeNumber: nil, holesPlayed: nil, par: nil,
         distanceYards: nil, distanceFeet: nil, scoreVsPar: nil,
         shotsThisHole: nil, puttsThisHole: nil,
@@ -101,11 +163,14 @@ struct WatchRoundState: Equatable {
         recordingShot: false, shotDetection: true, onGreen: false,
         holeComplete: false,
         atCourse: nil, autoTracking: false, lastShotSummary: nil,
-        holes: [], pinLat: nil, pinLng: nil, bag: []
+        holes: [], pinLat: nil, pinLng: nil, courseMapEnabled: true,
+        mapSatellite: false, courseMapStatus: nil,
+        holeGeometry: nil, holeGeometryHole: nil, bag: []
     )
 
     init(
         active: Bool,
+        courseId: String? = nil,
         courseName: String? = nil,
         holeNumber: Int? = nil,
         holesPlayed: Int? = nil,
@@ -127,9 +192,15 @@ struct WatchRoundState: Equatable {
         holes: [WatchHole] = [],
         pinLat: Double? = nil,
         pinLng: Double? = nil,
+        courseMapEnabled: Bool = true,
+        mapSatellite: Bool = false,
+        courseMapStatus: String? = nil,
+        holeGeometry: String? = nil,
+        holeGeometryHole: Int? = nil,
         bag: [WatchClub] = []
     ) {
         self.active = active
+        self.courseId = courseId
         self.courseName = courseName
         self.holeNumber = holeNumber
         self.holesPlayed = holesPlayed
@@ -151,6 +222,11 @@ struct WatchRoundState: Equatable {
         self.holes = holes
         self.pinLat = pinLat
         self.pinLng = pinLng
+        self.courseMapEnabled = courseMapEnabled
+        self.mapSatellite = mapSatellite
+        self.courseMapStatus = courseMapStatus
+        self.holeGeometry = holeGeometry
+        self.holeGeometryHole = holeGeometryHole
         self.bag = bag
     }
 
@@ -158,6 +234,7 @@ struct WatchRoundState: Equatable {
     init?(dict: [String: Any]) {
         guard let active = dict["active"] as? Bool else { return nil }
         self.active = active
+        self.courseId = dict["courseId"] as? String
         self.courseName = dict["courseName"] as? String
         self.holeNumber = dict["holeNumber"] as? Int
         self.holesPlayed = dict["holesPlayed"] as? Int
@@ -187,6 +264,16 @@ struct WatchRoundState: Equatable {
         }
         self.pinLat = dict["pinLat"] as? Double
         self.pinLng = dict["pinLng"] as? Double
+        // Default ON: an older phone build that doesn't send the key should
+        // still get the map, and the setting defaults on there too.
+        self.courseMapEnabled = (dict["courseMapEnabled"] as? Bool) ?? true
+        // Default FALSE, matching the phone's default. watchOS renders its
+        // standard map whatever we request, so assuming imagery would only thin
+        // the overlays out to let through a photograph that never arrives.
+        self.mapSatellite = (dict["mapSatellite"] as? Bool) ?? false
+        self.courseMapStatus = dict["courseMapStatus"] as? String
+        self.holeGeometry = dict["holeGeometry"] as? String
+        self.holeGeometryHole = dict["holeGeometryHole"] as? Int
         if let rawBag = dict["bag"] as? [[String: Any]] {
             self.bag = rawBag.compactMap { WatchClub(dict: $0) }
         } else {
@@ -682,8 +769,20 @@ final class WatchSession: NSObject, ObservableObject {
     /// `allowsBackgroundLocationUpdates` without it is a hard crash, and a
     /// misconfigured build should degrade to the old foreground-only behaviour,
     /// not fail to start a round.
+    ///
+    /// Reads `UIBackgroundModes` specifically. That is the key CoreLocation's
+    /// own `CLClientIsBackgroundable` check consults — on watchOS as well as
+    /// iOS — and checking anything else makes this guard a decoration that
+    /// waves the crash straight through. It did exactly that once: the watch
+    /// target declared `location` in `WKBackgroundModes` (which is for
+    /// extended-runtime session types and which CoreLocation never looks at)
+    /// while `UIBackgroundModes` was an empty array, so this returned true and
+    /// the very next line threw
+    /// "Invalid parameter not satisfying: !stayUp ||
+    ///  CLClientIsBackgroundable(internal->fClient) || _CFMZEnabled()".
+    /// Both keys are needed; only this one gates the API.
     private static let bundleDeclaresLocationBackgroundMode: Bool = {
-        let modes = Bundle.main.object(forInfoDictionaryKey: "WKBackgroundModes") as? [String]
+        let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
         return modes?.contains("location") ?? false
     }()
 
@@ -766,6 +865,17 @@ final class WatchSession: NSObject, ObservableObject {
         if loc.horizontalAccuracy < 0 || loc.horizontalAccuracy > 50 { return nil }
         let pin = CLLocation(latitude: lat, longitude: lng)
         let meters = loc.distance(from: pin)
+        // A "distance to the pin" of more than a mile is not a distance to this
+        // pin. It means the fix belongs somewhere else — the watch hasn't locked
+        // on yet and is handing back the golfer's last known position from home,
+        // or the round is on a course they haven't reached. Reporting it would
+        // put a seven-figure yardage on the screen and, worse, feed the club
+        // recommendation. Nil is the documented "fall back to the static hole
+        // yardage" path, which is right here.
+        //
+        // 1400 m is roughly twice the longest hole ever built, so no legitimate
+        // reading is suppressed.
+        if meters > 1400 { return nil }
         return meters * 1.0936133
     }
 
@@ -975,6 +1085,32 @@ extension WatchSession: WCSessionDelegate {
             // heals itself here and on its own watchdog, instead of needing
             // the golfer to pull out their phone.
             if snapshot.active {
+                // Bring up this course's cached hole geometry if a previous
+                // round already received it. Cheap and idempotent — it
+                // early-returns once the right course is loaded, and this is the
+                // one callback guaranteed to run whether the watch app was
+                // launched before, during or after the transfer arrived.
+                if snapshot.courseMapEnabled, let courseId = snapshot.courseId {
+                    CourseMapStore.shared.ensureLoaded(courseId: courseId)
+                    // Geometry riding along on the snapshot. Only decoded the
+                    // first time this hole is seen — the state channel
+                    // re-delivers on every yardage change.
+                    if let holeNumber = snapshot.holeGeometryHole,
+                       let json = snapshot.holeGeometry,
+                       !CourseMapStore.shared.hasHole(holeNumber, courseId: courseId),
+                       let data = json.data(using: .utf8) {
+                        CourseMapStore.shared.ingestHole(
+                            courseId: courseId,
+                            courseName: snapshot.courseName,
+                            version: WatchCourseMap.supportedVersion,
+                            // total: 0 means "not a bulk transfer" — merge this
+                            // hole in and publish, but don't treat the course as
+                            // complete or write a one-hole document to the cache.
+                            total: 0,
+                            holeJSON: data
+                        )
+                    }
+                }
                 self.startContinuousLocation()
                 // Claim background runtime for the whole round. Must happen for
                 // EVERY active snapshot, not just the round's first: this is
@@ -1041,6 +1177,26 @@ extension WatchSession: WCSessionDelegate {
         _ session: WCSession,
         didReceiveUserInfo userInfo: [String: Any] = [:]
     ) {
+        // Course geometry, one hole per message. Checked before the command
+        // switch because this is data, not a command.
+        if (userInfo["kind"] as? String) == "courseMapHole",
+           let courseId = userInfo["courseId"] as? String,
+           let json = userInfo["json"] as? String,
+           let data = json.data(using: .utf8) {
+            let courseName = userInfo["courseName"] as? String
+            let version = (userInfo["v"] as? Int) ?? 1
+            let total = (userInfo["total"] as? Int) ?? 0
+            Task { @MainActor in
+                CourseMapStore.shared.ingestHole(
+                    courseId: courseId,
+                    courseName: (courseName?.isEmpty ?? true) ? nil : courseName,
+                    version: version,
+                    total: total,
+                    holeJSON: data
+                )
+            }
+            return
+        }
         guard let command = userInfo["watchCommand"] as? String else { return }
         Task { @MainActor in
             switch command {
@@ -1109,6 +1265,23 @@ extension WatchSession: CLLocationManagerDelegate {
         }
     }
 
+    #if DEBUG
+    /// Feed a synthetic fix in as though Core Location had produced it.
+    ///
+    /// Deliberately routed through the real buffer (`lastLocation` +
+    /// `recentFixes`) rather than shimmed into the map alone: a simulated walk
+    /// is only worth anything if it exercises what a real one does — the
+    /// yardages, the live club suggestion, the on-green test and the camera all
+    /// read from here. DEBUG-only, so no part of this can reach a shipping build.
+    @MainActor
+    func debugInjectFix(_ location: CLLocation) {
+        lastLocationCallbackAt = Date()
+        lastLocation = location
+        recentFixes.append(location)
+        pruneRecentFixes()
+    }
+    #endif
+
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
         Task { @MainActor in
@@ -1122,10 +1295,33 @@ extension WatchSession: CLLocationManagerDelegate {
     ) {
         // Silent — UI surfaces "no GPS fix" via lastLocation == nil rather
         // than nagging the user. Drop a console line for debug builds.
-        #if DEBUG
-        print("[watch] location error: \(error)")
-        #endif
+        // `kCLErrorLocationUnknown` (code 0) is Core Location saying "I don't
+        // know yet, still trying" — it is expected while a watch acquires its
+        // first fix, in a simulator with no location set, and under tree cover.
+        // Logging every occurrence buried the MAP_ lines that were actually
+        // being debugged, so it is reported at most once per window.
+        let isTransient = (error as? CLError)?.code == .locationUnknown
+        if !isTransient || Self.shouldLogTransientLocationError() {
+            MapLog.log(.locationError, "\(error.localizedDescription)")
+        }
     }
+}
+
+extension WatchSession {
+    /// Rate-limit for the "location unknown" log. Nonisolated + lock-free: it
+    /// runs on Core Location's queue and only guards a log line, so a race that
+    /// lets two through is not worth a lock.
+    nonisolated static func shouldLogTransientLocationError() -> Bool {
+        let now = Date().timeIntervalSince1970
+        let last = transientLocationErrorLoggedAt.withLock { stamp -> Double in
+            let previous = stamp
+            if now - previous >= 30 { stamp = now }
+            return previous
+        }
+        return now - last >= 30
+    }
+
+    private static let transientLocationErrorLoggedAt = OSAllocatedUnfairLock(initialState: 0.0)
 }
 
 // MARK: - Round-mode strike detection (Phase 1 auto-track gating)

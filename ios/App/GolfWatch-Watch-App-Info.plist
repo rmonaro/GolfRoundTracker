@@ -2,17 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<!-- CoreLocation reads THIS key — not WKBackgroundModes — when deciding
+	     whether `allowsBackgroundLocationUpdates` may be set. Leaving it empty
+	     while declaring `location` below is what threw:
+	       "Invalid parameter not satisfying: !stayUp ||
+	        CLClientIsBackgroundable(internal->fClient) || _CFMZEnabled()"
+	     Both keys are required and they are not interchangeable. -->
 	<key>UIBackgroundModes</key>
-	<array/>
+	<array>
+		<string>location</string>
+	</array>
+	<!-- watchOS extended-runtime session types. `workout-processing` is what
+	     keeps the app scheduled wrist-down for the whole round (started by
+	     RoundShotController's HKWorkoutSession); `location` is the watchOS-side
+	     declaration that pairs with UIBackgroundModes above. -->
 	<key>WKBackgroundModes</key>
 	<array>
-		<!-- Keeps the app running wrist-down for the whole round (motion +
-		     heart rate). Started by RoundShotController's HKWorkoutSession. -->
 		<string>workout-processing</string>
-		<!-- REQUIRED for `allowsBackgroundLocationUpdates`. Without it Core
-		     Location throws when we set that flag, and — worse, silently —
-		     stops delivering fixes the moment the wrist drops, which froze the
-		     live yardage until the golfer opened their phone. -->
 		<string>location</string>
 	</array>
 	<key>NSLocationWhenInUseUsageDescription</key>

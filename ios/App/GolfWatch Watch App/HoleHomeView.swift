@@ -1,4 +1,5 @@
 import SwiftUI
+import CoreLocation
 
 /// Main read view shown when a round is active. Two modes:
 ///   • Idle (default): two-column layout — yards-to-pin + suggested club on
@@ -12,6 +13,12 @@ import SwiftUI
 ///     selected club. Tap to change.
 struct HoleHomeView: View {
     @EnvironmentObject var session: WatchSession
+    /// The watch's cached course geometry. Observed (not just read) so the hole
+    /// appears the moment a transfer lands, even mid-round.
+    @ObservedObject private var courseMap = CourseMapStore.shared
+    /// Always On / wrist-down. The map freezes its camera while dimmed rather
+    /// than animating a screen nobody is looking at.
+    @Environment(\.isLuminanceReduced) private var isLuminanceReduced
     @State private var showingShotFlow = false
     @State private var shotFlowStartingClubId: String?
     /// True while the modal is open in "club picker only" mode (user
@@ -43,21 +50,55 @@ struct HoleHomeView: View {
 
     var body: some View {
         let s = session.state
+        let geometry = mapGeometry(s)
+        let mapOn = s.courseMapEnabled && geometry != nil
 
-        Group {
-            if s.recordingShot {
-                recordingView(s)
-            } else {
-                idleView(s)
-                    .overlay {
-                        // Brief, auto-dismissing overview after a GPS auto-record
-                        // (Track-off / Add Shot). The phone inferred the result.
-                        if let summary = s.lastShotSummary, summary.id != shownSummaryId {
-                            shotOverview(summary)
+        ZStack {
+            // The hole, as the BACKGROUND of the screen the golfer already uses.
+            // Everything below is layered on top, unchanged.
+            //
+            // Rendered only when there is real geometry to draw: a course that
+            // was never OSM-synced, or one whose map hasn't reached the watch
+            // yet, keeps the existing plain background. A blank grey map would
+            // be strictly worse than no map — it would cost battery and imply
+            // the hole data is broken.
+            if mapOn {
+                CourseMapBackground(
+                    geometry: geometry,
+                    player: session.lastLocation?.coordinate,
+                    target: mapTarget(s, geometry: geometry),
+                    targetIsPin: targetIsRealPin(s, geometry: geometry),
+                    shots: displayedHole(s)?.shotPoints ?? [],
+                    useSatellite: s.mapSatellite,
+                    isDimmed: isLuminanceReduced
+                )
+                .ignoresSafeArea()
+                MapReadabilityScrim()
+            }
+
+
+            Group {
+                if s.recordingShot {
+                    recordingView(s)
+                } else {
+                    idleView(s, mapOn: mapOn)
+                        .overlay {
+                            // Brief, auto-dismissing overview after a GPS auto-record
+                            // (Track-off / Add Shot). The phone inferred the result.
+                            if let summary = s.lastShotSummary, summary.id != shownSummaryId {
+                                shotOverview(summary)
+                            }
                         }
-                    }
+                }
             }
         }
+        // Give the stack the whole screen, so the map behind the content has a
+        // definite size to fill.
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // The course file can land before the watch app is ever opened, so the
+        // snapshot handler isn't the only place that needs to try loading it.
+        .onAppear { loadCourseMapIfNeeded(s) }
+        .onChange(of: s.courseId) { _, _ in loadCourseMapIfNeeded(s) }
         // The shot flow is now ONLY the club picker, reached from the club pill.
         // Track / Add Shot never open it — they auto-record via GPS.
         .sheet(isPresented: $showingShotFlow) {
@@ -105,7 +146,7 @@ struct HoleHomeView: View {
 
     /// Two-column read view used during normal play.
     @ViewBuilder
-    private func idleView(_ s: WatchRoundState) -> some View {
+    private func idleView(_ s: WatchRoundState, mapOn: Bool) -> some View {
         VStack(spacing: 4) {
             // Header — hole # left, par badge right. Compact so the columns
             // get most of the screen real estate.
@@ -113,6 +154,9 @@ struct HoleHomeView: View {
                 Text("Hole \(displayedHoleNumber(s).map(String.init) ?? "—")")
                     .font(.headline)
                 Spacer()
+                #if DEBUG
+                simulatedWalkChip(s)
+                #endif
                 setFlagButton
                 if let par = displayedHole(s)?.par ?? s.par {
                     Text("Par \(par)")
@@ -124,11 +168,16 @@ struct HoleHomeView: View {
                         .clipShape(Capsule())
                 }
             }
+            .mapLegibleText(when: mapOn)
 
             HStack(alignment: .top, spacing: 6) {
-                leftColumn(s)
+                leftColumn(s, mapOn: mapOn)
                 rightColumn(s)
             }
+            .mapLegibleText(when: mapOn)
+
+            greenDepthRow(s)
+                .mapLegibleText(when: mapOn)
 
             Spacer(minLength: 2)
 
@@ -139,6 +188,9 @@ struct HoleHomeView: View {
                     .font(.system(size: 9))
                     .foregroundColor(.orange)
             }
+            #if DEBUG
+            mapDiagnostic(s, mapOn: mapOn)
+            #endif
         }
         .padding(.horizontal, 6)
         // When the phone finally processes our hole-nav (it foregrounds and
@@ -622,20 +674,86 @@ struct HoleHomeView: View {
 
     /// LEFT column: big yards-to-pin readout above a small suggested-club button.
     @ViewBuilder
-    private func leftColumn(_ s: WatchRoundState) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+    private func leftColumn(_ s: WatchRoundState, mapOn: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(distanceText(s))
                     .font(.system(size: 36, weight: .heavy, design: .rounded))
                     .minimumScaleFactor(0.5)
                     .lineLimit(1)
+                    // Pure white over imagery. The default label colour is
+                    // slightly translucent, which is invisible against a bunker.
+                    .foregroundStyle(mapOn ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
                 Text(distanceUnit(s))
                     .font(.caption2)
-                    .foregroundColor(.secondary)
+                    .foregroundColor(mapOn ? .white.opacity(0.8) : .secondary)
+            }
+            // What that big number is measured TO. It only ever meant one thing
+            // before, but now that front and back sit under it the golfer has to
+            // be able to tell which of the three the headline is — and "the
+            // middle of the green" and "where the cup is today" are a full club
+            // apart. Only shown when there's a live reading to label.
+            if let label = primaryDistanceLabel(s) {
+                Text(label)
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundColor(mapOn ? .white.opacity(0.75) : .secondary)
+                    .tracking(0.5)
             }
             suggestedClubButton(s)
+                .padding(.top, 2)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Caption for the headline yardage: whether it's measured to a real flag
+    /// or to the middle of the green. Nil while previewing another hole (the
+    /// number is then the static hole yardage, not a distance to anything from
+    /// where the golfer is standing).
+    private func primaryDistanceLabel(_ s: WatchRoundState) -> String? {
+        guard !isPreviewing(s), liveDistanceToDisplayedPin(s) != nil else { return nil }
+        if isOnGreen(s) { return "TO FLAG" }
+        let geometry = mapGeometry(s)
+        return targetIsRealPin(s, geometry: geometry) ? "TO PIN" : "CENTER"
+    }
+
+    /// `F 136        B 162` — the front and back of the green, measured along
+    /// the line the golfer is actually playing.
+    ///
+    /// Derived from the real green polygon (see `HoleMapGeometry.greenDepth`),
+    /// so it appears only for courses whose geometry includes one. A course with
+    /// nothing but a green centroid shows the centre yardage alone rather than a
+    /// made-up depth — a wrong front number is worse than no front number.
+    ///
+    /// Hidden on the green and while previewing another hole, where "front" and
+    /// "back" stop meaning anything and the row would only cost space the putt
+    /// controls need.
+    @ViewBuilder
+    private func greenDepthRow(_ s: WatchRoundState) -> some View {
+        if !isPreviewing(s), !isOnGreen(s),
+           let player = session.lastLocation?.coordinate,
+           let depth = mapGeometry(s)?.greenDepth(from: player) {
+            HStack(spacing: 0) {
+                depthCell("F", GeoMath.yards(fromMeters: GeoMath.distance(player, depth.front)))
+                Spacer(minLength: 4)
+                depthCell("B", GeoMath.yards(fromMeters: GeoMath.distance(player, depth.back)))
+            }
+            .frame(maxWidth: .infinity)
+        }
+    }
+
+    private func depthCell(_ prefix: String, _ yards: Int) -> some View {
+        HStack(spacing: 3) {
+            Text(prefix)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.yellow)
+            Text("\(yards)")
+                .font(.system(size: 14, weight: .heavy, design: .rounded))
+                .foregroundColor(.white)
+        }
+        // Spoken as "Front 136" rather than "F 136" — the abbreviation is a
+        // space compromise for the screen, not for the reader.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(prefix == "F" ? "Front \(yards) yards" : "Back \(yards) yards")
     }
 
     /// RIGHT column: score pill at top, then shots and putts rows beneath.
@@ -841,6 +959,140 @@ struct HoleHomeView: View {
         // No usable fix — the phone's last word is all we have.
         return s.onGreen
     }
+
+    // MARK: - Course map
+
+    /// Resolved geometry for the hole currently on screen.
+    ///
+    /// Keyed on the DISPLAYED hole, not the phone's — stepping ahead with the
+    /// watch arrows should show the next hole's map immediately, for the same
+    /// reason those arrows show its yardage immediately: the pocketed phone
+    /// won't process the navigation until it next runs.
+    private func mapGeometry(_ s: WatchRoundState) -> HoleMapGeometry? {
+        guard s.courseMapEnabled,
+              let courseId = s.courseId,
+              let n = displayedHoleNumber(s) else { return nil }
+        return courseMap.geometry(forHole: n, courseId: courseId)
+    }
+
+    /// Where the golfer is playing to, for the camera and the flag marker.
+    ///
+    /// Same precedence the yardages already use, so the map and the numbers can
+    /// never disagree: the round's pin for this hole (moved on either device
+    /// during THIS round) beats the course's stored pin, which beats the green
+    /// centroid.
+    private func mapTarget(
+        _ s: WatchRoundState,
+        geometry: HoleMapGeometry?
+    ) -> CLLocationCoordinate2D? {
+        if let hole = displayedHole(s), let lat = hole.pinLat, let lng = hole.pinLng {
+            return CLLocationCoordinate2D(latitude: lat, longitude: lng)
+        }
+        if !isPreviewing(s), let lat = s.pinLat, let lng = s.pinLng {
+            return CLLocationCoordinate2D(latitude: lat, longitude: lng)
+        }
+        return geometry?.storedPin ?? geometry?.greenCenter
+    }
+
+    /// True when the target is a genuine flag position rather than the middle
+    /// of the green.
+    ///
+    /// The phone's pin field already falls back to the green centroid when no
+    /// flag has been recorded, so the value alone can't answer this — but the
+    /// two are a full club apart for the golfer, so the map draws them
+    /// differently and the headline yardage labels itself accordingly. Testing
+    /// against the green centroid is what recovers the distinction: within a
+    /// couple of metres of the centroid, it IS the centroid.
+    private func targetIsRealPin(
+        _ s: WatchRoundState,
+        geometry: HoleMapGeometry?
+    ) -> Bool {
+        guard let target = mapTarget(s, geometry: geometry) else { return false }
+        guard let center = geometry?.greenCenter else {
+            // No green centroid to compare against: a pin we were given is the
+            // only position we have, so treat it as real.
+            return true
+        }
+        return GeoMath.distance(target, center) > 2
+    }
+
+    /// Ask the store for this course's cached geometry. Idempotent — it
+    /// early-returns once the right course is loaded.
+    private func loadCourseMapIfNeeded(_ s: WatchRoundState) {
+        guard s.courseMapEnabled, let courseId = s.courseId else { return }
+        courseMap.ensureLoaded(courseId: courseId)
+    }
+
+    #if DEBUG
+    /// Why there is no map, said out loud.
+    ///
+    /// Without this a missing map is a blank — and "the phone never sent it",
+    /// "this course has no OSM geometry", "the file is for a different course"
+    /// and "the setting is off" all look identical, which is exactly the state
+    /// this screen was in when it couldn't be debugged. DEBUG-only: on a real
+    /// round the right behaviour is still to say nothing and quietly keep the
+    /// plain background.
+    @ViewBuilder
+    private func mapDiagnostic(_ s: WatchRoundState, mapOn: Bool) -> some View {
+        if !mapOn, let reason = mapUnavailableReason(s) {
+            Text(reason)
+                .font(.system(size: 8))
+                .foregroundColor(.orange)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
+        }
+    }
+
+    private func mapUnavailableReason(_ s: WatchRoundState) -> String? {
+        guard s.active else { return nil }
+        guard s.courseMapEnabled else { return "map off (phone setting)" }
+        guard let courseId = s.courseId else { return "map: round has no courseId" }
+        if let err = courseMap.lastError { return "map decode failed: \(err)" }
+        guard let loaded = courseMap.course else {
+            // The phone's own report is far more useful than "not received":
+            // it separates "this course has no geometry" from "the transfer
+            // failed" from "it's queued and still in flight".
+            switch s.courseMapStatus {
+            case .some("noGeometry"): return "map: course has no geometry"
+            case .some(let other): return "map: \(other)"
+            case nil: return "map: phone hasn't sent it"
+            }
+        }
+        guard loaded.courseId == courseId else { return "map: loaded a different course" }
+        guard let n = displayedHoleNumber(s) else { return "map: no hole number" }
+        return "map: no geometry for hole \(n) of \(loaded.holes.count)"
+    }
+
+    /// DEBUG-only walk simulator. Tap to step tee → fairway → approach → green
+    /// → off, injecting a fix at each stop through the same buffer Core Location
+    /// writes to, so the yardages, the club suggestion, the on-green test and
+    /// the camera all respond exactly as they would on a real course.
+    ///
+    /// The whole control is inside `#if DEBUG`, so no fake-location affordance
+    /// exists in a shipping build.
+    @ViewBuilder
+    private func simulatedWalkChip(_ s: WatchRoundState) -> some View {
+        let sim = SimulatedRoundWalk.shared
+        Button {
+            let geometry = mapGeometry(s)
+            sim.cycle(geometry: geometry, pin: mapTarget(s, geometry: geometry))
+        } label: {
+            Text(sim.stop.label)
+                .font(.system(size: 8, weight: .heavy))
+                .padding(.horizontal, 4)
+                .padding(.vertical, 1)
+                .background(sim.isActive ? Color.purple.opacity(0.8) : Color.gray.opacity(0.35))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        // Stepping holes re-places the simulated golfer on the new hole,
+        // instead of leaving them standing on the previous fairway.
+        .onChange(of: displayedHoleNumber(s)) { _, _ in
+            let geometry = mapGeometry(s)
+            sim.emit(geometry: geometry, pin: mapTarget(s, geometry: geometry))
+        }
+    }
+    #endif
 
     /// Club recommendation computed ON THE WATCH from its own live distance to
     /// the pin and the bag (both already in the snapshot) — so the suggested club

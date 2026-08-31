@@ -64,6 +64,10 @@ export function SettingsPage() {
   const setGpsEnabled = useSettingsStore((s) => s.setGpsEnabled);
   const watchShotDetectionEnabled = useSettingsStore((s) => s.watchShotDetectionEnabled);
   const setWatchShotDetection = useSettingsStore((s) => s.setWatchShotDetection);
+  const watchCourseMapEnabled = useSettingsStore((s) => s.watchCourseMapEnabled);
+  const setWatchCourseMap = useSettingsStore((s) => s.setWatchCourseMap);
+  const watchMapSatellite = useSettingsStore((s) => s.watchMapSatellite);
+  const setWatchMapSatellite = useSettingsStore((s) => s.setWatchMapSatellite);
   const { data: isAdmin } = useIsAdmin();
   const appMode = useAppModeStore((s) => s.mode);
   const connectivity = useConnectivity();
@@ -320,6 +324,46 @@ export function SettingsPage() {
                 workout session during the round, which uses extra watch
                 battery.
               </Typography>
+              <FormControlLabel
+                sx={{ mt: 1 }}
+                control={
+                  <Switch
+                    checked={watchCourseMapEnabled}
+                    onChange={(e) => setWatchCourseMap(e.target.checked)}
+                  />
+                }
+                label="Course map background"
+              />
+              <Typography variant="caption" color="text.secondary">
+                Shows the current hole as a satellite map behind your yardages on
+                the {watchName()}, with the green, hazards and your recorded
+                shots. Course geometry is sent to the watch once per course, so
+                it keeps working with no signal. Turn off to save watch battery —
+                every yardage and control stays exactly the same.
+              </Typography>
+              {watchCourseMapEnabled && (
+                <>
+                  <FormControlLabel
+                    sx={{ mt: 1 }}
+                    control={
+                      <Switch
+                        checked={watchMapSatellite}
+                        onChange={(e) => setWatchMapSatellite(e.target.checked)}
+                      />
+                    }
+                    label="Satellite imagery"
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    Asks the {watchName()} for aerial photography behind your
+                    hole. <b>Current Apple Watch models ignore this</b> — watchOS
+                    draws its standard map whatever we request, and Apple's own
+                    Maps app has no satellite view either. Left off so the green,
+                    fairway, bunkers and hazards stay bold and readable; turn it
+                    on only if a future watchOS starts honouring it, since the
+                    overlays thin out to let imagery through.
+                  </Typography>
+                </>
+              )}
             </Stack>
           </CardContent>
         </Card>
