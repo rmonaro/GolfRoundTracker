@@ -15,7 +15,7 @@ import { useOutboxStore } from '@/stores/outboxStore';
 import { pendingCount, syncAll } from '@/services/roundSync';
 
 export function SyncStatusChip({ compact = false }: { compact?: boolean }) {
-  const { isOnline } = useConnectivity();
+  const { isOnline, status } = useConnectivity();
   const active = useRoundStore((s) => s.active);
   // Two selectors rather than one liveRounds(s) call: each returns a stable
   // reference, where building an array in a selector would re-render on every
@@ -64,6 +64,11 @@ export function SyncStatusChip({ compact = false }: { compact?: boolean }) {
     tip = isOnline
       ? 'Uploading your round.'
       : 'Saved on this device. It will upload automatically when you have signal.';
+  } else if (status === 'degraded') {
+    // Worth its own wording now that a stalled request demotes us here on its
+    // own: the phone still shows bars, so "Offline" reads as a bug.
+    label = compact ? '' : 'Weak signal';
+    tip = 'The connection is too weak to be useful. Using your downloaded course, and saving this round on the device.';
   } else {
     label = compact ? '' : 'Offline';
     tip = 'No signal. Your round is being saved on this device.';

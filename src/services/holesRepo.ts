@@ -144,78 +144,132 @@ function layoutFromCache(
   return { data: { hole, features }, courseStatus };
 }
 
+type LayoutResult = { data: HoleLayoutData | null; courseStatus: CourseOsmStatus | null };
+
+/**
+ * How long the hole screen will wait for the network when it already has the
+ * course on the device.
+ *
+ * Shorter than the client-wide request deadline on purpose. That deadline is
+ * about giving up; this is about the fact that a golfer standing on the tee has
+ * a perfectly good copy of this hole in IndexedDB, so a few seconds is all the
+ * freshness is worth. The request isn't cancelled — if it lands late it still
+ * warms the cache for the next hole.
+ */
+const CACHED_LAYOUT_PATIENCE_MS = 3500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('layout-timeout')), ms);
+    promise.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
+async function fetchLayoutFromNetwork(
+  courseId: string,
+  holeNumber: number
+): Promise<LayoutResult> {
+  const { data: course, error: courseErr } = await supabase
+    .from('courses')
+    .select('osm_status')
+    .eq('id', courseId)
+    .maybeSingle();
+  if (courseErr) throw toAppError(courseErr, 'Could not load course');
+  if (!course) return { data: null, courseStatus: null };
+
+  const courseStatus = (course.osm_status ?? null) as CourseOsmStatus | null;
+  // Short-circuit when there's no chance of geometry.
+  if (courseStatus === 'skip' || courseStatus === 'no_coverage') {
+    return { data: null, courseStatus };
+  }
+
+  const { data: hole, error: holeErr } = await supabase
+    .from('holes')
+    .select('*')
+    .eq('course_id', courseId)
+    .eq('hole_number', holeNumber)
+    .maybeSingle();
+  if (holeErr) throw toAppError(holeErr, 'Could not load hole geometry');
+  if (!hole) return { data: null, courseStatus };
+
+  // Load EVERY feature for the course, then assign each to its nearest hole
+  // here on read — we deliberately ignore the stored `hole_id`. The OSM sync
+  // assigns features by "first hole whose (60m-expanded) bbox contains the
+  // centroid", but adjacent holes' bboxes overlap, so a feature often lands
+  // on the wrong hole (or none) — leaving some holes with zero features, which
+  // made tap-to-record always fall back to 'rough'. Nearest-hole assignment
+  // is overlap-proof and fixes already-synced courses without a re-sync.
+  const { data: allFeatures, error: featErr } = await supabase
+    .from('hole_features')
+    .select('*')
+    .eq('course_id', courseId);
+  if (featErr) throw toAppError(featErr, 'Could not load hole features');
+
+  const { data: allHoles, error: holesErr } = await supabase
+    .from('holes')
+    .select('id, tee_lng, tee_lat, green_lng, green_lat, centerline')
+    .eq('course_id', courseId);
+  if (holesErr) throw toAppError(holesErr, 'Could not load course holes');
+
+  const features = assignFeaturesToHole(
+    hole as CourseHole,
+    (allHoles ?? []) as Parameters<typeof assignFeaturesToHole>[1],
+    (allFeatures ?? []) as HoleFeature[]
+  );
+
+  return {
+    data: { hole: hole as CourseHole, features },
+    courseStatus
+  };
+}
+
 export const holesRepo = {
   /**
    * Fetch the static hole + all assigned features for rendering. Also returns the
    * parent course's `osm_status` so callers can render the right empty/pending state.
+   *
+   * Cache-aware in BOTH directions, which matters more than it sounds. Gating
+   * only on `isUsablyOnline()` was enough for a clean disconnect, but not for
+   * the way signal actually dies on a course: the status can still say `online`
+   * (it's a sampled value) while this very request is the one discovering that
+   * it isn't. So when the course is on the device we also cap how long we're
+   * willing to wait, and we fall back on any failure — the golfer gets the hole
+   * either way, and never sits on a spinner over data they already have.
    */
-  async getLayout(
-    courseId: string,
-    holeNumber: number
-  ): Promise<{ data: HoleLayoutData | null; courseStatus: CourseOsmStatus | null }> {
+  async getLayout(courseId: string, holeNumber: number): Promise<LayoutResult> {
+    // Read the cache up front so the fallback is in hand before we start
+    // waiting on a socket that may never answer.
+    const cached = await getCachedCourse(courseId).catch(() => null);
+
     // Offline (or online-but-unusable): serve from the downloaded course. This
     // is the whole point of the cache — distance-to-pin and the hole render need
     // coordinates, not connectivity.
-    if (!isUsablyOnline()) {
-      const cached = await getCachedCourse(courseId);
-      if (cached) return layoutFromCache(cached, holeNumber);
-      // No cache and no signal — fall through and let the request fail
-      // normally, so the caller shows its existing error/pending state rather
-      // than a silent blank.
+    if (cached && !isUsablyOnline()) return layoutFromCache(cached, holeNumber);
+
+    const request = fetchLayoutFromNetwork(courseId, holeNumber);
+
+    // No cache — let the request run to the client deadline and fail normally,
+    // so the caller shows its existing error/pending state rather than a silent
+    // blank.
+    if (!cached) return request;
+
+    try {
+      return await withTimeout(request, CACHED_LAYOUT_PATIENCE_MS);
+    } catch {
+      // Swallow the late rejection of the request we walked away from — an
+      // unhandled rejection here would be noise, not information.
+      void request.catch(() => {});
+      return layoutFromCache(cached, holeNumber);
     }
-
-    const { data: course, error: courseErr } = await supabase
-      .from('courses')
-      .select('osm_status')
-      .eq('id', courseId)
-      .maybeSingle();
-    if (courseErr) throw toAppError(courseErr, 'Could not load course');
-    if (!course) return { data: null, courseStatus: null };
-
-    const courseStatus = (course.osm_status ?? null) as CourseOsmStatus | null;
-    // Short-circuit when there's no chance of geometry.
-    if (courseStatus === 'skip' || courseStatus === 'no_coverage') {
-      return { data: null, courseStatus };
-    }
-
-    const { data: hole, error: holeErr } = await supabase
-      .from('holes')
-      .select('*')
-      .eq('course_id', courseId)
-      .eq('hole_number', holeNumber)
-      .maybeSingle();
-    if (holeErr) throw toAppError(holeErr, 'Could not load hole geometry');
-    if (!hole) return { data: null, courseStatus };
-
-    // Load EVERY feature for the course, then assign each to its nearest hole
-    // here on read — we deliberately ignore the stored `hole_id`. The OSM sync
-    // assigns features by "first hole whose (60m-expanded) bbox contains the
-    // centroid", but adjacent holes' bboxes overlap, so a feature often lands
-    // on the wrong hole (or none) — leaving some holes with zero features, which
-    // made tap-to-record always fall back to 'rough'. Nearest-hole assignment
-    // is overlap-proof and fixes already-synced courses without a re-sync.
-    const { data: allFeatures, error: featErr } = await supabase
-      .from('hole_features')
-      .select('*')
-      .eq('course_id', courseId);
-    if (featErr) throw toAppError(featErr, 'Could not load hole features');
-
-    const { data: allHoles, error: holesErr } = await supabase
-      .from('holes')
-      .select('id, tee_lng, tee_lat, green_lng, green_lat, centerline')
-      .eq('course_id', courseId);
-    if (holesErr) throw toAppError(holesErr, 'Could not load course holes');
-
-    const features = assignFeaturesToHole(
-      hole as CourseHole,
-      (allHoles ?? []) as Parameters<typeof assignFeaturesToHole>[1],
-      (allFeatures ?? []) as HoleFeature[]
-    );
-
-    return {
-      data: { hole: hole as CourseHole, features },
-      courseStatus
-    };
   },
 
   /** Admin-flip helpers used by the orientation review queue (Phase 4). */

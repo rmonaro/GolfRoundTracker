@@ -24,6 +24,34 @@ import { PROVIDER_NAME, isPmtilesProviderReady, prepareLocalPack } from './pmtil
 
 export type ImageryKind = 'local-pack' | 'remote-pack' | 'mapbox';
 
+/**
+ * How long the Mapbox tier stays disqualified after it fails to draw.
+ *
+ * Connectivity is measured against Supabase, and on a weak link the two don't
+ * fail together: a tiny probe can still get through while Mapbox's tile
+ * fan-out — dozens of requests, several MB — gets nowhere. That left the map
+ * stuck on a tier that could not render while a downloaded pack sat unused on
+ * the device. `reportMapboxUnusable()` is the map telling the tier list what
+ * the probe cannot see.
+ *
+ * Time-boxed rather than sticky so a connection that recovers gets the sharper
+ * imagery back without the golfer restarting anything.
+ */
+const MAPBOX_COOLDOWN_MS = 5 * 60_000;
+
+let mapboxUnusableUntil = 0;
+const mapboxListeners = new Set<() => void>();
+
+/** Called by the map when Mapbox errors, or simply never draws. */
+export function reportMapboxUnusable(): void {
+  mapboxUnusableUntil = Date.now() + MAPBOX_COOLDOWN_MS;
+  for (const l of mapboxListeners) l();
+}
+
+function mapboxUsable(): boolean {
+  return Date.now() >= mapboxUnusableUntil;
+}
+
 export interface ImagerySource {
   kind: ImageryKind;
   /** PMTiles URL for tiers 1-2; null for Mapbox. */
@@ -49,6 +77,16 @@ const MAPBOX: ImagerySource = {
 export function useImagerySource(courseId: string | null | undefined): ImagerySource {
   const { status } = useConnectivity();
   const [resolved, setResolved] = useState<ImagerySource | null>(null);
+  // Bumped when the map reports Mapbox unusable, so the tier list re-runs.
+  const [mapboxVerdict, setMapboxVerdict] = useState(0);
+
+  useEffect(() => {
+    const onChange = () => setMapboxVerdict((n) => n + 1);
+    mapboxListeners.add(onChange);
+    return () => {
+      mapboxListeners.delete(onChange);
+    };
+  }, []);
 
   // Remote availability is cached — it changes only when the tiler runs.
   const remote = useQuery({
@@ -76,7 +114,9 @@ export function useImagerySource(courseId: string | null | undefined): ImagerySo
 
       // Tier 1 — a usable connection means Mapbox, always. See the header:
       // deeper zooms and fresher imagery than anything we tile ourselves.
-      if (isUsablyOnline()) {
+      // Unless the map has just told us Mapbox isn't drawing (see
+      // MAPBOX_COOLDOWN_MS) — a tier that renders nothing isn't a tier.
+      if (isUsablyOnline() && mapboxUsable()) {
         if (!cancelled) setResolved(MAPBOX);
         return;
       }
@@ -102,11 +142,13 @@ export function useImagerySource(courseId: string | null | undefined): ImagerySo
         }
       }
 
-      // Tier 3 — degraded only. `remote.data` may be a cached value from when
-      // the signal was good, so gate on the live status rather than its
-      // presence: fully offline, the ranged fetch can only hang and fail.
+      // Tier 3 — degraded signal, or a Mapbox that won't draw on a connection
+      // that otherwise works. `remote.data` may be a cached value from when the
+      // signal was good, so gate on the live status rather than its presence:
+      // fully offline, the ranged fetch can only hang and fail.
       const info = remote.data;
-      if (info && status === 'degraded' && !cancelled) {
+      const rangedReadWorthTrying = status === 'degraded' || (status === 'online' && !mapboxUsable());
+      if (info && rangedReadWorthTrying && !cancelled) {
         setResolved({
           kind: 'remote-pack',
           url: info.tilesUrl,
@@ -133,8 +175,9 @@ export function useImagerySource(courseId: string | null | undefined): ImagerySo
     return () => {
       cancelled = true;
     };
-    // `status` is in here so losing or regaining signal re-evaluates the tier.
-  }, [courseId, remote.data, status]);
+    // `status` is in here so losing or regaining signal re-evaluates the tier;
+    // `mapboxVerdict` so a map that can't draw demotes itself.
+  }, [courseId, remote.data, status, mapboxVerdict]);
 
   return resolved ?? { ...MAPBOX, ready: false };
 }
