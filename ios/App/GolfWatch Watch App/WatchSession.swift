@@ -669,7 +669,7 @@ final class WatchSession: NSObject, ObservableObject {
     /// snapshot push woke the watch app for a moment). No watchdog can help
     /// here: while the app is suspended its timers don't fire either.
     ///
-    /// Requires `location` in the watch target's `WKBackgroundModes` — Core
+    /// Requires `location` in the watch target's `UIBackgroundModes` — Core
     /// Location raises otherwise, so this is deliberately guarded on the key
     /// actually being present in the bundle rather than assumed.
     private func enableBackgroundLocation() {
@@ -682,8 +682,16 @@ final class WatchSession: NSObject, ObservableObject {
     /// `allowsBackgroundLocationUpdates` without it is a hard crash, and a
     /// misconfigured build should degrade to the old foreground-only behaviour,
     /// not fail to start a round.
+    ///
+    /// Reads UIBackgroundModes, which is where watchOS declares location.
+    /// This used to read WKBackgroundModes, matching a plist that put
+    /// `location` there — a pairing that was self-consistent and worked on
+    /// device, but which App Store validation rejects ("Invalid Info.plist
+    /// value … for the key 'WKBackgroundModes'"). Both sides have to move
+    /// together: leaving this on the old key would silently return false and
+    /// take background location — and the live yardage with it — back down.
     private static let bundleDeclaresLocationBackgroundMode: Bool = {
-        let modes = Bundle.main.object(forInfoDictionaryKey: "WKBackgroundModes") as? [String]
+        let modes = Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
         return modes?.contains("location") ?? false
     }()
 
