@@ -72,11 +72,21 @@ struct RootView: View {
             // detection is started from a background WCSession delivery, so
             // this is the only moment the round can actually ask. Without it
             // the round's heart rate stayed 0 for every shot.
-            if phase == .active { RoundShotController.shared.ensureHealthAuthorized() }
+            if phase == .active {
+                RoundShotController.shared.ensureHealthAuthorized()
+                // Coming back on screen is also the cheapest moment to notice
+                // the GPS feed died while we were away and restart it, so the
+                // yardage is right by the time the golfer has read it.
+                if session.state.active {
+                    session.startContinuousLocation()
+                    RoundShotController.shared.beginRound()
+                }
+            }
         }
         .onChange(of: session.state.active) { _, isActive in
             if isActive {
                 session.startContinuousLocation()
+                RoundShotController.shared.beginRound()
                 // A round taking over ends any practice session. The two modes
                 // are mutually exclusive: leaving practice armed keeps the
                 // motion sensors running and floods the shared WCSession
@@ -88,6 +98,7 @@ struct RootView: View {
                 RoundShotController.shared.ensureHealthAuthorized()
             } else {
                 session.stopContinuousLocation()
+                RoundShotController.shared.endRound()
             }
         }
         .onAppear {
@@ -96,6 +107,7 @@ struct RootView: View {
             // after starting on the phone).
             if session.state.active {
                 session.startContinuousLocation()
+                RoundShotController.shared.beginRound()
                 PracticeController.shared.endSession()
                 RoundShotController.shared.ensureHealthAuthorized()
             }

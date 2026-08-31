@@ -1055,14 +1055,24 @@ export function HoleLayout({
     const bearing = teeToGreenBearing(hole) ?? 0;
     const centerLng = (hole.tee_lng + hole.green_lng) / 2;
     const centerLat = (hole.tee_lat + hole.green_lat) / 2;
-    // Pin position — per-round override (e.g. dragged-by-user pin) wins over
-    // the course-level green centroid. Used for the flag marker, aim-line
-    // endpoint, puttingBounds center, and direction inference on tap. The
-    // centerline + bearing stay tied to the course coords so the playing-line
-    // orientation doesn't shift when the cup moves a few meters.
+    // Pin position, most specific first:
+    //   1. `pinOverride` — the live round's own flag (moved on the phone or the
+    //      watch this round), which the tracking page passes in.
+    //   2. The hole's stored pin — where the flag was last recorded for this
+    //      hole. This is what `movePin` writes through to, so a round replayed
+    //      later (the summary map) still puts the flag where it actually was
+    //      instead of snapping back to the green centroid.
+    //   3. The green centroid — the course geometry, when nobody has ever
+    //      placed a flag.
+    // Used for the flag marker, aim-line endpoint, puttingBounds center, and
+    // direction inference on tap. The centerline + bearing stay tied to the
+    // course coords so the playing-line orientation doesn't shift when the cup
+    // moves a few meters.
     const effectivePin: [number, number] = pinOverride
       ? pinOverride
-      : [hole.green_lng, hole.green_lat];
+      : hole.pin_lng != null && hole.pin_lat != null
+        ? [hole.pin_lng, hole.pin_lat]
+        : [hole.green_lng, hole.green_lat];
 
     let map: mapboxgl.Map;
     try {
@@ -1966,6 +1976,45 @@ export function HoleLayout({
     // Capture the callback as a local so the loop reads from the ref
     // once (whether dots should be draggable is decided per-marker).
     const moveCb = onShotEndPointMovedRef.current;
+
+    // Fan out dots that share a landing point.
+    //
+    // Every putt recorded from the on-green panel stores its end as the CUP, so
+    // a two-putt hole stacks two dots perfectly on top of each other and the map
+    // reads as two shots fewer than the scorecard ("it said 4 shots but the map
+    // only had 2"). Shots that genuinely finished within a few inches of each
+    // other have the same problem.
+    //
+    // The spread is applied as the marker's PIXEL offset, not by moving the
+    // coordinate: `marker.getLngLat()` still returns the true position, so drag
+    // geometry, the recap path, the anchor chain and anything saved back to the
+    // database are all untouched. It is purely how the dot is drawn.
+    const fanOffsets: Array<[number, number]> = shotEndPoints.map(() => [0, 0]);
+    {
+      // ~1e-6° ≈ 0.11 m — closer than GPS can distinguish, so "the same spot".
+      const clusters = new Map<string, number[]>();
+      shotEndPoints.forEach((pt, i) => {
+        const key = `${pt[0].toFixed(6)},${pt[1].toFixed(6)}`;
+        const bucket = clusters.get(key);
+        if (bucket) bucket.push(i);
+        else clusters.set(key, [i]);
+      });
+      for (const members of clusters.values()) {
+        if (members.length < 2) continue;
+        // Grow the ring with the cluster so 4+ dots don't re-collide. The disk
+        // is 20px, so ~14px of radius already separates a pair cleanly.
+        const radius = 14 + (members.length - 2) * 4;
+        members.forEach((idx, k) => {
+          // Start at the top and go clockwise — reads as a fan around the spot.
+          const angle = -Math.PI / 2 + (2 * Math.PI * k) / members.length;
+          fanOffsets[idx] = [
+            Math.round(Math.cos(angle) * radius),
+            Math.round(Math.sin(angle) * radius)
+          ];
+        });
+      }
+    }
+
     const shotDots: HTMLDivElement[] = [];
     const shotBoxes: (HTMLDivElement | null)[] = [];
     // The orange distance cell of each info box, so a drag can rewrite the
@@ -2116,6 +2165,9 @@ export function HoleLayout({
       const marker = new mapboxgl.Marker({
         element: dot,
         anchor: 'center',
+        // Screen-space only — see `fanOffsets`. Zero for every dot that
+        // doesn't share its landing point with another.
+        offset: fanOffsets[i],
         draggable: moveCb != null
       })
         .setLngLat(pt)

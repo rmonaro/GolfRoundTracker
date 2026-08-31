@@ -648,12 +648,44 @@ final class WatchSession: NSObject, ObservableObject {
         if !continuousLocationActive {
             continuousLocationActive = true
             lastLocationCallbackAt = Date()
+            enableBackgroundLocation()
             locationManager.startUpdatingLocation()
         } else {
+            // Re-assert the background flag as well: it is cleared on stop, and
+            // a start/stop/start cycle would otherwise resume a FOREGROUND-ONLY
+            // feed that dies again at the next wrist drop.
+            enableBackgroundLocation()
             ensureLocationFlowing()
         }
         startLocationWatchdog()
     }
+
+    /// Opt the location feed into background delivery.
+    ///
+    /// Without this Core Location stops calling us the moment watchOS moves the
+    /// app off screen — which, during a round, is most of the time. The
+    /// yardage then froze at whatever it read when the wrist last came up, and
+    /// the only thing that appeared to fix it was opening the PHONE (its
+    /// snapshot push woke the watch app for a moment). No watchdog can help
+    /// here: while the app is suspended its timers don't fire either.
+    ///
+    /// Requires `location` in the watch target's `WKBackgroundModes` — Core
+    /// Location raises otherwise, so this is deliberately guarded on the key
+    /// actually being present in the bundle rather than assumed.
+    private func enableBackgroundLocation() {
+        guard Self.bundleDeclaresLocationBackgroundMode else { return }
+        guard !locationManager.allowsBackgroundLocationUpdates else { return }
+        locationManager.allowsBackgroundLocationUpdates = true
+    }
+
+    /// Whether Info.plist declares the `location` background mode. Setting
+    /// `allowsBackgroundLocationUpdates` without it is a hard crash, and a
+    /// misconfigured build should degrade to the old foreground-only behaviour,
+    /// not fail to start a round.
+    private static let bundleDeclaresLocationBackgroundMode: Bool = {
+        let modes = Bundle.main.object(forInfoDictionaryKey: "WKBackgroundModes") as? [String]
+        return modes?.contains("location") ?? false
+    }()
 
     func stopContinuousLocation() {
         guard continuousLocationActive else { return }
@@ -663,6 +695,11 @@ final class WatchSession: NSObject, ObservableObject {
         // Only call stop if no pending shot capture is also using it.
         if pendingShotStart == nil {
             locationManager.stopUpdatingLocation()
+            // Drop back to foreground-only so an idle watch isn't holding the
+            // GPS awake between rounds. Re-armed by startContinuousLocation.
+            if Self.bundleDeclaresLocationBackgroundMode {
+                locationManager.allowsBackgroundLocationUpdates = false
+            }
         }
     }
 
@@ -939,6 +976,14 @@ extension WatchSession: WCSessionDelegate {
             // the golfer to pull out their phone.
             if snapshot.active {
                 self.startContinuousLocation()
+                // Claim background runtime for the whole round. Must happen for
+                // EVERY active snapshot, not just the round's first: this is
+                // the one callback guaranteed to run while suspended, so it is
+                // where a workout session that failed (or was ended by the OS)
+                // gets another chance.
+                RoundShotController.shared.beginRound()
+            } else {
+                RoundShotController.shared.endRound()
             }
             // Reconcile round-mode strike detection against the desired state:
             // run only during a live round AND when the user's shot-detection
@@ -1102,7 +1147,20 @@ extension WatchSession: CLLocationManagerDelegate {
 final class RoundShotController: ObservableObject {
     static let shared = RoundShotController()
 
+    /// Motion-based strike detection is streaming. Follows the golfer's
+    /// shot-detection setting.
     @Published private(set) var isRunning = false
+
+    /// A round is live, whether or not strike detection is on.
+    ///
+    /// This — not `isRunning` — is what owns the `HKWorkoutSession`, because the
+    /// workout session is the ONLY thing that keeps this app scheduled while
+    /// the wrist is down, and everything the round needs in that state (live
+    /// GPS yardage, the location watchdog, heart rate) dies with it. Tying it
+    /// to strike detection meant a golfer who turned shot detection off got a
+    /// watch that suspended between glances and a yardage frozen until they
+    /// opened their phone.
+    @Published private(set) var roundActive = false
 
     private let motion = SwingMotionService()
     private let workout = WorkoutManager()
@@ -1140,6 +1198,51 @@ final class RoundShotController: ObservableObject {
         motion.onSwing = { [weak self] metrics in self?.handleStrike(metrics) }
     }
 
+    /// Mark the round live and claim background runtime for it. Idempotent —
+    /// safe to call from every snapshot delivery and every foreground.
+    ///
+    /// Deliberately independent of `start()`: the workout session is background
+    /// RUNTIME, not a shot-detection detail. Without it watchOS suspends the app
+    /// on the first wrist drop, and the live GPS feed, its watchdog and the
+    /// heart-rate upkeep all stop with it.
+    func beginRound() {
+        guard !roundActive else {
+            // Already live — but a session can have died since (HealthKit
+            // refused it while backgrounded, or it failed mid-round). The
+            // upkeep loop retries on its own; nudge it here too since this is
+            // a guaranteed runtime window.
+            if !workout.isCollecting { Task { await workout.startSession() } }
+            return
+        }
+        roundActive = true
+        // A round supersedes practice, and the two can't share an
+        // HKWorkoutSession — starting ours while practice still holds one makes
+        // both fail. RootView ends practice on the same transition, but this can
+        // also be reached from a background snapshot delivery, so don't rely on
+        // the view having run first.
+        PracticeController.shared.endSession()
+        // Keep the app alive wrist-down. No-ops if HealthKit isn't authorized;
+        // the standard CMMotionManager path still works while foreground.
+        Task { await workout.startSession() }
+        // Heart rate has to survive the workout session failing to start — which
+        // is the common case here, since this is usually reached from a
+        // background WCSession delivery. The stream reads the watch's own
+        // all-day samples and is pushed to us by HealthKit.
+        workout.startHeartRateStream()
+        startHeartRateUpkeep()
+    }
+
+    /// Round over — release the workout session and the heart-rate plumbing.
+    func endRound() {
+        guard roundActive else { return }
+        roundActive = false
+        stop()
+        heartRateTask?.cancel()
+        heartRateTask = nil
+        workout.stopHeartRateStream()
+        Task { _ = await workout.stopSession() }
+    }
+
     func start() {
         guard !isRunning else { return }
         // Practice owns the motion stream when active — don't fight it.
@@ -1148,25 +1251,12 @@ final class RoundShotController: ObservableObject {
         nextImpactId = 1
         lastImpactAt = .distantPast
         motion.start()
-        // Keep motion alive wrist-down. No-ops if HealthKit isn't authorized;
-        // the standard CMMotionManager path still works while foreground.
-        Task { await workout.startSession() }
-        // Heart rate has to survive the workout session failing to start — which
-        // is the common case here, since `start()` is usually reached from a
-        // background WCSession delivery. The stream reads the watch's own
-        // all-day samples and is pushed to us by HealthKit.
-        workout.startHeartRateStream()
-        startHeartRateUpkeep()
     }
 
     func stop() {
         guard isRunning else { return }
         isRunning = false
         motion.stop()
-        heartRateTask?.cancel()
-        heartRateTask = nil
-        workout.stopHeartRateStream()
-        Task { _ = await workout.stopSession() }
     }
 
     /// Present the HealthKit permission sheet if it has never been shown, and
@@ -1180,7 +1270,7 @@ final class RoundShotController: ObservableObject {
     /// the round never got a chance to ask. The watch UI calls this whenever it
     /// comes to the front during a live round.
     func ensureHealthAuthorized() {
-        guard isRunning else { return }
+        guard roundActive else { return }
         Task {
             if !workout.hasRequestedAuthorization {
                 await workout.requestAuthorization()
@@ -1208,11 +1298,15 @@ final class RoundShotController: ObservableObject {
         heartRateTask?.cancel()
         heartRateTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self, self.isRunning else { return }
+                guard let self, self.roundActive else { return }
                 if !self.workout.isCollecting {
                     await self.workout.startSession()
                 }
                 self.workout.refreshRecentHeartRate()
+                // Second chance for the GPS feed. Its own 5s watchdog is the
+                // primary; this one survives that task being torn down and
+                // costs nothing (it no-ops while fixes are flowing).
+                WatchSession.shared.ensureLocationFlowing()
                 try? await Task.sleep(nanoseconds: 60_000_000_000)
             }
         }

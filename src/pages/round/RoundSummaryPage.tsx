@@ -2002,6 +2002,11 @@ function HoleMapDialog({
   // Bumped each time the player taps "Recap" — triggers the tee → shots → pin
   // replay animation in HoleLayout. Reset when the dialog closes.
   const [recapToken, setRecapToken] = useState(0);
+  // Id of the untracked shot the next map tap should place, armed by tapping
+  // its chip in the untracked strip below the map. Lets the golfer fix ONE
+  // named shot without entering edit mode or working through the queue in
+  // shot-number order.
+  const [placingShotId, setPlacingShotId] = useState<string | null>(null);
   // Optimistic per-shot drag positions, keyed by shot.id. Drag-end sets
   // this immediately so the dot stays at the new spot even before the
   // network round-trip completes — without it, leaving edit mode flips
@@ -2018,8 +2023,14 @@ function HoleMapDialog({
       setRecapToken(0);
       setEditMode(false);
       setAddingShot(false);
+      setPlacingShotId(null);
     }
   }, [open]);
+  // Switching holes drops an armed placement — the shot it referred to isn't
+  // on this map any more.
+  useEffect(() => {
+    setPlacingShotId(null);
+  }, [holeNumber]);
   const hole = holes.find((h) => h.hole_number === holeNumber) ?? null;
 
   // All shots for this hole in play order — used to discover the
@@ -2045,6 +2056,14 @@ function HoleMapDialog({
     () => allShotsForHole.filter((s) => s.end_lat == null || s.end_lng == null),
     [allShotsForHole]
   );
+
+  // Disarm once the placed shot has coords (or was deleted) — otherwise the
+  // next tap would silently re-place a shot the golfer has already fixed.
+  useEffect(() => {
+    if (placingShotId && !unmappedShots.some((s) => s.id === placingShotId)) {
+      setPlacingShotId(null);
+    }
+  }, [placingShotId, unmappedShots]);
 
   const shotEndPoints = useMemo<Array<[number, number]>>(
     () =>
@@ -2150,8 +2169,13 @@ function HoleMapDialog({
   ///     landing point.
   /// The callback is undefined (no-op tap) when neither applies.
   const onShotLanded = useMemo(() => {
-    if (!editMode) return undefined;
-    if (!addingShot && unmappedShots.length === 0) return undefined;
+    // Armed from the untracked strip — placing one named shot doesn't need the
+    // full edit mode (and must not be blocked by it being off).
+    const armed = placingShotId
+      ? unmappedShots.find((s) => s.id === placingShotId) ?? null
+      : null;
+    if (!editMode && !armed) return undefined;
+    if (editMode && !addingShot && unmappedShots.length === 0) return undefined;
     return async (data: {
       start: [number, number];
       end: [number, number];
@@ -2159,7 +2183,7 @@ function HoleMapDialog({
       inferredLie: Lie | null;
       inferredTargetResult: TargetResult | null;
     }) => {
-      if (addingShot) {
+      if (addingShot && editMode) {
         if (!hole) return;
         // Map the inferred lie onto a shot_result bucket; default to fairway.
         const lieResult: Record<string, ShotResult> = {
@@ -2204,7 +2228,9 @@ function HoleMapDialog({
         }
         return;
       }
-      const target = unmappedShots[0];
+      // The chip the golfer armed wins; otherwise fall back to the queue in
+      // shot-number order (the long-standing edit-mode behaviour).
+      const target = armed ?? unmappedShots[0];
       if (!target) return;
       try {
         await roundRepo.updateShot(target.id, {
@@ -2212,12 +2238,22 @@ function HoleMapDialog({
           end_lng: data.end[0],
           calculated_distance: data.calculatedDistanceM
         });
+        setPlacingShotId(null);
         queryClient.invalidateQueries({ queryKey: ['round-detail', roundId] });
       } catch (err) {
         console.error('[summary] add shot position failed', err);
       }
     };
-  }, [editMode, addingShot, unmappedShots, allShotsForHole, hole, queryClient, roundId]);
+  }, [
+    editMode,
+    addingShot,
+    placingShotId,
+    unmappedShots,
+    allShotsForHole,
+    hole,
+    queryClient,
+    roundId
+  ]);
 
   // Reorder / delete for the map's Edit-mode shot list. Both renumber the hole
   // to keep it 1..N and refetch so the dots relabel.
@@ -2276,11 +2312,14 @@ function HoleMapDialog({
             Hole {holeNumber ?? '—'} map
           </Typography>
           {hole && (
+            /* Lead with the hole's REAL stroke count, then qualify how many of
+               them have no position. Leading with "2 tracked shots" on a hole
+               the golfer scored 4 on reads as the map having lost two shots. */
             <Typography variant="caption" color="text.secondary">
-              Par {hole.par} · {shotEndPoints.length}{' '}
-              {shotEndPoints.length === 1 ? 'tracked shot' : 'tracked shots'}
+              Par {hole.par} · {allShotsForHole.length}{' '}
+              {allShotsForHole.length === 1 ? 'shot' : 'shots'}
               {unmappedShots.length > 0
-                ? ` · ${unmappedShots.length} untracked`
+                ? ` (${unmappedShots.length} untracked)`
                 : ''}
             </Typography>
           )}
@@ -2487,6 +2526,41 @@ function HoleMapDialog({
           />
         )}
       </Box>
+      {/* Untracked strip — the shots on this hole that carry no GPS, so they
+          can't be drawn. Without it the map silently shows fewer dots than the
+          score (a watch whose GPS feed stalled records the stroke but no
+          position). Tapping a chip arms the next map tap to place that shot,
+          which works without entering edit mode. */}
+      {unmappedShots.length > 0 && (
+        <Box sx={{ px: 2, pb: 'calc(env(safe-area-inset-bottom) + 8px)' }}>
+          <Stack direction="row" alignItems="center" flexWrap="wrap" gap={0.75}>
+            <Typography variant="caption" color="text.secondary">
+              {placingShotId
+                ? 'Tap the map to place'
+                : `No position recorded — tap to place`}
+            </Typography>
+            {unmappedShots.map((s) => {
+              const club = s.club_id ? bag.find((c) => c.clubId === s.club_id) : null;
+              const clubLabel = club ? club.customName || club.name : null;
+              const armed = placingShotId === s.id;
+              return (
+                <Chip
+                  key={s.id}
+                  size="small"
+                  clickable
+                  color={armed ? 'primary' : 'default'}
+                  variant={armed ? 'filled' : 'outlined'}
+                  label={`#${s.shot_number}${clubLabel ? ` · ${clubLabel}` : ''}`}
+                  onClick={() =>
+                    setPlacingShotId((cur) => (cur === s.id ? null : s.id))
+                  }
+                  sx={{ fontWeight: 700 }}
+                />
+              );
+            })}
+          </Stack>
+        </Box>
+      )}
     </Dialog>
   );
 }
