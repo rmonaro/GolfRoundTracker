@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "lint": "eslint . --ext .ts,.tsx",
     "typecheck": "tsc -b --noEmit",
+    "typecheck:functions": "deno check supabase/functions/*/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "cap:sync": "npm run build && cap sync",

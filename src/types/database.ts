@@ -69,7 +69,7 @@ export interface UserBagRow {
   order_position: number;
 }
 
-export type CourseSource = 'user' | 'api';
+export type CourseSource = 'user' | 'api' | 'opengolf';
 export type CourseOsmStatus = 'pending' | 'synced' | 'no_coverage' | 'failed' | 'skip';
 
 export interface CourseRow {
@@ -86,6 +86,8 @@ export interface CourseRow {
   zip: string | null;
   // Course library (migration 007)
   course_api_id: string | null;
+  /** OpenGolfAPI course UUID (ODbL) — migration 037. */
+  opengolf_id: string | null;
   club_name: string | null;
   country: string | null;
   lat: number | null;
@@ -95,6 +97,9 @@ export interface CourseRow {
   osm_synced_at: string | null;
   osm_status: CourseOsmStatus | null;
   osm_error: string | null;
+  /** Multi-course OSM extract: keep only holes whose `ref` label contains this
+   *  (e.g. "Cattail"). Null keeps every hole — migration 039. */
+  osm_hole_ref_filter: string | null;
   source: CourseSource | null;
   created_by_user: string | null;
   // Admin verification (migration 030). `verified` courses are visible to every
@@ -120,7 +125,7 @@ export interface CourseRow {
 }
 
 export type TeeGender = 'male' | 'female';
-export type CourseTeeSource = 'api' | 'osm' | 'manual';
+export type CourseTeeSource = 'api' | 'osm' | 'manual' | 'opengolf';
 
 /** Per-hole detail within a tee set: index 0 = hole 1. */
 export interface TeeHoleDetail {
@@ -139,6 +144,8 @@ export interface CourseTeeRow {
   course_id: string;
   gender: TeeGender | null;
   tee_name: string;
+  /** Colour as published by the source ("blue", "gold"…); null when unnamed. */
+  tee_color: string | null;
   course_rating: number | null;
   slope_rating: number | null;
   bogey_rating: number | null;
@@ -158,6 +165,8 @@ export interface HoleRow {
   course_id: string;
   hole_number: number;
   par: number | null;
+  /** Stroke index (1 = hardest). Shared across tee sets — see migration 036. */
+  handicap: number | null;
   tee_lng: number | null;
   tee_lat: number | null;
   green_lng: number | null;

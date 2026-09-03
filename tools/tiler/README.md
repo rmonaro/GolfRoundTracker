@@ -71,6 +71,7 @@ Chosen automatically from the course's `state`, falling back to NAIP.
 | `ct` | **3 inch** (0.076 m) | **2023** | Connecticut | ImageServer |
 | `ny` | ~6 inch (0.15 m) | 2022–2025 rolling | New York State | MapServer |
 | `ma` | 15 cm (7.5 cm on Cape Cod) | **2025** | Massachusetts | tile cache |
+| `az` | 0.3 m | **2023** | Arizona | ImageServer |
 | `naip` (default) | 0.6 m | 2019 in much of the northeast | Continental US | ImageServer |
 
 **Source choice matters more than anything else here.** NAIP is free and
@@ -78,6 +79,11 @@ nationwide, but the USGS service only carries 2019 for large parts of the
 country — old enough that a renovated course looks wrong, which is exactly what
 prompted adding state sources. CT's programme is eight times sharper and four
 years fresher, also free.
+
+Arizona is the cheap version of the same win: AZGeo republishes the *same* NAIP
+programme, but its 2023 layer is 0.3 m where the national service still serves
+2019 at 0.6 m. Same licence, same request shape, twice the resolution and four
+years newer — so `az` is worth using for any Arizona course.
 
 Override with `IMAGERY_SOURCE=naip` (or `ct`) to force one for a run.
 
