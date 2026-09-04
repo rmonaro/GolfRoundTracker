@@ -51,6 +51,7 @@ export function AdminCoursesList() {
   const [coordsFilter, setCoordsFilter] = useState<CoordsFilter>('all');
   const [sourceFilter, setSourceFilter] = useState('all');
   const [osmFilter, setOsmFilter] = useState('all');
+  const [verifiedFilter, setVerifiedFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(0);
@@ -65,7 +66,7 @@ export function AdminCoursesList() {
   // Any filter change invalidates the current page number.
   useEffect(() => {
     setPage(0);
-  }, [stateFilter, coordsFilter, sourceFilter, osmFilter, debouncedSearch]);
+  }, [stateFilter, coordsFilter, sourceFilter, osmFilter, verifiedFilter, debouncedSearch]);
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
@@ -74,6 +75,7 @@ export function AdminCoursesList() {
       coordsFilter,
       sourceFilter,
       osmFilter,
+      verifiedFilter,
       debouncedSearch,
       page
     ],
@@ -83,6 +85,7 @@ export function AdminCoursesList() {
         coords: coordsFilter,
         source: sourceFilter,
         osmStatus: osmFilter,
+        verified: verifiedFilter,
         search: debouncedSearch,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE
@@ -185,16 +188,18 @@ export function AdminCoursesList() {
             </MenuItem>
           ))}
         </TextField>
-        {!!missingCoords && (
-          <Button
-            size="small"
-            variant="outlined"
-            onClick={() => setBackfillOpen(true)}
-            sx={{ flexShrink: 0, whiteSpace: 'nowrap' }}
-          >
-            Backfill coords
-          </Button>
-        )}
+        <TextField
+          select
+          size="small"
+          label="Verified"
+          value={verifiedFilter}
+          onChange={(e) => setVerifiedFilter(e.target.value)}
+          sx={{ width: 130, flexShrink: 0 }}
+        >
+          <MenuItem value="all">Any</MenuItem>
+          <MenuItem value="yes">Verified</MenuItem>
+          <MenuItem value="no">Unverified</MenuItem>
+        </TextField>
       </Stack>
 
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -204,6 +209,16 @@ export function AdminCoursesList() {
         </Typography>
         {isFetching && <CircularProgress size={12} />}
         <Box sx={{ flex: 1 }} />
+        {!!missingCoords && (
+          <Button
+            size="small"
+            variant="outlined"
+            onClick={() => setBackfillOpen(true)}
+            sx={{ flexShrink: 0, whiteSpace: 'nowrap', mr: 1 }}
+          >
+            Backfill coords
+          </Button>
+        )}
         <Button size="small" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
           Prev
         </Button>

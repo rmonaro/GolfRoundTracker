@@ -11,6 +11,9 @@
 //                                 + stroke index and named tee sets
 //   stateImport                   OpenGolfAPI (ODbL), admin only — one page of
 //                                 a whole US state; loop on `nextOffset`
+//   manualLayout                  admin only — build holes + hole_features from
+//                                 tee/green points an admin clicked, for courses
+//                                 OSM never mapped
 //
 // Deploy:
 //   supabase functions deploy courses-api --no-verify-jwt
@@ -32,6 +35,13 @@
 import { resolveAuth, requireAdmin, serviceClient } from '../_shared/auth.ts';
 import { corsHeaders } from '../_shared/cors.ts';
 import { errorResponse, jsonResponse } from '../_shared/json.ts';
+import {
+  bboxOf,
+  expandBBox,
+  haversineMeters,
+  rotationRadians,
+  type LngLat
+} from '../_shared/geo.ts';
 import {
   OPENGOLF_ATTRIBUTION,
   coursesByState as ogCoursesByState,
@@ -107,6 +117,9 @@ Deno.serve(async (req) => {
           Number(args.limit ?? 250),
           auth.userId
         );
+      case 'manualLayout':
+        requireAdmin(auth);
+        return await handleManualLayout(args);
       case 'scorecardApply':
         requireAdmin(auth);
         return await handleScorecardApply(
@@ -1059,4 +1072,126 @@ async function handleStateImport(
     attribution: OPENGOLF_ATTRIBUTION
   };
   return jsonResponse(result);
+}
+
+// ---------------------------------------------------------------------------
+// manualLayout — holes from clicked points, for courses OSM never mapped
+// ---------------------------------------------------------------------------
+// ~2000 courses in the library have no OSM geometry and never will: nobody has
+// traced them. Segmentation finds their greens, bunkers and water from aerial
+// imagery, but it cannot know which green is the 7th — no source we have
+// carries hole identity (GolfCourseAPI's per-hole payload is {par, yardage,
+// handicap}; OpenGolfAPI's coordinates are the paid tier).
+//
+// So identity comes from a human clicking greens in order, and this turns those
+// clicks into the same rows the OSM sync produces. Downstream — hole map,
+// distance-to-green, auto-tracking — cannot tell the difference.
+
+interface ManualHoleInput {
+  number: number;
+  tee: LngLat;
+  green: LngLat;
+  par?: number | null;
+}
+
+interface ManualFeatureInput {
+  featureType: string;
+  /** Outer ring, [lng, lat] pairs. */
+  coords: LngLat[];
+}
+
+async function handleManualLayout(args: Record<string, unknown>): Promise<Response> {
+  const courseId = String(args.courseId ?? '');
+  if (!courseId) return errorResponse(400, 'courseId is required');
+  const holesIn = (args.holes ?? []) as ManualHoleInput[];
+  if (!Array.isArray(holesIn) || holesIn.length === 0) {
+    return errorResponse(400, 'holes is required');
+  }
+  const featuresIn = (args.features ?? []) as ManualFeatureInput[];
+  const supabase = serviceClient();
+
+  const holeRows = holesIn
+    .filter((h) => Number.isFinite(h.number) && h.tee?.length === 2 && h.green?.length === 2)
+    .map((h) => {
+      // Same derivation the OSM path uses, so the geometry means the same
+      // thing: rotation orients the map tee-up, and the bbox is padded so the
+      // hole's features fall inside it.
+      const bbox = expandBBox(bboxOf([h.tee, h.green]), 60);
+      return {
+        course_id: courseId,
+        hole_number: h.number,
+        par: h.par ?? null,
+        tee_lng: h.tee[0],
+        tee_lat: h.tee[1],
+        green_lng: h.green[0],
+        green_lat: h.green[1],
+        rotation_radians: rotationRadians(h.tee, h.green),
+        // The admin placed both ends by hand, so orientation is not inferred —
+        // it is the one thing here we know for certain.
+        orientation_confidence: 'manual',
+        bbox_min_lng: bbox.minLng,
+        bbox_min_lat: bbox.minLat,
+        bbox_max_lng: bbox.maxLng,
+        bbox_max_lat: bbox.maxLat,
+        centerline: [h.tee, h.green],
+        centerline_distance_m: haversineMeters(h.tee, h.green),
+        straight_distance_m: haversineMeters(h.tee, h.green)
+      };
+    });
+
+  const { error: holeErr } = await supabase
+    .from('holes')
+    .upsert(holeRows, { onConflict: 'course_id,hole_number' });
+  if (holeErr) return errorResponse(500, 'Could not write holes', holeErr.message);
+
+  const { data: saved, error: readErr } = await supabase
+    .from('holes')
+    .select('id, hole_number, bbox_min_lng, bbox_min_lat, bbox_max_lng, bbox_max_lat')
+    .eq('course_id', courseId);
+  if (readErr) return errorResponse(500, 'Could not read holes back', readErr.message);
+
+  // Replace only what a previous manual run wrote. OSM-derived features carry
+  // an osm_id; these do not, which is what makes them separable.
+  const { error: delErr } = await supabase
+    .from('hole_features')
+    .delete()
+    .eq('course_id', courseId)
+    .is('osm_id', null);
+  if (delErr) return errorResponse(500, 'Could not clear previous features', delErr.message);
+
+  let featureCount = 0;
+  if (featuresIn.length > 0) {
+    const rows = featuresIn
+      .filter((f) => Array.isArray(f.coords) && f.coords.length >= 3)
+      .map((f) => {
+        const c = f.coords;
+        const cx = c.reduce((s, p) => s + p[0], 0) / c.length;
+        const cy = c.reduce((s, p) => s + p[1], 0) / c.length;
+        const owner = (saved ?? []).find(
+          (h) =>
+            cx >= (h.bbox_min_lng as number) &&
+            cx <= (h.bbox_max_lng as number) &&
+            cy >= (h.bbox_min_lat as number) &&
+            cy <= (h.bbox_max_lat as number)
+        );
+        return {
+          course_id: courseId,
+          hole_id: owner?.id ?? null,
+          osm_id: null,
+          feature_type: f.featureType,
+          is_line: false,
+          coords: [c]
+        };
+      });
+    const { error: featErr } = await supabase.from('hole_features').insert(rows);
+    if (featErr) return errorResponse(500, 'Could not write features', featErr.message);
+    featureCount = rows.length;
+  }
+
+  await supabase
+    .from('courses')
+    .update({ osm_status: 'synced', osm_error: null, osm_synced_at: new Date().toISOString() })
+    .eq('id', courseId);
+
+  return jsonResponse({ holes: holeRows.length, features: featureCount });
 }

@@ -12,6 +12,8 @@ export interface CourseListFilters {
   source?: string;
   /** 'all' or a courses.osm_status value (pending / synced / failed / …). */
   osmStatus?: string;
+  /** 'all' | 'yes' | 'no' — admin verification (migration 030). */
+  verified?: string;
   search?: string;
   limit?: number;
   offset?: number;
@@ -61,6 +63,12 @@ export const adminCoursesRepo = {
     if (filters.osmStatus && filters.osmStatus !== 'all') {
       query = query.eq('osm_status', filters.osmStatus);
     }
+
+    // `not is true` rather than `is false` so a null verified — which the
+    // column allows even though nothing sets it today — counts as unverified
+    // rather than vanishing from both sides of the filter.
+    if (filters.verified === 'yes') query = query.is('verified', true);
+    else if (filters.verified === 'no') query = query.not('verified', 'is', true);
 
     const search = filters.search?.trim();
     if (search) {

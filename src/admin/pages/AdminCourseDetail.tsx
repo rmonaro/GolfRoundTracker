@@ -181,6 +181,13 @@ export function AdminCourseDetail() {
               Import scorecard
             </Button>
             <Button
+              variant="outlined"
+              onClick={() => navigate(`/admin/courses/${course.id}/map-holes`)}
+              title="Click greens and tees over imagery to build holes — for courses OSM never mapped"
+            >
+              Map holes by hand
+            </Button>
+            <Button
               variant={course.verified ? 'outlined' : 'contained'}
               color={course.verified ? 'inherit' : 'primary'}
               startIcon={<VerifiedRoundedIcon />}

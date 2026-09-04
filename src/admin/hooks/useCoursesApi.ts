@@ -314,3 +314,20 @@ export function useOsmSyncBatch() {
     }
   });
 }
+
+// ---------------------------------------------------------------------------
+// Manual hole layout — clicked tee/green pairs for courses OSM never mapped
+// ---------------------------------------------------------------------------
+
+export interface ManualLayoutArgs {
+  courseId: string;
+  holes: Array<{ number: number; tee: [number, number]; green: [number, number]; par: number | null }>;
+  features: Array<{ featureType: string; coords: [number, number][] }>;
+}
+
+export function useManualLayout() {
+  return useMutation({
+    mutationFn: (args: ManualLayoutArgs) =>
+      callCoursesApi<{ holes: number; features: number }>('manualLayout', args)
+  });
+}

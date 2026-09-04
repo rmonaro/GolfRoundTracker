@@ -33,9 +33,13 @@ const US_STATES = [
 /** Courses per OSM batch. Each one is an Overpass round trip, so this stays
  *  small: a big batch spends its whole time budget before reporting anything,
  *  and a slow mirror takes the entire run down with it. */
-// One at a time: a single course can spend 20s per mirror attempt, and the
-// batch budget is 45s. Asking for more just guarantees a half-done batch.
-const OSM_BATCH = 1;
+// Sized for a mirror that answers rather than one that times out. Batch size 1
+// was a workaround for public mirrors burning 20s per attempt; the function's
+// own 45s budget now cuts a batch short and reports `timedOut`, so asking for
+// more is safe either way — it just finishes fewer than requested on a bad day.
+// Also stays inside FairwayMapper's 30/min floor, since the function already
+// waits 2s between courses.
+const OSM_BATCH = 5;
 /** Overpass times out often enough that a single failed batch must not end a
  *  thousand-course run. Give up only when this many fail back to back. */
 const OSM_MAX_CONSECUTIVE_FAILURES = 5;

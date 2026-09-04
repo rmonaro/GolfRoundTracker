@@ -47,10 +47,26 @@ import {
 // as what works from a laptop: overpass-api.de returns 406 to Supabase's egress
 // IPs on every request (mod_security), while kumi answers fine if given time.
 //
+// FairwayMapper goes first WHEN A KEY IS SET. It is a keyed, paid Overpass
+// mirror, so it has no reason to rate-limit or mod_security-block a server —
+// which is the entire failure mode of the public mirrors from here. Without the
+// key it is skipped and the public mirrors behave exactly as before, so this
+// costs nothing until someone subscribes.
+//
 // `stale: true` marks a mirror running an old snapshot. An empty 200 from one
 // of those is not evidence that OSM lacks the course — see the no_coverage
 // decision in syncOneCourse.
-const OVERPASS_MIRRORS: Array<{ url: string; stale?: boolean }> = [
+const FAIRWAYMAPPER_KEY = Deno.env.get('FAIRWAYMAPPER_API_KEY') ?? '';
+
+const OVERPASS_MIRRORS: Array<{ url: string; stale?: boolean; bearer?: string }> = [
+  ...(FAIRWAYMAPPER_KEY
+    ? [
+        {
+          url: 'https://api.fairwaymapper.com/api/interpreter',
+          bearer: FAIRWAYMAPPER_KEY
+        }
+      ]
+    : []),
   { url: 'https://overpass.kumi.systems/api/interpreter' },
   { url: 'https://overpass-api.de/api/interpreter' },
   { url: 'https://overpass.osm.ch/api/interpreter', stale: true }
@@ -792,6 +808,8 @@ async function queryOverpass(
         lastErr = lastErr || 'Overpass time budget exhausted';
         break;
       }
+      // The attempt id is surfaced in the admin diagnostics, so it must never
+      // carry the token — the URL alone is enough to identify the mirror.
       const attemptId = `${method} ${baseUrl}`;
       attempted.push(attemptId);
       const controller = new AbortController();
@@ -800,19 +818,25 @@ async function queryOverpass(
         Math.min(PER_ATTEMPT_TIMEOUT_MS, budgetLeft)
       );
       try {
+        // A keyed mirror is identified by its token, so the Overpass-Turbo
+        // impersonation is pointless there — those headers exist purely to get
+        // past mod_security on the free public instance.
+        const baseHeaders: Record<string, string> = mirror.bearer
+          ? { Accept: 'application/json', Authorization: `Bearer ${mirror.bearer}` }
+          : { ...OVERPASS_BROWSER_HEADERS, 'User-Agent': OVERPASS_UA };
+
         const init: RequestInit =
           method === 'GET'
             ? {
                 method: 'GET',
-                headers: { ...OVERPASS_BROWSER_HEADERS, 'User-Agent': OVERPASS_UA },
+                headers: baseHeaders,
                 signal: controller.signal
               }
             : {
                 method: 'POST',
                 headers: {
-                  ...OVERPASS_BROWSER_HEADERS,
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'User-Agent': OVERPASS_UA
+                  ...baseHeaders,
+                  'Content-Type': 'application/x-www-form-urlencoded'
                 },
                 body: `data=${encoded}`,
                 signal: controller.signal
