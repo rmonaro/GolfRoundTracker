@@ -55,6 +55,7 @@ export function CourseEditDialog({ open, course, onClose }: CourseEditDialogProp
   const [city, setCity] = useState('');
   const [stateField, setStateField] = useState('');
   const [zip, setZip] = useState('');
+  const [holeRefFilter, setHoleRefFilter] = useState('');
   const [autoFlipped, setAutoFlipped] = useState(false);
 
   useEffect(() => {
@@ -69,6 +70,7 @@ export function CourseEditDialog({ open, course, onClose }: CourseEditDialogProp
     setCity(course.city ?? '');
     setStateField(course.state ?? '');
     setZip(course.zip ?? '');
+    setHoleRefFilter(course.osm_hole_ref_filter ?? '');
     setAutoFlipped(false);
   }, [open, course]);
 
@@ -94,7 +96,8 @@ export function CourseEditDialog({ open, course, onClose }: CourseEditDialogProp
         address: blankToNull(address),
         city: blankToNull(city),
         state: blankToNull(stateField),
-        zip: blankToNull(zip)
+        zip: blankToNull(zip),
+        osm_hole_ref_filter: blankToNull(holeRefFilter)
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin-course', course.id] });
@@ -194,6 +197,19 @@ export function CourseEditDialog({ open, course, onClose }: CourseEditDialogProp
             label="Country (optional)"
             value={country}
             onChange={(e) => setCountry(e.target.value)}
+          />
+
+          <TextField
+            label="Hole ref filter (optional)"
+            value={holeRefFilter}
+            onChange={(e) => setHoleRefFilter(e.target.value)}
+            placeholder="Cattail"
+            helperText={
+              'Only for courses that share one OSM extract with another course. ' +
+              'OSM tags those holes as "1 - Cattail" / "14 - Devil\'s Claw"; enter ' +
+              'this course\'s label so the sync keeps only its holes. Leave blank ' +
+              'for normal courses.'
+            }
           />
 
           <FormControl>

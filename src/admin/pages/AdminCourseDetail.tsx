@@ -16,19 +16,24 @@ import {
   Typography
 } from '@mui/material';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Navigate, useParams } from 'react-router-dom';
+import { Navigate, useNavigate, useParams } from 'react-router-dom';
 import VerifiedRoundedIcon from '@mui/icons-material/VerifiedRounded';
+import ArrowBackRoundedIcon from '@mui/icons-material/ArrowBackRounded';
 import { adminCoursesRepo } from '@/services/adminCoursesRepo';
 import { useResyncCourse, useImportCourse } from '../hooks/useCoursesApi';
 import { HoleLayoutCard } from '@/features/course/HoleLayoutCard';
 import { CourseEditDialog } from '../components/CourseEditDialog';
+import { ScorecardImportDialog } from '../components/ScorecardImportDialog';
+import { CourseTeesCard } from '../components/CourseTeesCard';
 
 export function AdminCourseDetail() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const { id } = useParams<{ id: string }>();
   const [holeNumber, setHoleNumber] = useState(1);
   const [editOpen, setEditOpen] = useState(false);
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [scorecardOpen, setScorecardOpen] = useState(false);
   const [pastedJson, setPastedJson] = useState('');
   const resync = useResyncCourse();
   const reimport = useImportCourse();
@@ -107,6 +112,14 @@ export function AdminCourseDetail() {
 
   return (
     <Stack spacing={2} sx={{ p: 2 }}>
+      <Box>
+        <Button
+          startIcon={<ArrowBackRoundedIcon />}
+          onClick={() => navigate('/admin/courses')}
+        >
+          Back to courses
+        </Button>
+      </Box>
       <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
         <CardContent>
           <Typography variant="h6">{course.name}</Typography>
@@ -159,6 +172,20 @@ export function AdminCourseDetail() {
               disabled={resync.isPending}
             >
               Sync from JSON
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={() => setScorecardOpen(true)}
+              title="Import par + stroke index and tee sets from OpenGolfAPI (ODbL)"
+            >
+              Import scorecard
+            </Button>
+            <Button
+              variant="outlined"
+              onClick={() => navigate(`/admin/courses/${course.id}/map-holes`)}
+              title="Click greens and tees over imagery to build holes — for courses OSM never mapped"
+            >
+              Map holes by hand
             </Button>
             <Button
               variant={course.verified ? 'outlined' : 'contained'}
@@ -266,6 +293,11 @@ export function AdminCourseDetail() {
                 {resync.data.status} — holes: {resync.data.holes ?? 0}, features:{' '}
                 {resync.data.features ?? 0}
               </Typography>
+              {resync.data.error && (
+                <Typography variant="body2" sx={{ mt: 0.5 }}>
+                  {resync.data.error}
+                </Typography>
+              )}
               {resync.data.diagnostics && (
                 <Box component="div" sx={{ mt: 1, fontSize: '0.8rem' }}>
                   <div>
@@ -278,6 +310,15 @@ export function AdminCourseDetail() {
                       {Object.entries(resync.data.diagnostics.golfTagCounts)
                         .map(([tag, n]) => `${tag}=${n}`)
                         .join(', ')}
+                    </div>
+                  )}
+                  {(resync.data.diagnostics.waysWithUnresolvedNodes ?? 0) > 0 && (
+                    <div>
+                      <strong>{resync.data.diagnostics.waysWithUnresolvedNodes}</strong> way(s)
+                      reference node ids that aren&apos;t in this payload. The export
+                      carried the ways but not their nodes — retrying won&apos;t help.
+                      Re-export ending in <code>out geom;</code>, or{' '}
+                      <code>out body; &gt;; out skel qt;</code> so the nodes come too.
                     </div>
                   )}
                   {resync.data.diagnostics.golfTaggedWithoutGeometry > 0 && (
@@ -295,6 +336,22 @@ export function AdminCourseDetail() {
                       golf=hole way(s) lacked a <code>ref</code> tag (hole number) and
                       were skipped. We can still build holes from green+tee polygons if
                       those exist.
+                    </div>
+                  )}
+                  {(resync.data.diagnostics.holeRefLabels?.length ?? 0) > 1 && (
+                    <div>
+                      This extract covers <strong>more than one course</strong>. Hole
+                      refs carry these labels:{' '}
+                      <strong>{resync.data.diagnostics.holeRefLabels!.join(', ')}</strong>.
+                      Set <em>Hole ref filter</em> in Edit to this course&apos;s label so
+                      only its holes are imported.
+                    </div>
+                  )}
+                  {resync.data.diagnostics.holeRefFilter && (
+                    <div>
+                      Ref filter <code>{resync.data.diagnostics.holeRefFilter}</code> kept{' '}
+                      <strong>{resync.data.diagnostics.holesAfterRefFilter ?? 0}</strong>{' '}
+                      hole(s).
                     </div>
                   )}
                   {resync.data.diagnostics.overpassRemark && (
@@ -370,10 +427,18 @@ export function AdminCourseDetail() {
         </CardContent>
       </Card>
 
+      <CourseTeesCard courseId={course.id} />
+
       <CourseEditDialog
         open={editOpen}
         course={course}
         onClose={() => setEditOpen(false)}
+      />
+
+      <ScorecardImportDialog
+        open={scorecardOpen}
+        courseId={course.id}
+        onClose={() => setScorecardOpen(false)}
       />
 
       <Dialog

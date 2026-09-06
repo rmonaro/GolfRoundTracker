@@ -15,8 +15,11 @@
 //     -d '{"courseId":"<uuid>"}'
 //
 // Cron batch (uses service-role key in pg_cron):
-//   { "syncAll": true }  -> processes up to 100 pending API-sourced courses
-//   { }                  -> processes up to 10 pending API-sourced courses
+//   { "syncAll": true }  -> processes up to 100 pending library courses
+//   { "limit": 5 }       -> processes exactly 5 (client-driven batching: each
+//                           course costs an Overpass round trip, so a large
+//                           batch runs past the function's wall clock)
+//   { }                  -> processes up to 10 pending library courses
 // ---------------------------------------------------------------------------
 
 import { resolveAuth, requireAdmin, serviceClient } from '../_shared/auth.ts';
@@ -40,10 +43,33 @@ import {
 //   * overpass.osm.ch — runs an OLD snapshot; returns empty for any course
 //     added to OSM since their last sync. Last-resort only.
 // The French mirror was removed — 403 "white-listed usages only".
-const OVERPASS_MIRRORS = [
-  'https://overpass-api.de/api/interpreter',
-  'https://overpass.kumi.systems/api/interpreter',
-  'https://overpass.osm.ch/api/interpreter'
+// Ordered by what actually works FROM THE EDGE FUNCTION, which is not the same
+// as what works from a laptop: overpass-api.de returns 406 to Supabase's egress
+// IPs on every request (mod_security), while kumi answers fine if given time.
+//
+// FairwayMapper goes first WHEN A KEY IS SET. It is a keyed, paid Overpass
+// mirror, so it has no reason to rate-limit or mod_security-block a server —
+// which is the entire failure mode of the public mirrors from here. Without the
+// key it is skipped and the public mirrors behave exactly as before, so this
+// costs nothing until someone subscribes.
+//
+// `stale: true` marks a mirror running an old snapshot. An empty 200 from one
+// of those is not evidence that OSM lacks the course — see the no_coverage
+// decision in syncOneCourse.
+const FAIRWAYMAPPER_KEY = Deno.env.get('FAIRWAYMAPPER_API_KEY') ?? '';
+
+const OVERPASS_MIRRORS: Array<{ url: string; stale?: boolean; bearer?: string }> = [
+  ...(FAIRWAYMAPPER_KEY
+    ? [
+        {
+          url: 'https://api.fairwaymapper.com/api/interpreter',
+          bearer: FAIRWAYMAPPER_KEY
+        }
+      ]
+    : []),
+  { url: 'https://overpass.kumi.systems/api/interpreter' },
+  { url: 'https://overpass-api.de/api/interpreter' },
+  { url: 'https://overpass.osm.ch/api/interpreter', stale: true }
 ];
 // Browser-style UA. Combined with Origin + Referer matching Overpass Turbo,
 // this gets past the mod_security 406 on overpass-api.de.
@@ -58,6 +84,17 @@ const OVERPASS_BROWSER_HEADERS = {
   Referer: 'https://overpass-turbo.eu/'
 } as const;
 const BATCH_DEFAULT = 10;
+/** Wall-clock budget for one batch request.
+ *
+ *  Deliberately far below the 150s function limit: a function invoked over its
+ *  public URL sits behind a gateway that drops the connection long before the
+ *  runtime would, and the client sees that as "Failed to send a request" with
+ *  no status to act on. Answering in well under a minute keeps every batch a
+ *  real HTTP response, even when every Overpass mirror is crawling. */
+const BATCH_BUDGET_MS = 45_000;
+/** Don't start a course unless this much budget is left — starting one with
+ *  seconds to spare just guarantees a killed request. */
+const MIN_COURSE_BUDGET_MS = 15_000;
 const BATCH_SYNC_ALL = 100;
 const PER_COURSE_GAP_MS = 2000;
 
@@ -75,7 +112,11 @@ interface OverpassNode {
 interface OverpassWay {
   type: 'way';
   id: number;
+  /** Present with `out geom;` — our own queries ask for this. */
   geometry?: Array<{ lat: number; lon: number }>;
+  /** Present with Overpass Turbo's default export, which lists node ids here
+   *  and emits the nodes as separate elements. Resolved via buildNodeIndex. */
+  nodes?: number[];
   tags?: Record<string, string>;
 }
 interface OverpassRelation {
@@ -123,6 +164,7 @@ Deno.serve(async (req) => {
     const body = (await req.json().catch(() => ({}))) as {
       courseId?: string;
       syncAll?: boolean;
+      limit?: number;
       /**
        * Escape hatch: when our edge IPs are blocked by Overpass mirrors, the
        * admin can paste the raw JSON from Overpass Turbo and we'll feed it
@@ -162,24 +204,55 @@ Deno.serve(async (req) => {
         }
       }
       const result = await syncOneCourse(supabase, body.courseId, pasted);
-      return jsonResponse(result, result.ok ? 200 : 500);
+      // Always 200: a sync that ran and reached a verdict is a successful
+      // REQUEST, whatever the verdict. Returning 500 for status='failed' made
+      // supabase-js throw before the caller could read the body — so the
+      // diagnostics explaining WHY it failed (which mirror, what it said) were
+      // thrown away and the admin saw only "non-2xx status code". Non-2xx is
+      // reserved for bad input, auth, and unhandled exceptions.
+      return jsonResponse(result, 200);
     }
 
-    const limit = body.syncAll ? BATCH_SYNC_ALL : BATCH_DEFAULT;
+    // An explicit `limit` wins over syncAll: bulk imports are driven from the
+    // admin page a few courses at a time so progress is visible and a slow
+    // Overpass mirror can't blow the whole batch's time budget.
+    const requested = Number(body.limit);
+    const limit = Number.isFinite(requested)
+      ? Math.min(Math.max(Math.trunc(requested), 1), BATCH_SYNC_ALL)
+      : body.syncAll
+        ? BATCH_SYNC_ALL
+        : BATCH_DEFAULT;
     const { data: pending, error: pendingErr } = await supabase
       .from('courses')
       .select('id')
-      .eq('source', 'api')
+      // Library courses from either provider. User-added courses stay opt-in
+      // (an admin resyncs them by id) — see the note in syncOneCourse.
+      .in('source', ['api', 'opengolf'])
       .or('osm_status.eq.pending,osm_synced_at.is.null')
       .order('osm_synced_at', { ascending: true, nullsFirst: true })
       .limit(limit);
 
     if (pendingErr) return errorResponse(500, 'Could not query pending courses', pendingErr.message);
 
+    // A batch must always answer, whatever Overpass is doing. One course can
+    // burn up to 120s across mirrors, so N courses in sequence will sail past
+    // the platform's ~150s limit and get the request killed — which surfaces
+    // on the client as "Failed to send a request to the Edge Function", with
+    // no way to tell a dead function from a slow one. So the batch keeps its
+    // own budget: it stops starting courses when the remaining time can't
+    // cover one, and returns what it finished.
+    const startedAt = Date.now();
+    const deadlineAt = startedAt + BATCH_BUDGET_MS;
     const summary: Array<{ courseId: string; status: string; error?: string }> = [];
+    let timedOut = false;
+
     for (const row of pending ?? []) {
+      if (Date.now() > deadlineAt - MIN_COURSE_BUDGET_MS) {
+        timedOut = true;
+        break;
+      }
       try {
-        const res = await syncOneCourse(supabase, row.id);
+        const res = await syncOneCourse(supabase, row.id, undefined, deadlineAt);
         summary.push({ courseId: row.id, status: res.status, error: res.error });
       } catch (err) {
         summary.push({
@@ -191,7 +264,22 @@ Deno.serve(async (req) => {
       await sleep(PER_COURSE_GAP_MS);
     }
 
-    return jsonResponse({ processed: summary.length, results: summary });
+    // Remaining count lets the admin page drive the loop and show progress
+    // without guessing when the queue is empty.
+    const { count: remaining } = await supabase
+      .from('courses')
+      .select('id', { count: 'exact', head: true })
+      .in('source', ['api', 'opengolf'])
+      .or('osm_status.eq.pending,osm_synced_at.is.null');
+
+    return jsonResponse({
+      processed: summary.length,
+      remaining: remaining ?? 0,
+      // The caller keeps looping on a time-out — it means "ask again", not
+      // "something broke".
+      timedOut,
+      results: summary
+    });
   } catch (err) {
     const status = (err as { status?: number }).status ?? 500;
     const message = err instanceof Error ? err.message : 'Unknown error';
@@ -222,8 +310,20 @@ interface SyncDiagnostics {
   golfTagCounts: Record<string, number>;
   /** Elements that had a golf=* tag but no usable geometry — likely cause of false no_coverage. */
   golfTaggedWithoutGeometry: number;
+  /** Of those, ways that DO list node ids but whose nodes aren't in the payload.
+   *  That's an export missing its node recursion, not a partial response —
+   *  re-export with `>; out skel qt;` or `out geom;`. Retrying changes nothing. */
+  waysWithUnresolvedNodes: number;
   /** golf=hole ways missing the `ref` tag — dropped from holes, not added to features either. */
   holeWaysWithoutRef: number;
+  /** Distinct course labels found in hole `ref` tags, e.g. ["Cattail",
+   *  "Devil's Claw"]. Multi-course facilities are mapped as one OSM area with
+   *  refs like "1 - Cattail", so more than one label here means the extract
+   *  covers several courses and needs `osm_hole_ref_filter` set. */
+  holeRefLabels?: string[];
+  /** The filter that was applied, and how many holes it kept. */
+  holeRefFilter?: string;
+  holesAfterRefFilter?: number;
   /** Overpass "remark" field (server-side warning, e.g. rate limit / partial result). */
   overpassRemark?: string;
   /** Which mirror+method produced the response we used. */
@@ -237,11 +337,14 @@ interface SyncDiagnostics {
 async function syncOneCourse(
   supabase: ReturnType<typeof serviceClient>,
   courseId: string,
-  pasted?: { elements: OverpassElement[]; remark?: string }
+  pasted?: { elements: OverpassElement[]; remark?: string },
+  /** Epoch ms after which Overpass attempts stop, so a batch can't overrun the
+   *  function's wall clock. Omitted for a single manual resync. */
+  deadlineAt?: number
 ): Promise<SyncResult> {
   const { data: course, error } = await supabase
     .from('courses')
-    .select('id, lat, lng, search_radius, source, osm_status')
+    .select('id, lat, lng, search_radius, source, osm_status, osm_hole_ref_filter')
     .eq('id', courseId)
     .single();
 
@@ -258,6 +361,19 @@ async function syncOneCourse(
   }
 
   const radius = course.search_radius ?? 1500;
+
+  // Claim the course before doing any slow work.
+  //
+  // If the worker is killed mid-sync (a heavy course, a gateway cutting the
+  // connection), nothing downstream ever runs — so the row stays 'pending',
+  // comes back at the head of the queue, and kills the next batch too. One bad
+  // course stalls the whole queue forever, which is exactly what happened to
+  // the NY import. Marking it first means a death is recorded and the queue
+  // moves on; a normal run overwrites this a moment later.
+  if (!pasted) {
+    await markStatus(supabase, courseId, 'failed', 'Sync started but did not finish');
+  }
+
   let overpassResp: OverpassResponse;
   if (pasted) {
     // Admin pasted the JSON directly — skip the network call. We still want
@@ -274,7 +390,7 @@ async function syncOneCourse(
     );
   } else {
     try {
-      overpassResp = await queryOverpass(course.lat, course.lng, radius);
+      overpassResp = await queryOverpass(course.lat, course.lng, radius, deadlineAt);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Overpass failed';
       await markStatus(supabase, courseId, 'failed', msg);
@@ -291,6 +407,7 @@ async function syncOneCourse(
     golfTagCounts: {},
     golfTaggedWithoutGeometry: 0,
     holeWaysWithoutRef: 0,
+    waysWithUnresolvedNodes: 0,
     overpassRemark: overpassResp.remark,
     mirror: overpassResp.mirror,
     attemptedMirrors: overpassResp.attemptedMirrors,
@@ -298,13 +415,17 @@ async function syncOneCourse(
     // success responses with full HTTP traces.
     attemptDetails: overpass.length === 0 ? overpassResp.attemptDetails : undefined
   };
+  const diagNodeIndex = buildNodeIndex(overpass);
   for (const el of overpass) {
     const golfTag = (el.tags as Record<string, string> | undefined)?.golf;
     if (!golfTag) continue;
     diagnostics.golfTagCounts[golfTag] =
       (diagnostics.golfTagCounts[golfTag] ?? 0) + 1;
-    if (elementCoords(el).length === 0) {
+    if (elementCoords(el, diagNodeIndex).length === 0) {
       diagnostics.golfTaggedWithoutGeometry++;
+      if (el.type === 'way' && !el.geometry?.length && el.nodes?.length) {
+        diagnostics.waysWithUnresolvedNodes++;
+      }
     }
     if (golfTag === 'hole' && el.type === 'way' && !el.tags?.ref) {
       diagnostics.holeWaysWithoutRef++;
@@ -312,8 +433,40 @@ async function syncOneCourse(
   }
   console.log(`[sync] course=${courseId} diagnostics`, diagnostics);
 
-  const { holes, features } = normalizeOverpass(overpass);
+  const { holes: allHoles, features } = normalizeOverpass(overpass);
+
+  // Multi-course facilities (Whirlwind's Cattail / Devil's Claw, say) are one
+  // OSM area whose hole refs carry the course name: "1 - Cattail",
+  // "14 - Devil's Claw". Syncing either course would otherwise import all 36
+  // holes and collide on (course_id, hole_number).
+  //
+  // `parseInt` already reads the leading number, so only selection is missing:
+  // when the course carries a ref filter, keep the holes whose label matches.
+  const refFilter = (course.osm_hole_ref_filter as string | null)?.trim() || null;
+  const holeRefLabels = [
+    ...new Set(allHoles.map((h) => refLabel(h.ref)).filter((l): l is string => Boolean(l)))
+  ].sort();
+  const holes = refFilter
+    ? allHoles.filter((h) => {
+        const label = refLabel(h.ref);
+        // A hole with no label belongs to whichever course is being synced —
+        // a single-course extract with plain "1", "2" refs still works.
+        if (!label) return true;
+        return label.toLowerCase().includes(refFilter.toLowerCase());
+      })
+    : allHoles;
   if (holes.length === 0 && features.length === 0) {
+    // "no_coverage" is a claim about OSM: it says this course isn't mapped, and
+    // it takes the course off the sync queue for good. Only make that claim
+    // when a current mirror actually answered "nothing here". If every mirror
+    // blocked or timed out and only a stale snapshot replied, that's OUR
+    // failure — mark it retryable instead of libelling the data.
+    if (!pasted && overpassResp.emptyIsTrustworthy === false) {
+      const msg =
+        'No mirror returned a usable answer (blocked, timed out, or stale snapshot) — coverage unknown';
+      await markStatus(supabase, courseId, 'failed', msg);
+      return { ok: false, status: 'failed', courseId, error: msg, diagnostics };
+    }
     await markStatus(supabase, courseId, 'no_coverage', null);
     return { ok: true, status: 'no_coverage', courseId, diagnostics };
   }
@@ -446,10 +599,17 @@ async function syncOneCourse(
     if (owner) fr.holeId = owner.holeId;
   }
 
+  // With a ref filter in play we know the extract covers a neighbouring course
+  // too, so a feature that lands on none of this course's holes is that
+  // course's bunker or green — not a course-level feature of this one.
+  const keptFeatureRows = refFilter
+    ? featureRows.filter((fr) => fr.holeId !== null)
+    : featureRows;
+
   let featureCount = 0;
-  if (featureRows.length) {
+  if (keptFeatureRows.length) {
     const { error: featErr } = await supabase.from('hole_features').insert(
-      featureRows.map((fr) => ({
+      keptFeatureRows.map((fr) => ({
         course_id: fr.courseId,
         hole_id: fr.holeId,
         osm_id: fr.osmId,
@@ -459,7 +619,7 @@ async function syncOneCourse(
       }))
     );
     if (featErr) console.error('[sync] feature insert', featErr);
-    else featureCount = featureRows.length;
+    else featureCount = keptFeatureRows.length;
   }
 
   await markStatus(supabase, courseId, 'synced', null);
@@ -578,6 +738,11 @@ interface OverpassResponse {
   mirror?: string;
   /** Mirrors+methods we tried — populated even on empty results so admins can diagnose. */
   attemptedMirrors?: string[];
+  /** True when a mirror we trust returned a real "0 elements" answer, so an
+   *  empty result means OSM genuinely has nothing here. False when every
+   *  mirror blocked, timed out, or only a stale snapshot answered — then an
+   *  empty result says nothing about coverage. */
+  emptyIsTrustworthy?: boolean;
   /** Per-attempt evidence: status code, body length, snippet. Surfaced when every mirror returns empty. */
   attemptDetails?: OverpassAttemptDetail[];
 }
@@ -591,12 +756,20 @@ interface OverpassAttemptDetail {
   error?: string;
 }
 
-async function queryOverpass(lat: number, lng: number, radius: number): Promise<OverpassResponse> {
+async function queryOverpass(
+  lat: number,
+  lng: number,
+  radius: number,
+  deadlineAt?: number
+): Promise<OverpassResponse> {
   // Server-side timeout matches our client-side abort budget so Overpass
   // releases its query slot if we give up. Worst case: 3 mirrors × 2 methods
   // × 20s = 120s — inside Supabase's 150s function budget, with headroom for
   // parse + DB writes. In practice GET-first usually returns on the first
   // attempt and we exit early.
+  // kumi.systems answers correctly but slowly — 12s cut it off mid-flight and
+  // turned the one working mirror into a timeout. Back to 20s; the deadlineAt
+  // clamp below is what keeps a batch inside its budget, not this.
   const PER_ATTEMPT_TIMEOUT_MS = 20_000;
   const query =
     `[out:json][timeout:20];` +
@@ -611,32 +784,59 @@ async function queryOverpass(lat: number, lng: number, radius: number): Promise<
   // hand back. Capture the first empty success so the caller still gets the
   // `remark` (rate-limit notice) for diagnostics.
   let emptyFallback: OverpassResponse | null = null;
+  // Did any mirror fail to answer at all (block, timeout, non-200)? And did a
+  // mirror we actually trust return a genuine empty result? Together these say
+  // whether "0 elements" means "OSM has nothing" or "we never got through".
+  let hadTransportFailure = false;
+  let trustedEmpty = false;
   const attempted: string[] = [];
   const attemptDetails: OverpassAttemptDetail[] = [];
 
-  for (const baseUrl of OVERPASS_MIRRORS) {
+  for (const mirror of OVERPASS_MIRRORS) {
+    const baseUrl = mirror.url;
     // Each mirror gets a GET attempt first (matches Overpass Turbo's behavior
     // — empirically the most reliable across the three mirrors), then POST
     // as a fallback for any mirror that gates GET differently.
     for (const method of ['GET', 'POST'] as const) {
+      // Stop trying mirrors once the caller's budget is spent, and never wait
+      // longer than the time that's actually left. Without this a batch of
+      // courses multiplies the 120s worst case per course and the platform
+      // kills the whole request — which reaches the client as a fetch failure
+      // rather than an error it can act on.
+      const budgetLeft = deadlineAt ? deadlineAt - Date.now() : Infinity;
+      if (budgetLeft <= 2_000) {
+        lastErr = lastErr || 'Overpass time budget exhausted';
+        break;
+      }
+      // The attempt id is surfaced in the admin diagnostics, so it must never
+      // carry the token — the URL alone is enough to identify the mirror.
       const attemptId = `${method} ${baseUrl}`;
       attempted.push(attemptId);
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), PER_ATTEMPT_TIMEOUT_MS);
+      const timer = setTimeout(
+        () => controller.abort(),
+        Math.min(PER_ATTEMPT_TIMEOUT_MS, budgetLeft)
+      );
       try {
+        // A keyed mirror is identified by its token, so the Overpass-Turbo
+        // impersonation is pointless there — those headers exist purely to get
+        // past mod_security on the free public instance.
+        const baseHeaders: Record<string, string> = mirror.bearer
+          ? { Accept: 'application/json', Authorization: `Bearer ${mirror.bearer}` }
+          : { ...OVERPASS_BROWSER_HEADERS, 'User-Agent': OVERPASS_UA };
+
         const init: RequestInit =
           method === 'GET'
             ? {
                 method: 'GET',
-                headers: { ...OVERPASS_BROWSER_HEADERS, 'User-Agent': OVERPASS_UA },
+                headers: baseHeaders,
                 signal: controller.signal
               }
             : {
                 method: 'POST',
                 headers: {
-                  ...OVERPASS_BROWSER_HEADERS,
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'User-Agent': OVERPASS_UA
+                  ...baseHeaders,
+                  'Content-Type': 'application/x-www-form-urlencoded'
                 },
                 body: `data=${encoded}`,
                 signal: controller.signal
@@ -654,6 +854,7 @@ async function queryOverpass(lat: number, lng: number, radius: number): Promise<
           bodyChars: bodyText.length,
           snippet: bodyText.slice(0, 240)
         });
+        if (!res.ok) hadTransportFailure = true;
         if (res.ok) {
           let data: { elements?: OverpassElement[]; remark?: string };
           try {
@@ -679,6 +880,8 @@ async function queryOverpass(lat: number, lng: number, radius: number): Promise<
           // Mirrors occasionally cache empty responses or rate-limit silently.
           lastErr = `${attemptId} → 200 but 0 elements${remark ? ` (remark: ${remark})` : ''}`;
           console.warn('[overpass]', lastErr);
+          // Only a current mirror's empty answer is evidence of absence.
+          if (!mirror.stale) trustedEmpty = true;
           if (!emptyFallback) {
             emptyFallback = {
               elements,
@@ -707,6 +910,7 @@ async function queryOverpass(lat: number, lng: number, radius: number): Promise<
           bodyChars: 0,
           error: reason
         });
+        hadTransportFailure = true;
         console.warn('[overpass] threw', lastErr);
       }
     }
@@ -717,7 +921,12 @@ async function queryOverpass(lat: number, lng: number, radius: number): Promise<
   // No mirror returned data. If at least one returned 200 with [] we surface
   // that (with its remark) so admins see the genuine "no data here" case.
   if (emptyFallback) {
-    return { ...emptyFallback, attemptedMirrors: attempted, attemptDetails };
+    return {
+      ...emptyFallback,
+      attemptedMirrors: attempted,
+      attemptDetails,
+      emptyIsTrustworthy: trustedEmpty && !hadTransportFailure
+    };
   }
   throw new Error(
     `All Overpass attempts failed. Last: ${lastErr}. Attempted: ${attempted.join(', ')}`
@@ -738,12 +947,33 @@ interface NormalizedFeature {
   coords: LngLat[] | LngLat[][];
 }
 
-function elementCoords(el: OverpassElement): LngLat[] {
+/**
+ * Coordinates for an element, from either Overpass output shape.
+ *
+ * `out geom;` embeds a `geometry` array on each way — that's what our own
+ * queries ask for. But Overpass Turbo's default export ("out body; >; out skel
+ * qt;") instead gives each way a `nodes: [id, ...]` list and emits the nodes as
+ * separate elements. An admin exporting from Turbo by hand gets the second
+ * shape, and without `nodeIndex` every way here resolved to zero coordinates —
+ * so a perfectly good paste looked like "no coverage".
+ */
+function elementCoords(el: OverpassElement, nodeIndex?: Map<number, LngLat>): LngLat[] {
   if (el.type === 'way') {
-    return (el.geometry ?? []).map((g) => [g.lon, g.lat] as LngLat);
+    if (el.geometry?.length) return el.geometry.map((g) => [g.lon, g.lat] as LngLat);
+    if (nodeIndex && el.nodes?.length) {
+      const out: LngLat[] = [];
+      for (const id of el.nodes) {
+        const c = nodeIndex.get(id);
+        if (c) out.push(c);
+      }
+      return out;
+    }
+    return [];
   }
   if (el.type === 'relation') {
     // Flatten member geometries — coarse but adequate for centroid + bbox.
+    // Relations only resolve from `out geom`; Turbo's skeleton export doesn't
+    // carry member geometry to rebuild from.
     const out: LngLat[] = [];
     for (const m of el.members ?? []) {
       for (const g of m.geometry ?? []) out.push([g.lon, g.lat]);
@@ -753,6 +983,26 @@ function elementCoords(el: OverpassElement): LngLat[] {
   return [];
 }
 
+/** Map node id -> [lng, lat] for payloads that reference nodes by id. */
+function buildNodeIndex(elements: OverpassElement[]): Map<number, LngLat> {
+  const index = new Map<number, LngLat>();
+  for (const el of elements) {
+    if (el.type === 'node' && typeof el.lat === 'number' && typeof el.lon === 'number') {
+      index.set(el.id, [el.lon, el.lat]);
+    }
+  }
+  return index;
+}
+
+/**
+ * The course-name part of a hole `ref`, or null when the ref is just a number.
+ * "14 - Devil's Claw" -> "Devil's Claw";  "7" -> null.
+ */
+function refLabel(ref: string): string | null {
+  const rest = ref.replace(/^\s*\d+\s*/, '').replace(/^[-–—:/|]\s*/, '').trim();
+  return rest || null;
+}
+
 function normalizeOverpass(elements: OverpassElement[]): {
   holes: NormalizedHoleLine[];
   features: NormalizedFeature[];
@@ -760,11 +1010,13 @@ function normalizeOverpass(elements: OverpassElement[]): {
   const holes: NormalizedHoleLine[] = [];
   const features: NormalizedFeature[] = [];
 
+  const nodeIndex = buildNodeIndex(elements);
+
   for (const el of elements) {
     const tags = el.tags ?? {};
     const golfTag = tags.golf;
     if (!golfTag) continue;
-    const coords = elementCoords(el);
+    const coords = elementCoords(el, nodeIndex);
     if (coords.length === 0) continue;
 
     if (golfTag === 'hole') {

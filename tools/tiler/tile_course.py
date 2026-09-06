@@ -28,7 +28,7 @@ Environment:
                                  chosen from the course's state
     MAX_ZOOM                     override the per-source max zoom for every
                                  source (see IMAGERY_SOURCES[*]["max_zoom"]:
-                                 naip 18, ct 20, ny 19)
+                                 naip 18, ct 20, ny 19, az 19, ma 20)
 """
 
 from __future__ import annotations
@@ -200,6 +200,42 @@ IMAGERY_SOURCES: dict[str, dict[str, Any]] = {
         "captured": None,
         "coverage": "New York State",
     },
+    "az": {
+        "label": "az-naip-2023",
+        # AZGeo republishes NAIP for Arizona, and its 2023 layer is 0.3 m —
+        # twice the resolution of the USGS national service, which still serves
+        # 2019 across much of the state. Same imagery programme, same public
+        # domain terms, better pixels: there is no reason to use the national
+        # endpoint for an Arizona course.
+        "url": (
+            "https://azgeo.az.gov/arcgis/rest/services/imagery/"
+            "NAIP2023/ImageServer/exportImage"
+        ),
+        # Advertises maxImageWidth 15000 / maxImageHeight 4100, but like CT the
+        # real constraint is response SIZE — it returns uncompressed RGB.
+        # Measured against the Whirlwind bbox:
+        #   2000x2000 =  4.0M px -> OK (12.6 MB, fast)
+        #   3000x3000 =  9.0M px -> OK (28.3 MB)
+        #   4000x4000 = 16.0M px -> no response inside 120 s
+        "max_w": 4000,
+        "max_h": 4000,
+        "max_pixels": 9_000_000,
+        # 4-band (RGB + NIR); visible bands only. Verified: the response comes
+        # back SamplesPerPixel=3 when this is set.
+        "band_ids": "0,1,2",
+        "kind": "imageserver",
+        # 0.3 m native. At Arizona's latitude z18 is 0.50 m/px — coarser than
+        # the source, so it would throw away half the detail we fetched; z19 is
+        # 0.25 m/px, a slight oversample that keeps effectively all of it.
+        # Expect roughly 4x a z18 pack (~16 MB/course), well inside the 48 MB
+        # cap.
+        "max_zoom": 19,
+        "attribution": "Imagery: USDA NAIP 2023 via AZGeo \u2014 State of Arizona (public domain)",
+        # Programme year, not the flight date — NAIP flies a state over a
+        # season and the service publishes no per-scene capture date.
+        "captured": "2023-01-01",
+        "coverage": "Arizona",
+    },
     "ma": {
         "label": "ma-ortho-2025",
         # NOT an exportImage endpoint. MassGIS publishes no ortho ImageServer at
@@ -236,6 +272,7 @@ STATE_SOURCES = {
     "CT": "ct",
     "NY": "ny",
     "MA": "ma",
+    "AZ": "az",
 }
 
 DEFAULT_SOURCE = "naip"

@@ -1,4 +1,4 @@
-import { Fragment, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import {
   Box,
   Button,
@@ -22,6 +22,7 @@ import { useQuery } from '@tanstack/react-query';
 import { useNavigate, useParams } from 'react-router-dom';
 import { adminRoundsRepo, computeRoundHoleTotals } from '@/services/adminRoundsRepo';
 import { roundRepo } from '@/services/roundRepo';
+import { courseTeesRepo } from '@/services/courseTeesRepo';
 import type { RoundHole, Shot } from '@/models';
 
 function fmtVsPar(v: number | null | undefined): string {
@@ -30,10 +31,35 @@ function fmtVsPar(v: number | null | undefined): string {
   return v > 0 ? `+${v}` : `${v}`;
 }
 
-function fairwayLabel(par: number, result: string | null): string {
-  if (par === 3) return '—'; // no fairway on par 3s
-  if (!result || result === 'na') return '—';
-  return result.charAt(0).toUpperCase() + result.slice(1);
+/**
+ * Fairway hit, recorded or inferred.
+ *
+ * `fairway_result` is only set when the golfer tapped it, but the shots often
+ * answer the question anyway: a shot's `lie` is where it was played FROM, so
+ * the SECOND shot's lie is where the tee shot finished. Showing "—" while the
+ * shot list plainly says "fairway" is just us not reading our own data.
+ *
+ * `derived` lets the caller render an inferred value more quietly than a
+ * recorded one.
+ */
+function fairwayLabel(
+  par: number,
+  result: string | null,
+  shots: Shot[] | undefined
+): { label: string; derived: boolean } {
+  if (par === 3) return { label: '—', derived: false }; // no fairway on par 3s
+  if (result && result !== 'na') {
+    return { label: result.charAt(0).toUpperCase() + result.slice(1), derived: false };
+  }
+  const second = (shots ?? [])
+    .slice()
+    .sort((a, b) => (a.shot_number ?? 0) - (b.shot_number ?? 0))
+    .find((sh) => (sh.shot_number ?? 0) === 2);
+  if (!second?.lie) return { label: '—', derived: false };
+  if (second.lie === 'fairway') return { label: 'Hit', derived: true };
+  // Anything else is where the tee shot actually ended up, which is more
+  // informative than "missed".
+  return { label: second.lie.charAt(0).toUpperCase() + second.lie.slice(1), derived: true };
 }
 
 function shotOutcome(s: Shot): string {
@@ -58,6 +84,47 @@ export function AdminRoundDetail() {
     queryFn: () => roundRepo.listHoles(roundId!),
     enabled: !!roundId
   });
+  // Per-hole yardage for the tee the round was played from.
+  //
+  // `round_holes.yardage` is only populated when the tee set carried per-hole
+  // numbers at the time the round started, so older rounds have nulls even
+  // though the course knows the yardages perfectly well. Read them from the
+  // tee set rather than showing a dash.
+  const courseId = roundQuery.data?.course_id ?? null;
+  const teesQuery = useQuery({
+    queryKey: ['course-tees', courseId],
+    enabled: !!courseId,
+    queryFn: () => courseTeesRepo.listAllForCourse(courseId as string)
+  });
+  const teeYardages = useMemo(() => {
+    const round = roundQuery.data;
+    const tees = teesQuery.data ?? [];
+    if (!round) return {} as Record<number, number>;
+
+    const hasYardages = (t: (typeof tees)[number]) =>
+      (t.holes ?? []).some((h) => h.yardage != null);
+    const sameName = (t: (typeof tees)[number]) =>
+      !!round.tee_name &&
+      t.tee_name.trim().toLowerCase() === round.tee_name.trim().toLowerCase();
+
+    // Prefer the exact tee the round recorded — but only if it actually carries
+    // per-hole numbers. A course can hold the same tee from two sources, and
+    // the one the round points at may be the empty one: Cattail's "Silver" has
+    // 18 yardages from GolfCourseAPI and none from OpenGolfAPI. Falling back to
+    // the same-named tee that does have them beats showing a column of dashes.
+    const played =
+      tees.find((t) => t.id === round.tee_id && hasYardages(t)) ??
+      tees.find((t) => sameName(t) && hasYardages(t)) ??
+      tees.find((t) => t.id === round.tee_id) ??
+      null;
+
+    const out: Record<number, number> = {};
+    played?.holes?.forEach((h, i) => {
+      if (h.yardage != null) out[i + 1] = h.yardage;
+    });
+    return out;
+  }, [roundQuery.data, teesQuery.data]);
+
   const shotsQuery = useQuery({
     queryKey: ['admin-round-shots', roundId],
     queryFn: () => roundRepo.listShots(roundId!),
@@ -79,12 +146,24 @@ export function AdminRoundDetail() {
 
   const round = roundQuery.data;
   if (!round) {
+    // A failed query is not a missing round. Reporting both as "not found"
+    // sent us looking for a deleted row when the request had actually errored.
+    const message = roundQuery.isError
+      ? (roundQuery.error as Error).message
+      : 'Round not found.';
     return (
       <Box sx={{ p: 2 }}>
         <Button startIcon={<ArrowBackRoundedIcon />} onClick={() => navigate(-1)}>
           Back
         </Button>
-        <Typography sx={{ mt: 2 }}>Round not found.</Typography>
+        <Typography sx={{ mt: 2 }} color={roundQuery.isError ? 'error' : 'text.primary'}>
+          {message}
+        </Typography>
+        {roundQuery.isError && (
+          <Typography variant="caption" color="text.secondary">
+            Round id: {roundId}
+          </Typography>
+        )}
       </Box>
     );
   }
@@ -235,10 +314,26 @@ export function AdminRoundDetail() {
                       </TableCell>
                       <TableCell sx={{ fontWeight: 600 }}>{h.hole_number}</TableCell>
                       <TableCell align="right">{h.par}</TableCell>
-                      <TableCell align="right">{h.yardage ?? '—'}</TableCell>
+                      <TableCell align="right">
+                        {h.yardage ?? teeYardages[h.hole_number] ?? '—'}
+                      </TableCell>
                       <TableCell align="right">{h.strokes}</TableCell>
                       <TableCell align="right">{h.putts}</TableCell>
-                      <TableCell>{fairwayLabel(h.par, h.fairway_result)}</TableCell>
+                      <TableCell>
+                        {(() => {
+                          const f = fairwayLabel(h.par, h.fairway_result, shotsByHole.get(h.id));
+                          return (
+                            <Typography
+                              variant="body2"
+                              component="span"
+                              color={f.derived ? 'text.secondary' : 'text.primary'}
+                              title={f.derived ? 'Inferred from the shot lies' : undefined}
+                            >
+                              {f.label}
+                            </Typography>
+                          );
+                        })()}
+                      </TableCell>
                       <TableCell>{h.gir ? 'Yes' : 'No'}</TableCell>
                       <TableCell>{h.sand ? 'Yes' : 'No'}</TableCell>
                       <TableCell align="right">{h.penalty_strokes || 0}</TableCell>

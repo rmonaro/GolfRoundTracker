@@ -93,6 +93,7 @@ export function HoleLayoutCard({
   compact = false,
   interactive = false,
   recenterRef,
+  yardage,
   aimMode = false,
   ballDistanceFromTeeM = 0,
   suggestedHandleDistanceM,
@@ -114,7 +115,9 @@ export function HoleLayoutCard({
   onShotEndPointMoved,
   recapToken
 }: HoleLayoutCardProps) {
-  const { data, status } = useHoleLayout(courseId, holeNumber);
+  // `yardage` is the selected tee's number for this hole, so the layout can
+  // place the tee marker on the box actually being played.
+  const { data, status } = useHoleLayout(courseId, holeNumber, yardage);
 
   // Don't render anything when there's no course at all (e.g. user-added course
   // pre-OSM-sync). Phase 6 enhancement will make sure the picker surfaces this.
