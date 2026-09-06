@@ -294,9 +294,79 @@ async function upsertApiTees(
   if (error) console.error('[courses-api] tee upsert failed', error.message);
 }
 
+/**
+ * Find a course's CURRENT GolfCourseAPI id by searching for its name.
+ *
+ * GolfCourseAPI moved from numeric ids to opaque 8-character ones ("7k2m9qb4")
+ * and now rejects the old form outright, so every course imported before that
+ * 404s on re-import with "The requested resource could not be found". The id we
+ * stored is simply gone; the course is still there under a new one.
+ */
+async function reresolveCourseApiId(
+  legacyId: string
+): Promise<{ id: string; name: string } | null> {
+  const supabase = serviceClient();
+  const { data: local } = await supabase
+    .from('courses')
+    .select('name, club_name, city, state')
+    .eq('course_api_id', legacyId)
+    .maybeSingle();
+  if (!local) return null;
+
+  const query = String(local.club_name || local.name || '').trim();
+  if (!query) return null;
+
+  const res = await fetch(
+    `${GOLF_API_BASE}/search?search_query=${encodeURIComponent(query)}`,
+    { headers: { Authorization: `Key ${GOLF_API_KEY}` } }
+  );
+  if (!res.ok) return null;
+  const data = await res.json();
+  const hits: GolfCourseSearchHit[] = Array.isArray(data) ? data : (data.courses ?? []);
+
+  let best: { id: string; name: string; score: number } | null = null;
+  for (const h of hits) {
+    const name = h.course_name ?? '';
+    let sc = Math.max(
+      nameScore(String(local.name ?? ''), name),
+      nameScore(String(local.club_name ?? ''), name)
+    );
+    if (local.city && h.location?.city && normalizeName(String(local.city)) === normalizeName(h.location.city)) sc += 0.25;
+    if (local.state && h.location?.state && String(local.state).toUpperCase() !== h.location.state.toUpperCase()) sc -= 0.5;
+    if (!best || sc > best.score) best = { id: String(h.id), name, score: sc };
+  }
+  // Same bar as the coordinate matcher: one shared generic token scores 0.5.
+  return best && best.score >= 0.6 ? { id: best.id, name: best.name } : null;
+}
+
 async function handleImport(courseApiId: string, adminUserId: string): Promise<Response> {
   if (!courseApiId) return errorResponse(400, 'courseApiId is required');
-  const detail = await fetchCourseDetail(courseApiId);
+
+  let detail: GolfCourseDetail;
+  try {
+    detail = await fetchCourseDetail(courseApiId);
+  } catch (err) {
+    // Only a legacy numeric id is worth re-resolving; anything else failing is
+    // a real error and should surface as one.
+    if (!/^\d+$/.test(courseApiId)) throw err;
+    const found = await reresolveCourseApiId(courseApiId);
+    if (!found) {
+      throw new Error(
+        `GolfCourseAPI no longer accepts the numeric id "${courseApiId}" (ids are now ` +
+          `8-character strings), and no confident match was found by name. ` +
+          `Search for the course on the Import tab and re-import it there.`
+      );
+    }
+    console.log(`[import] re-resolved legacy id ${courseApiId} -> ${found.id} (${found.name})`);
+    detail = await fetchCourseDetail(found.id);
+    // Point the existing row at the new id so this only happens once.
+    const supabase = serviceClient();
+    await supabase
+      .from('courses')
+      .update({ course_api_id: found.id })
+      .eq('course_api_id', courseApiId);
+  }
+
   const row = mapDetailToCourseRow(detail, adminUserId);
   const supabase = serviceClient();
   const { data, error } = await supabase

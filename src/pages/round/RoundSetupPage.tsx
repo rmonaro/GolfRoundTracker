@@ -17,7 +17,7 @@ import { PageHeader } from '@/components/layout/PageHeader';
 import { ToggleGroup } from '@/components/ui/ToggleGroup';
 import { CoursePackButton } from '@/features/offline/CoursePackButton';
 import { downloadPackInBackground } from '@/services/coursePackRepo';
-import { useCourses, useCourseTees, useStartRound } from '@/features/round/useStartRound';
+import { useCourse, useCourseTees, useStartRound } from '@/features/round/useStartRound';
 import { toAppError } from '@/services/errors';
 import { watchBridge } from '@/services/watchBridge';
 import {
@@ -40,10 +40,11 @@ type HoleChoice = '9' | '18' | 'custom';
 export function RoundSetupPage() {
   const navigate = useNavigate();
   const { courseId = '' } = useParams<{ courseId: string }>();
-  const courses = useCourses();
   const startRound = useStartRound();
 
-  const course = courses.data?.find((c) => c.id === courseId) ?? null;
+  // Resolves from the preloaded list when possible, else fetches by id — the
+  // picker's search reaches courses the list never held.
+  const { course, isLoading: courseLoading } = useCourse(courseId);
   const teesQuery = useCourseTees(courseId || null);
   const tees = useMemo(() => teesQuery.data ?? [], [teesQuery.data]);
 
@@ -116,7 +117,7 @@ export function RoundSetupPage() {
     }
   };
 
-  if (courses.isLoading) {
+  if (courseLoading) {
     return (
       <Box>
         <PageHeader title="Round Setup" back />

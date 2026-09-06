@@ -43,7 +43,11 @@ export function useWatchSync() {
   const currentHole = active?.holes[active.currentHoleIndex] ?? null;
   // useHoleLayout's signature requires holeNumber as a number; pass a sentinel
   // when no round is active so the hook returns `status: 'none'` cleanly.
-  const layoutQuery = useHoleLayout(active?.courseId, currentHole?.holeNumber ?? 0);
+  const layoutQuery = useHoleLayout(
+    active?.courseId,
+    currentHole?.holeNumber ?? 0,
+    currentHole?.yardage ?? null
+  );
 
   // ALL holes' OSM geometry for the course, fetched once. Lets the watch
   // snapshot include every hole's yardage + pin so the watch can navigate holes

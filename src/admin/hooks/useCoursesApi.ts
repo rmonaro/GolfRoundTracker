@@ -47,7 +47,7 @@ async function functionErrorMessage(error: unknown, fallback: string): Promise<s
   return message || fallback;
 }
 
-async function callCoursesApi<T>(action: string, payload: Record<string, unknown>): Promise<T> {
+async function callCoursesApi<T>(action: string, payload: object): Promise<T> {
   const { data, error } = await supabase.functions.invoke('courses-api', {
     body: { action, ...payload }
   });
@@ -186,7 +186,10 @@ export interface CoordProposal {
 
 export function useBackfillCoordsPreview() {
   return useMutation({
-    mutationFn: (limit = 25) =>
+    // Not `limit = 25`: a defaulted parameter makes react-query infer the
+    // mutation's variables as `void`, and every caller passing a number then
+    // fails to typecheck.
+    mutationFn: (limit: number) =>
       callCoursesApi<{ proposals: CoordProposal[]; attribution: string; scanned: number }>(
         'backfillCoordsPreview',
         { limit }

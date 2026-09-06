@@ -114,22 +114,39 @@ export const adminRoundsRepo = {
 
   /** A single round with the player's name, for the admin round detail view. */
   async getOne(roundId: string): Promise<AdminRound | null> {
+    // Two queries rather than one with an embedded `profiles`.
+    //
+    // The embed makes the whole request fail if the relationship can't be
+    // resolved or the profile isn't readable — and the caller then sees an
+    // absent round rather than an error, which reads as "Round not found" for
+    // a round that plainly exists. The player's name is decoration; the round
+    // is the point, so it must not depend on the name resolving.
     const { data, error } = await supabase
       .from('rounds')
-      .select('*, profiles(first_name, last_name, email)')
+      .select('*')
       .eq('id', roundId)
       .maybeSingle();
     if (error) throw toAppError(error, 'Could not load round');
     if (!data) return null;
-    const { profiles, ...round } = data as Round & {
-      profiles: { first_name: string | null; last_name: string | null; email: string | null } | null;
-    };
-    const name = [profiles?.first_name, profiles?.last_name].filter(Boolean).join(' ').trim();
+    const round = data as Round;
+
+    let name = '';
+    let email: string | null = null;
+    if (round.user_id) {
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('first_name, last_name, email')
+        .eq('id', round.user_id)
+        .maybeSingle();
+      name = [profile?.first_name, profile?.last_name].filter(Boolean).join(' ').trim();
+      email = profile?.email ?? null;
+    }
+
+    const [withTotals] = applyLiveTotals([round], await liveTotalsByRound([round.id]));
     return {
-      ...(round as Round),
-      player_name: name || profiles?.email || '—',
-      player_email: profiles?.email ?? null
-    };
+      ...(withTotals ?? round),
+      player_name: name || email || '—'
+    } as AdminRound;
   },
 
   /** Map of club id → display name, for rendering clubs_used / shot clubs. */

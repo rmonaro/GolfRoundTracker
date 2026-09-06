@@ -510,7 +510,7 @@ export function HoleTrackingPage() {
   // Layout query first so the on-the-green check below can use the green's
   // canonical coords to test how close the last shot landed. TanStack Query
   // dedupes this call with HoleLayoutCard's own fetch.
-  const layoutQuery = useHoleLayout(active.courseId, hole.holeNumber);
+  const layoutQuery = useHoleLayout(active.courseId, hole.holeNumber, hole.yardage);
 
   // Pin override (per-round pin → course-wide shared pin → null).
   // Memoized for the same reason as shotEndPoints — a fresh [lng,lat] array

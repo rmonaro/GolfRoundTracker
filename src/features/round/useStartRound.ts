@@ -20,6 +20,46 @@ export function useCourses() {
   });
 }
 
+/**
+ * One course by id, wherever it lives.
+ *
+ * The picker can now select a course that was never in the preloaded list —
+ * server-side search reaches the whole library, so `courses.data.find(...)`
+ * misses anything found that way and the setup screen wrongly concluded the
+ * course had left the library. Falls back to fetching it by id.
+ */
+export function useCourse(courseId: string | null | undefined) {
+  const list = useCourses();
+  const fromList = list.data?.find((c) => c.id === courseId) ?? null;
+  const byId = useQuery({
+    queryKey: ['course', courseId],
+    // Only when the list has finished and genuinely lacks it, so the common
+    // case costs no extra request.
+    enabled: !!courseId && !fromList && !list.isLoading,
+    queryFn: () => courseRepo.getOne(courseId as string)
+  });
+  return {
+    course: fromList ?? byId.data ?? null,
+    isLoading: list.isLoading || byId.isLoading
+  };
+}
+
+/**
+ * Server-side course search, for the round-start picker.
+ *
+ * Two characters minimum: a single letter matches most of the library and the
+ * request is wasted work.
+ */
+export function useCourseSearch(term: string) {
+  const userId = useAuthStore((s) => s.session?.user.id);
+  const q = term.trim();
+  return useQuery({
+    queryKey: ['course-search', userId, q],
+    enabled: !!userId && q.length >= 2,
+    queryFn: () => courseRepo.search(userId ?? null, q)
+  });
+}
+
 /** Named tee sets for a course, for the round-start tee picker. */
 export function useCourseTees(courseId: string | null | undefined) {
   return useQuery({

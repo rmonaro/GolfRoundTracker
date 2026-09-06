@@ -8,6 +8,21 @@ import { toAppError } from './errors';
  */
 export type CourseInsert = { name: string } & Partial<Omit<Course, 'id' | 'name'>>;
 
+/**
+ * The shared-library visibility rule, in PostgREST syntax.
+ *
+ * A course is offered to players when it has OSM geometry AND comes from a
+ * library source: GolfCourseAPI, OpenGolfAPI, or admin-verified. `opengolf` was
+ * missing until now, which quietly hid every state-imported course — the app
+ * showed 23 courses while 443 were fully synced.
+ */
+const SHARED_VISIBLE =
+  'and(osm_status.eq.synced,or(source.eq.api,source.eq.opengolf,verified.eq.true))';
+
+/** Cap on a single search response. The picker is a list a human scans; more
+ *  than this means they should type another word, not scroll further. */
+const SEARCH_LIMIT = 50;
+
 export const courseRepo = {
   /**
    * Returns courses visible to the user:
@@ -25,7 +40,7 @@ export const courseRepo = {
    * added, and the natural response to that is to add it again.
    */
   async list(userId: string | null): Promise<Course[]> {
-    const shared = 'and(osm_status.eq.synced,or(source.eq.api,verified.eq.true))';
+    const shared = SHARED_VISIBLE;
     let query = supabase.from('courses').select('*').order('name', { ascending: true });
     if (userId) {
       query = query.or(`${shared},created_by_user.eq.${userId}`);
@@ -34,6 +49,33 @@ export const courseRepo = {
     }
     const { data, error } = await query;
     if (error) throw toAppError(error, 'Could not load courses');
+    return data ?? [];
+  },
+
+  /**
+   * Search the whole library, in the DATABASE.
+   *
+   * The picker used to filter the preloaded list in the browser, so it could
+   * only ever find courses already downloaded — and that list is capped at
+   * PostgREST's 1000 rows anyway, so as the library grows a client-side search
+   * silently stops seeing most of it. Matching name, club and city server-side
+   * means typing a course's name finds it whether or not it was preloaded.
+   */
+  async search(userId: string | null, term: string): Promise<Course[]> {
+    const q = term.trim();
+    if (!q) return [];
+    // Escape PostgREST's or() delimiters so a name with a comma or bracket
+    // can't break out of the filter expression.
+    const safe = q.replace(/[,()]/g, ' ');
+    const visible = userId ? `${SHARED_VISIBLE},created_by_user.eq.${userId}` : SHARED_VISIBLE;
+    const { data, error } = await supabase
+      .from('courses')
+      .select('*')
+      .or(visible)
+      .or(`name.ilike.%${safe}%,club_name.ilike.%${safe}%,city.ilike.%${safe}%`)
+      .order('name', { ascending: true })
+      .limit(SEARCH_LIMIT);
+    if (error) throw toAppError(error, 'Could not search courses');
     return data ?? [];
   },
 

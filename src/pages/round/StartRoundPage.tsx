@@ -26,6 +26,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { useCourses } from '@/features/round/useStartRound';
 import { useSearchCourses, useImportCourse } from '@/admin/hooks/useCoursesApi';
+import { useCourseSearch } from '@/features/round/useStartRound';
 import { useAuthStore } from '@/stores/authStore';
 import { useCourseFavoritesStore } from '@/stores/courseFavoritesStore';
 import { useCourseLocation } from '@/features/round/useCourseLocation';
@@ -60,14 +61,27 @@ export function StartRoundPage() {
   const toggleFavorite = useCourseFavoritesStore((s) => s.toggleFavorite);
   const location = useCourseLocation();
 
+  // With a search term, rank the DATABASE's answer rather than the preloaded
+  // list — otherwise typing only ever finds courses already downloaded, which
+  // is a small and arbitrary slice of the library.
+  const remoteSearch = useCourseSearch(search);
+  const pool = useMemo(() => {
+    if (search.trim().length < 2) return courses.data ?? [];
+    if (!remoteSearch.data) return courses.data ?? [];
+    // Union: a locally-known course (a favourite, or one the user added) should
+    // still appear while the remote answer is what widens the net.
+    const seen = new Set(remoteSearch.data.map((c) => c.id));
+    return [...remoteSearch.data, ...(courses.data ?? []).filter((c) => !seen.has(c.id))];
+  }, [courses.data, remoteSearch.data, search]);
+
   const ranked = useMemo(
     () =>
-      rankCourses(courses.data ?? [], {
+      rankCourses(pool, {
         favorites: favoriteIds,
         origin: location.origin,
         search
       }),
-    [courses.data, favoriteIds, location.origin, search]
+    [pool, favoriteIds, location.origin, search]
   );
 
   // How many rows are actually rendered. Reset whenever the query changes so a
