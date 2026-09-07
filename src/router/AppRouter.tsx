@@ -1,6 +1,9 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthGuard, PublicOnlyGuard } from '@/features/auth/AuthGuard';
 import { AuthLayout } from '@/pages/auth/AuthLayout';
+import { SpectatorJoinPage } from '@/pages/spectate/SpectatorJoinPage';
+import { SpectatorLivePage } from '@/pages/spectate/SpectatorLivePage';
+import { SpectatorSharePage } from '@/pages/settings/SpectatorSharePage';
 import { LoginPage } from '@/pages/auth/LoginPage';
 import { SignUpPage } from '@/pages/auth/SignUpPage';
 import { ForgotPasswordPage } from '@/pages/auth/ForgotPasswordPage';
@@ -68,6 +71,16 @@ export function AppRouter() {
         <Route path="signup" element={<SignUpPage />} />
         <Route path="forgot-password" element={<ForgotPasswordPage />} />
       </Route>
+
+      {/* Spectators. Outside every guard on purpose: the whole point is that
+          somebody with a code and no account can watch. AuthLayout gives the
+          join screen the same framing as log in; the live view is standalone.
+          Not wrapped in PublicOnlyGuard either, so a signed-in athlete can
+          check what their own code shows. */}
+      <Route path="/spectate" element={<AuthLayout />}>
+        <Route index element={<SpectatorJoinPage />} />
+      </Route>
+      <Route path="/spectate/live" element={<SpectatorLivePage />} />
 
       {/* Tournaments or Golf Rounds. Unset on every launch, so this is the first
           authenticated screen — it resolves itself when there's nothing to ask. */}
@@ -262,6 +275,7 @@ export function AppRouter() {
 
         {/* Shared by both sides */}
         <Route path="/settings" element={<SettingsPage />} />
+        <Route path="/settings/spectators" element={<SpectatorSharePage />} />
       </Route>
 
       <Route

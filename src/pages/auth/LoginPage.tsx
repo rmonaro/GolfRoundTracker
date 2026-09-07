@@ -1,5 +1,14 @@
 import { useState, type FormEvent } from 'react';
-import { Alert, Button, Stack, TextField, Typography, Link as MuiLink } from '@mui/material';
+import {
+  Alert,
+  Button,
+  Divider,
+  Stack,
+  TextField,
+  Typography,
+  Link as MuiLink
+} from '@mui/material';
+import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { authService } from '@/services/authService';
 import { toAppError } from '@/services/errors';
@@ -62,6 +71,27 @@ export function LoginPage() {
             Create account
           </MuiLink>
         </Stack>
+
+        {/* Spectators never sign in. A parent or grandparent has a code, not an
+            account, so this has to be reachable from the screen they land on —
+            not hidden behind one. */}
+        <Divider sx={{ pt: 1 }}>
+          <Typography variant="caption" color="text.secondary">
+            or
+          </Typography>
+        </Divider>
+        <Button
+          component={Link}
+          to="/spectate"
+          variant="outlined"
+          size="large"
+          startIcon={<VisibilityRoundedIcon />}
+        >
+          Watch with a code
+        </Button>
+        <Typography variant="caption" color="text.secondary" align="center">
+          Following an athlete? Enter or scan the code they sent you — no account needed.
+        </Typography>
       </Stack>
     </form>
   );
