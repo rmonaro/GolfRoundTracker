@@ -334,3 +334,137 @@ export function useManualLayout() {
       callCoursesApi<{ holes: number; features: number }>('manualLayout', args)
   });
 }
+
+// ---------------------------------------------------------------------------
+// Duplicate courses — scan, merge, un-merge
+// ---------------------------------------------------------------------------
+
+export interface DuplicateCounts {
+  holes: number;
+  tees: number;
+  features: number;
+  rounds: number;
+}
+
+export interface DuplicateMember {
+  id: string;
+  name: string;
+  club_name: string | null;
+  city: string | null;
+  state: string | null;
+  lat: number | null;
+  lng: number | null;
+  source: string | null;
+  osm_status: string | null;
+  osm_synced_at: string | null;
+  verified: boolean | null;
+  course_api_id: string | null;
+  opengolf_id: string | null;
+  tiles_url: string | null;
+  counts: DuplicateCounts;
+  /** Server-side completeness ranking; the highest is the suggested survivor. */
+  score: number;
+  /** Distance from the suggested survivor. Null when either row has no coords. */
+  distanceKm: number | null;
+}
+
+export interface DuplicateGroup {
+  /** Normalised name the group matched on, e.g. "richter park". */
+  key: string;
+  suggestedKeepId: string;
+  members: DuplicateMember[];
+}
+
+export interface MergeResult {
+  keepId: string;
+  merged: string[];
+  rounds: number;
+  tees: number;
+  holes: number;
+  holesFilled: number;
+  features: number;
+  /** Course columns that were backfilled from a duplicate. */
+  fields: string[];
+}
+
+/** Whole-library scan. Slow enough to be a button, not a background query. */
+export function useDuplicateScan() {
+  return useMutation({
+    mutationFn: (maxDistanceKm: number) =>
+      callCoursesApi<{ scanned: number; groups: DuplicateGroup[] }>('duplicateScan', {
+        maxDistanceKm
+      })
+  });
+}
+
+export function useMergeCourses() {
+  return useMutation({
+    mutationFn: (args: { keepId: string; mergeIds: string[] }) =>
+      callCoursesApi<MergeResult>('mergeCourses', args)
+  });
+}
+
+export function useUnmergeCourse() {
+  return useMutation({
+    mutationFn: (courseId: string) =>
+      callCoursesApi<{ courseId: string; name: string }>('unmergeCourse', { courseId })
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Tee sets — find the courses that have none, then bulk import scorecards
+// ---------------------------------------------------------------------------
+
+export interface TeeGapCourse {
+  id: string;
+  name: string;
+  city: string | null;
+  state: string | null;
+  source: string | null;
+  osm_status: string | null;
+  /** Null means no OpenGolfAPI link, so bulk import has to skip it. */
+  opengolf_id: string | null;
+}
+
+export interface TeeGapScanResult {
+  scanned: number;
+  withTees: number;
+  /** Missing tees but linked to OpenGolfAPI — the bulk runner can do these. */
+  linked: number;
+  /** Missing tees and unlinked — needs a per-course name match first. */
+  unlinked: number;
+  courses: TeeGapCourse[];
+}
+
+export interface TeeBulkResult {
+  processed: number;
+  imported: number;
+  failed: number;
+  /** Batch hit its time budget. Means "ask again", not "something failed". */
+  timedOut: boolean;
+  results: Array<{
+    courseId: string;
+    name: string;
+    status: 'imported' | 'no_scorecard' | 'unlinked' | 'failed';
+    tees?: number;
+    holes?: number;
+    error?: string;
+  }>;
+  attribution: string;
+}
+
+export function useTeeGapScan() {
+  return useMutation({
+    mutationFn: (args: { state: string; syncedOnly: boolean }) =>
+      callCoursesApi<TeeGapScanResult>('teeGapScan', args)
+  });
+}
+
+/** One batch of courses. Each costs two OpenGolfAPI round trips, so the admin
+ *  page loops small batches rather than asking for the whole library. */
+export function useTeeBulkImport() {
+  return useMutation({
+    mutationFn: (courseIds: string[]) =>
+      callCoursesApi<TeeBulkResult>('teeBulkImport', { courseIds })
+  });
+}

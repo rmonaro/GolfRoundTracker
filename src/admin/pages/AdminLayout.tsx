@@ -30,6 +30,8 @@ const NAV: Array<{ heading: string; items: NavItem[] }> = [
       { value: '/admin/courses', label: 'All courses' },
       { value: '/admin/courses/import', label: 'Import' },
       { value: '/admin/courses/state-import', label: 'Bulk import' },
+      { value: '/admin/courses/duplicates', label: 'Duplicates' },
+      { value: '/admin/courses/tees', label: 'Tee sets' },
       { value: '/admin/review', label: 'Hole review' }
     ]
   }

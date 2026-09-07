@@ -19,6 +19,14 @@ export type CourseInsert = { name: string } & Partial<Omit<Course, 'id' | 'name'
 const SHARED_VISIBLE =
   'and(osm_status.eq.synced,or(source.eq.api,source.eq.opengolf,verified.eq.true))';
 
+/**
+ * Courses folded into another as duplicates (migration 040) are hidden here
+ * rather than deleted, so this filter is what actually keeps a player from
+ * seeing Richter Park twice. It applies to a user's OWN courses too — unlike
+ * the sync gate — because a merge is an explicit admin decision that this row
+ * is the same place as another one, and offering both is the bug.
+ */
+
 /** Cap on a single search response. The picker is a list a human scans; more
  *  than this means they should type another word, not scroll further. */
 const SEARCH_LIMIT = 50;
@@ -41,7 +49,11 @@ export const courseRepo = {
    */
   async list(userId: string | null): Promise<Course[]> {
     const shared = SHARED_VISIBLE;
-    let query = supabase.from('courses').select('*').order('name', { ascending: true });
+    let query = supabase
+      .from('courses')
+      .select('*')
+      .is('merged_into', null)
+      .order('name', { ascending: true });
     if (userId) {
       query = query.or(`${shared},created_by_user.eq.${userId}`);
     } else {
@@ -71,6 +83,7 @@ export const courseRepo = {
     const { data, error } = await supabase
       .from('courses')
       .select('*')
+      .is('merged_into', null)
       .or(visible)
       .or(`name.ilike.%${safe}%,club_name.ilike.%${safe}%,city.ilike.%${safe}%`)
       .order('name', { ascending: true })

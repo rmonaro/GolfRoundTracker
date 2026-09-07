@@ -120,6 +120,26 @@ export function AdminCourseDetail() {
           Back to courses
         </Button>
       </Box>
+      {/* A retired duplicate is otherwise indistinguishable from a normal
+          course here, and every "why can't players see this?" answer starts
+          with the same question. */}
+      {course.merged_into && (
+        <Alert
+          severity="info"
+          action={
+            <Button
+              size="small"
+              onClick={() => navigate(`/admin/courses/${course.merged_into}`)}
+            >
+              Open survivor
+            </Button>
+          }
+        >
+          Merged into another course as a duplicate
+          {course.merged_at ? ` on ${new Date(course.merged_at).toLocaleDateString()}` : ''} —
+          hidden from players. Un-merge from Courses &rsaquo; Duplicates.
+        </Alert>
+      )}
       <Card elevation={0} sx={{ bgcolor: 'background.paper' }}>
         <CardContent>
           <Typography variant="h6">{course.name}</Typography>

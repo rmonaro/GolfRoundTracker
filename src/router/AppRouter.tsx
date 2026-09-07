@@ -42,6 +42,8 @@ import { AdminOverview } from '@/admin/pages/AdminOverview';
 import { AdminCoursesList } from '@/admin/pages/AdminCoursesList';
 import { AdminImport } from '@/admin/pages/AdminImport';
 import { AdminStateImport } from '@/admin/pages/AdminStateImport';
+import { AdminDuplicates } from '@/admin/pages/AdminDuplicates';
+import { AdminTees } from '@/admin/pages/AdminTees';
 import { AdminHoleMapper } from '@/admin/pages/AdminHoleMapper';
 import { AdminCourseDetail } from '@/admin/pages/AdminCourseDetail';
 import { AdminReview } from '@/admin/pages/AdminReview';
@@ -278,6 +280,8 @@ export function AppRouter() {
         <Route path="courses" element={<AdminCoursesList />} />
         <Route path="courses/import" element={<AdminImport />} />
         <Route path="courses/state-import" element={<AdminStateImport />} />
+        <Route path="courses/duplicates" element={<AdminDuplicates />} />
+        <Route path="courses/tees" element={<AdminTees />} />
         <Route path="courses/:id/map-holes" element={<AdminHoleMapper />} />
         <Route path="courses/:id" element={<AdminCourseDetail />} />
         <Route path="review" element={<AdminReview />} />

@@ -228,6 +228,9 @@ Deno.serve(async (req) => {
       // Library courses from either provider. User-added courses stay opt-in
       // (an admin resyncs them by id) — see the note in syncOneCourse.
       .in('source', ['api', 'opengolf'])
+      // Duplicates folded into another course (migration 040) are retired —
+      // syncing them spends an Overpass call on a course nobody can play.
+      .is('merged_into', null)
       .or('osm_status.eq.pending,osm_synced_at.is.null')
       .order('osm_synced_at', { ascending: true, nullsFirst: true })
       .limit(limit);
@@ -270,6 +273,7 @@ Deno.serve(async (req) => {
       .from('courses')
       .select('id', { count: 'exact', head: true })
       .in('source', ['api', 'opengolf'])
+      .is('merged_into', null)
       .or('osm_status.eq.pending,osm_synced_at.is.null');
 
     return jsonResponse({

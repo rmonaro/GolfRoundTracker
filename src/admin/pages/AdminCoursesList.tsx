@@ -52,6 +52,9 @@ export function AdminCoursesList() {
   const [sourceFilter, setSourceFilter] = useState('all');
   const [osmFilter, setOsmFilter] = useState('all');
   const [verifiedFilter, setVerifiedFilter] = useState('all');
+  // Retired duplicates are hidden by default, so this list matches what
+  // players actually see. See migration 040.
+  const [mergedFilter, setMergedFilter] = useState('active');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(0);
@@ -66,7 +69,15 @@ export function AdminCoursesList() {
   // Any filter change invalidates the current page number.
   useEffect(() => {
     setPage(0);
-  }, [stateFilter, coordsFilter, sourceFilter, osmFilter, verifiedFilter, debouncedSearch]);
+  }, [
+    stateFilter,
+    coordsFilter,
+    sourceFilter,
+    osmFilter,
+    verifiedFilter,
+    mergedFilter,
+    debouncedSearch
+  ]);
 
   const { data, isLoading, isFetching } = useQuery({
     queryKey: [
@@ -76,6 +87,7 @@ export function AdminCoursesList() {
       sourceFilter,
       osmFilter,
       verifiedFilter,
+      mergedFilter,
       debouncedSearch,
       page
     ],
@@ -86,6 +98,7 @@ export function AdminCoursesList() {
         source: sourceFilter,
         osmStatus: osmFilter,
         verified: verifiedFilter,
+        merged: mergedFilter,
         search: debouncedSearch,
         limit: PAGE_SIZE,
         offset: page * PAGE_SIZE
@@ -200,6 +213,18 @@ export function AdminCoursesList() {
           <MenuItem value="yes">Verified</MenuItem>
           <MenuItem value="no">Unverified</MenuItem>
         </TextField>
+        <TextField
+          select
+          size="small"
+          label="Merged"
+          value={mergedFilter}
+          onChange={(e) => setMergedFilter(e.target.value)}
+          sx={{ width: 125, flexShrink: 0 }}
+        >
+          <MenuItem value="active">Active</MenuItem>
+          <MenuItem value="merged">Merged away</MenuItem>
+          <MenuItem value="all">Both</MenuItem>
+        </TextField>
       </Stack>
 
       <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
@@ -260,7 +285,10 @@ export function AdminCoursesList() {
                 )}
               </TableCell>
               <TableCell>
-                <Chip size="small" label={c.source ?? '—'} />
+                <Stack direction="row" spacing={0.5}>
+                  <Chip size="small" label={c.source ?? '—'} />
+                  {c.merged_into && <Chip size="small" label="merged" color="warning" />}
+                </Stack>
               </TableCell>
               <TableCell>
                 <Chip
