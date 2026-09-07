@@ -938,6 +938,28 @@ export function HoleLayout({
   // re-init and a visible flash.
   const imagery = useImagerySource(layout.hole.course_id);
 
+  /**
+   * The camera, kept across a map REBUILD.
+   *
+   * Changing imagery tier tears the map down and builds a new one, and the new
+   * one frames the hole overview from scratch — so a golfer who had zoomed into
+   * the green to place a pin was snapped back out every time the basemap
+   * switched. `useImagerySource` now damps that switching, but a rebuild still
+   * happens legitimately (a pack finishing its download, signal genuinely
+   * going), and it should not cost them their view.
+   *
+   * Keyed by hole + mode: moving to the next hole, or into putting mode, IS a
+   * different view and should frame itself normally.
+   */
+  const keptCameraRef = useRef<{
+    key: string;
+    center: mapboxgl.LngLatLike;
+    zoom: number;
+    bearing: number;
+    pitch: number;
+  } | null>(null);
+  const cameraKey = `${layout.hole.id}|${puttingMode ? 'putt' : 'hole'}`;
+
   // A pack renders from bytes already on the device, so it needs NO network —
   // that is the entire point of downloading one. It therefore must not be gated
   // on connectivity the way Mapbox is. Without this, a golfer who had saved the
@@ -1299,6 +1321,10 @@ export function HoleLayout({
             hole.tee_lat
           ]
         : [hole.tee_lng, hole.tee_lat];
+
+    // Declared up here because onLoad reads it: a restored camera counts as
+    // user-moved, so the resize observer leaves it alone.
+    let userMovedCamera = false;
 
     const onLoad = () => {
       // Force a resize on load: if the container measured 0×0 at map construction
@@ -1912,6 +1938,21 @@ export function HoleLayout({
         }
       }
 
+      // A rebuild of the SAME view (an imagery tier change, not a new hole)
+      // restores where the golfer had the camera instead of re-framing. Marking
+      // it as user-moved keeps the resize observer from pulling it back out.
+      const kept = keptCameraRef.current;
+      if (kept && kept.key === cameraKey) {
+        map.jumpTo({
+          center: kept.center,
+          zoom: kept.zoom,
+          bearing: kept.bearing,
+          pitch: kept.pitch
+        });
+        userMovedCamera = true;
+        return;
+      }
+
       // Frame the hole overview once the canvas is ready (see applyOverview).
       applyOverview(false);
       // Belt-and-suspenders: re-frame once after the map settles, in case the
@@ -1982,7 +2023,6 @@ export function HoleLayout({
     // never fight their gesture. Detecting interaction via DOM pointer/wheel on
     // the container (not Mapbox camera events) avoids tripping on programmatic
     // jumpTo/easeTo from applyOverview itself.
-    let userMovedCamera = false;
     const markUserMoved = () => {
       userMovedCamera = true;
     };
@@ -2327,6 +2367,21 @@ export function HoleLayout({
       container.removeEventListener('pointerdown', markUserMoved);
       container.removeEventListener('wheel', markUserMoved);
       if (reframeRaf != null) cancelAnimationFrame(reframeRaf);
+      // Hold on to the view if the golfer had moved it, so a rebuild of this
+      // same hole can put them back where they were.
+      if (userMovedCamera) {
+        try {
+          keptCameraRef.current = {
+            key: cameraKey,
+            center: map.getCenter(),
+            zoom: map.getZoom(),
+            bearing: map.getBearing(),
+            pitch: map.getPitch()
+          };
+        } catch {
+          // Map already disposed — nothing worth keeping.
+        }
+      }
       mapRef.current = null;
       map.remove();
     };
