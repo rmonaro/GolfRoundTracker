@@ -14,6 +14,12 @@
 //   manualLayout                  admin only — build holes + hole_features from
 //                                 tee/green points an admin clicked, for courses
 //                                 OSM never mapped
+//   duplicateScan                 admin only — same-name, same-place courses the
+//                                 bulk imports landed twice
+//   teeGapScan | teeBulkImport    admin only — courses with no tee sets, and a
+//                                 batched OpenGolfAPI scorecard import for them
+//   mergeCourses | unmergeCourse  admin only — fold duplicates into one survivor
+//                                 (reversible; nothing is deleted)
 //
 // Deploy:
 //   supabase functions deploy courses-api --no-verify-jwt
@@ -42,8 +48,10 @@ import {
   rotationRadians,
   type LngLat
 } from '../_shared/geo.ts';
+import { clusterDuplicates, completenessScore } from '../_shared/dedupe.ts';
 import {
   OPENGOLF_ATTRIBUTION,
+  yardageKeyFor,
   coursesByState as ogCoursesByState,
   courseHoles as ogCourseHoles,
   courseTees as ogCourseTees,
@@ -120,6 +128,21 @@ Deno.serve(async (req) => {
       case 'manualLayout':
         requireAdmin(auth);
         return await handleManualLayout(args);
+      case 'duplicateScan':
+        requireAdmin(auth);
+        return await handleDuplicateScan(args);
+      case 'teeGapScan':
+        requireAdmin(auth);
+        return await handleTeeGapScan(args);
+      case 'teeBulkImport':
+        requireAdmin(auth);
+        return await handleTeeBulkImport(args);
+      case 'mergeCourses':
+        requireAdmin(auth);
+        return await handleMergeCourses(args, auth.userId);
+      case 'unmergeCourse':
+        requireAdmin(auth);
+        return await handleUnmergeCourse(args);
       case 'scorecardApply':
         requireAdmin(auth);
         return await handleScorecardApply(
@@ -881,15 +904,23 @@ async function applyTees(
   const rows: Record<string, unknown>[] = [];
   const sortedHoles = [...incomingHoles].sort((a, b) => a.number - b.number);
 
+  // Every yardage key the holes payload actually publishes, indexed by its
+  // lowercased form so a tee can be matched to one case-insensitively.
+  const yardageKeys = new Map<string, string>();
+  for (const h of sortedHoles) {
+    for (const k of Object.keys(h.yardages ?? {})) yardageKeys.set(k.toLowerCase(), k);
+  }
+
   for (const t of incomingTees) {
     const name = (t.tee_name ?? '').trim();
     if (!name) continue;
     const color = (t.tee_color ?? '').trim().toLowerCase() || null;
+    const yardageKey = yardageKeyFor(t, yardageKeys);
 
-    const holes = color
+    const holes = yardageKey
       ? sortedHoles.map((h) => ({
           par: h.par ?? null,
-          yardage: h.yardages?.[color] ?? null,
+          yardage: h.yardages?.[yardageKey] ?? null,
           handicap: h.handicap_index ?? null
         }))
       : null;
@@ -1264,4 +1295,641 @@ async function handleManualLayout(args: Record<string, unknown>): Promise<Respon
     .eq('id', courseId);
 
   return jsonResponse({ holes: holeRows.length, features: featureCount });
+}
+
+// ---------------------------------------------------------------------------
+// duplicateScan / mergeCourses / unmergeCourse
+//
+// Bulk imports overlap. GolfCourseAPI and OpenGolfAPI both carry Richter Park;
+// OpenGolfAPI alone lists Hay Harbor twice, once under "Fishers Island" and
+// once under the ZIP-derived town "NY 06390". The player sees the same course
+// two or three times and only one of the rows has OSM geometry, so which one
+// they tap decides whether auto-tracking works.
+//
+// Matching is name AND proximity. Name alone is wrong here: New York has a
+// "Brae Burn" in Purchase and another in Dansville, 250 miles apart, and both
+// are real. Proximity alone is wrong too: Whirlwind's Cattail and Devil's Claw
+// share a car park.
+// ---------------------------------------------------------------------------
+
+/** Two courses this close with the same normalised name are the same course. */
+const DUP_DISTANCE_KM = 1;
+/** PostgREST's response cap — every full-table read here has to page. */
+const PAGE_SIZE = 1000;
+
+interface DupCourse {
+  id: string;
+  name: string;
+  club_name: string | null;
+  city: string | null;
+  state: string | null;
+  lat: number | null;
+  lng: number | null;
+  source: string | null;
+  osm_status: string | null;
+  osm_synced_at: string | null;
+  verified: boolean | null;
+  course_api_id: string | null;
+  opengolf_id: string | null;
+  tiles_url: string | null;
+  merged_into: string | null;
+}
+
+const DUP_COLUMNS =
+  'id, name, club_name, city, state, lat, lng, source, osm_status, osm_synced_at, verified, course_api_id, opengolf_id, tiles_url, merged_into';
+
+/**
+ * Read every row of `table` matching `ids` on `column`, paging past the 1000-row
+ * cap. Callers pass a narrow select list — this can run over hole_features,
+ * where one course alone carries hundreds of rows.
+ */
+async function fetchAllFor(
+  supabase: ReturnType<typeof serviceClient>,
+  table: string,
+  select: string,
+  column: string,
+  ids: string[]
+): Promise<Record<string, unknown>[]> {
+  const out: Record<string, unknown>[] = [];
+  for (let i = 0; i < ids.length; i += 100) {
+    const chunk = ids.slice(i, i + 100);
+    let offset = 0;
+    for (;;) {
+      const { data, error } = await supabase
+        .from(table)
+        .select(select)
+        .in(column, chunk)
+        .range(offset, offset + PAGE_SIZE - 1);
+      if (error) throw new Error(`${table}: ${error.message}`);
+      const rows = (data ?? []) as unknown as Record<string, unknown>[];
+      out.push(...rows);
+      if (rows.length < PAGE_SIZE) break;
+      offset += PAGE_SIZE;
+    }
+  }
+  return out;
+}
+
+async function handleDuplicateScan(args: Record<string, unknown>): Promise<Response> {
+  const maxKm = Number(args.maxDistanceKm ?? DUP_DISTANCE_KM);
+  const supabase = serviceClient();
+
+  // Whole table, paged. Merged rows are excluded: they are already resolved,
+  // and leaving them in would re-report every group that was just merged.
+  const all: DupCourse[] = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('courses')
+      .select(DUP_COLUMNS)
+      .is('merged_into', null)
+      .order('id')
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) return errorResponse(500, 'Could not read courses', error.message);
+    const rows = (data ?? []) as unknown as DupCourse[];
+    all.push(...rows);
+    if (rows.length < PAGE_SIZE) break;
+  }
+
+  const clusters = clusterDuplicates(all, maxKm);
+
+  const ids = clusters.flatMap((g) => g.members.map((m) => m.id));
+  const counts = new Map<string, { holes: number; tees: number; features: number; rounds: number }>();
+  for (const id of ids) counts.set(id, { holes: 0, tees: 0, features: 0, rounds: 0 });
+
+  if (ids.length) {
+    try {
+      const bump = (rows: Record<string, unknown>[], field: 'holes' | 'tees' | 'features' | 'rounds') => {
+        for (const r of rows) {
+          const c = counts.get(String(r.course_id));
+          if (c) c[field]++;
+        }
+      };
+      bump(await fetchAllFor(supabase, 'holes', 'course_id', 'course_id', ids), 'holes');
+      bump(await fetchAllFor(supabase, 'course_tees', 'course_id', 'course_id', ids), 'tees');
+      bump(await fetchAllFor(supabase, 'hole_features', 'course_id', 'course_id', ids), 'features');
+      bump(await fetchAllFor(supabase, 'rounds', 'course_id', 'course_id', ids), 'rounds');
+    } catch (err) {
+      return errorResponse(500, 'Could not count course data', (err as Error).message);
+    }
+  }
+
+  const groups = clusters
+    .map((g) => {
+      const scored = g.members
+        .map((c) => ({
+          ...c,
+          counts: counts.get(c.id)!,
+          score: completenessScore(c, counts.get(c.id)!)
+        }))
+        .sort((a, b) => b.score - a.score);
+      // Distance from the suggested survivor, so the admin can see whether the
+      // copies sit on top of each other or a fairway apart — the difference
+      // between "one club listed twice" and "two courses at one facility".
+      const anchor = scored[0];
+      const members = scored.map((c) => ({
+        ...c,
+        distanceKm:
+          anchor.lat != null && anchor.lng != null && c.lat != null && c.lng != null
+            ? haversineMeters(
+                [anchor.lng, anchor.lat] as LngLat,
+                [c.lng, c.lat] as LngLat
+              ) / 1000
+            : null
+      }));
+      return { key: g.key, suggestedKeepId: anchor.id, members };
+    })
+    .sort((a, b) => a.key.localeCompare(b.key));
+
+  return jsonResponse({ scanned: all.length, groups });
+}
+
+/** Columns copied onto the survivor wherever it has nothing of its own. */
+const MERGE_BACKFILL_COLUMNS = [
+  'club_name', 'address', 'city', 'state', 'zip', 'country',
+  'lat', 'lng', 'search_radius', 'tee_box',
+  'course_rating', 'slope_rating', 'total_par', 'total_yardage',
+  'scorecard_external', 'osm_hole_ref_filter',
+  // The imagery pack is one unit: coursePackRepo reads the URL alongside the
+  // zoom range, size and attribution, so moving the URL without them leaves a
+  // pack the app can describe but not honestly credit.
+  'tiles_url', 'tiles_generated_at', 'tiles_min_zoom', 'tiles_max_zoom',
+  'tiles_size_bytes', 'imagery_source', 'imagery_attribution', 'imagery_captured_at'
+] as const;
+
+/** Unique columns — moving one requires clearing it on the source first. */
+const MERGE_EXTERNAL_ID_COLUMNS = ['course_api_id', 'opengolf_id'] as const;
+
+const HOLE_COPY_COLUMNS = [
+  'par', 'handicap', 'tee_lng', 'tee_lat', 'green_lng', 'green_lat',
+  'pin_lng', 'pin_lat', 'rotation_radians', 'orientation_confidence',
+  'bbox_min_lng', 'bbox_min_lat', 'bbox_max_lng', 'bbox_max_lat',
+  'centerline', 'centerline_distance_m', 'straight_distance_m'
+] as const;
+
+function teeKey(row: Record<string, unknown>): string {
+  const gender = String(row.gender ?? '');
+  const name = String(row.tee_name ?? '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+  return `${gender}|${name}`;
+}
+
+/**
+ * Fold duplicate courses into one survivor.
+ *
+ * The survivor absorbs whatever the duplicates have and it lacks — holes, tee
+ * sets, OSM features, scorecard columns — and every round played on a duplicate
+ * is re-pointed at it. The duplicates are then marked `merged_into` rather than
+ * deleted, so nothing is destroyed and the merge can be undone.
+ *
+ * Order matters: tees are copied before rounds move, because a round's tee_id
+ * has to be re-pointed at the survivor's equivalent tee — including one that
+ * only exists because this merge just created it.
+ */
+async function handleMergeCourses(
+  args: Record<string, unknown>,
+  userId: string
+): Promise<Response> {
+  const keepId = String(args.keepId ?? '');
+  const mergeIds = Array.from(
+    new Set(((args.mergeIds as unknown[]) ?? []).map((v) => String(v)).filter(Boolean))
+  ).filter((id) => id !== keepId);
+  if (!keepId) return errorResponse(400, 'keepId is required');
+  if (!mergeIds.length) return errorResponse(400, 'mergeIds is required');
+
+  const supabase = serviceClient();
+
+  const { data: courseRows, error: loadErr } = await supabase
+    .from('courses')
+    .select('*')
+    .in('id', [keepId, ...mergeIds]);
+  if (loadErr) return errorResponse(500, 'Could not load courses', loadErr.message);
+
+  const rows = (courseRows ?? []) as Record<string, unknown>[];
+  const keeper = rows.find((r) => r.id === keepId);
+  if (!keeper) return errorResponse(404, 'Course to keep was not found');
+  if (keeper.merged_into) {
+    return errorResponse(400, 'The course to keep has itself been merged into another course');
+  }
+  const losers = mergeIds.map((id) => rows.find((r) => r.id === id)).filter(Boolean) as Record<
+    string,
+    unknown
+  >[];
+  if (losers.length !== mergeIds.length) {
+    return errorResponse(404, 'One or more duplicates were not found');
+  }
+  // Chains are refused rather than followed: A→B→C leaves rounds on A pointing
+  // at a course that is itself hidden, which is the bug this is meant to fix.
+  const chained = losers.find((l) => l.merged_into && l.merged_into !== keepId);
+  if (chained) {
+    return errorResponse(400, `"${chained.name}" is already merged into another course`);
+  }
+
+  const loserIds = losers.map((l) => String(l.id));
+  const summary = { rounds: 0, tees: 0, holes: 0, holesFilled: 0, features: 0, fields: [] as string[] };
+
+  try {
+    // --- 1. tee sets the survivor doesn't already offer ---------------------
+    const keeperTees = (await fetchAllFor(supabase, 'course_tees', '*', 'course_id', [keepId])) as
+      Record<string, unknown>[];
+    const loserTees = (await fetchAllFor(supabase, 'course_tees', '*', 'course_id', loserIds)) as
+      Record<string, unknown>[];
+    const teeIdByKey = new Map<string, string>();
+    for (const t of keeperTees) teeIdByKey.set(teeKey(t), String(t.id));
+
+    const teesToInsert = loserTees
+      .filter((t) => !teeIdByKey.has(teeKey(t)))
+      .filter((t, i, arr) => arr.findIndex((o) => teeKey(o) === teeKey(t)) === i)
+      .map(({ id: _id, created_at: _created, course_id: _course, ...rest }) => ({
+        ...rest,
+        course_id: keepId
+      }));
+    if (teesToInsert.length) {
+      const { data: inserted, error } = await supabase
+        .from('course_tees')
+        .insert(teesToInsert)
+        .select('id, gender, tee_name');
+      if (error) throw new Error(`copying tee sets: ${error.message}`);
+      for (const t of inserted ?? []) teeIdByKey.set(teeKey(t), String(t.id));
+      summary.tees = inserted?.length ?? 0;
+    }
+
+    // --- 2. holes: add the ones missing, fill the gaps in the ones present --
+    const keeperHoles = (await fetchAllFor(supabase, 'holes', '*', 'course_id', [keepId])) as
+      Record<string, unknown>[];
+    const loserHoles = (await fetchAllFor(supabase, 'holes', '*', 'course_id', loserIds)) as
+      Record<string, unknown>[];
+    const keeperHoleByNumber = new Map<number, Record<string, unknown>>();
+    for (const h of keeperHoles) keeperHoleByNumber.set(Number(h.hole_number), h);
+
+    // Richest duplicate first, so hole 7's geometry comes from the mapped copy
+    // rather than from a bare par-only row that happens to sort earlier.
+    const loserRank = new Map(loserIds.map((id, i) => [id, i]));
+    const orderedLoserHoles = [...loserHoles].sort((a, b) => {
+      const filled = (h: Record<string, unknown>) =>
+        HOLE_COPY_COLUMNS.filter((c) => h[c] != null).length;
+      return (
+        filled(b) - filled(a) ||
+        (loserRank.get(String(a.course_id)) ?? 0) - (loserRank.get(String(b.course_id)) ?? 0)
+      );
+    });
+
+    const holesToInsert: Record<string, unknown>[] = [];
+    const seenNewNumbers = new Set<number>();
+    for (const h of orderedLoserHoles) {
+      const n = Number(h.hole_number);
+      const existing = keeperHoleByNumber.get(n);
+      if (!existing) {
+        if (seenNewNumbers.has(n)) continue;
+        seenNewNumbers.add(n);
+        const { id: _id, course_id: _course, ...rest } = h;
+        holesToInsert.push({ ...rest, course_id: keepId });
+        continue;
+      }
+      const patch: Record<string, unknown> = {};
+      for (const col of HOLE_COPY_COLUMNS) {
+        if (existing[col] == null && h[col] != null) patch[col] = h[col];
+      }
+      if (Object.keys(patch).length) {
+        const { error } = await supabase.from('holes').update(patch).eq('id', existing.id);
+        if (error) throw new Error(`filling hole ${n}: ${error.message}`);
+        Object.assign(existing, patch);
+        summary.holesFilled++;
+      }
+    }
+    if (holesToInsert.length) {
+      const { data: inserted, error } = await supabase
+        .from('holes')
+        .insert(holesToInsert)
+        .select('*');
+      if (error) throw new Error(`copying holes: ${error.message}`);
+      for (const h of inserted ?? []) keeperHoleByNumber.set(Number(h.hole_number), h);
+      summary.holes = inserted?.length ?? 0;
+    }
+
+    // --- 3. OSM features, but only from ONE source -------------------------
+    // Two mappings of the same course draw every bunker twice. So features are
+    // copied only when the survivor has none, and only from the duplicate that
+    // has the most.
+    const keeperFeatureCount = (
+      await fetchAllFor(supabase, 'hole_features', 'id', 'course_id', [keepId])
+    ).length;
+    if (keeperFeatureCount === 0) {
+      const loserFeatures = (await fetchAllFor(
+        supabase,
+        'hole_features',
+        '*',
+        'course_id',
+        loserIds
+      )) as Record<string, unknown>[];
+      const byCourse = new Map<string, Record<string, unknown>[]>();
+      for (const f of loserFeatures) {
+        const arr = byCourse.get(String(f.course_id)) ?? [];
+        arr.push(f);
+        byCourse.set(String(f.course_id), arr);
+      }
+      let best: Record<string, unknown>[] = [];
+      for (const arr of byCourse.values()) if (arr.length > best.length) best = arr;
+
+      if (best.length) {
+        // Features point at holes by id; those ids belong to the duplicate. Map
+        // them across by hole number, which is the only stable identifier the
+        // two rows share.
+        const sourceHoleNumber = new Map<string, number>();
+        for (const h of loserHoles) sourceHoleNumber.set(String(h.id), Number(h.hole_number));
+        const rowsToInsert = best.map(({ id: _id, created_at: _c, ...rest }) => {
+          const n = rest.hole_id ? sourceHoleNumber.get(String(rest.hole_id)) : undefined;
+          const target = n != null ? keeperHoleByNumber.get(n) : undefined;
+          return { ...rest, course_id: keepId, hole_id: target ? target.id : null };
+        });
+        for (let i = 0; i < rowsToInsert.length; i += 500) {
+          const { error } = await supabase
+            .from('hole_features')
+            .insert(rowsToInsert.slice(i, i + 500));
+          if (error) throw new Error(`copying features: ${error.message}`);
+        }
+        summary.features = rowsToInsert.length;
+      }
+    }
+
+    // --- 4. scorecard / location columns the survivor is missing ------------
+    const patch: Record<string, unknown> = {};
+    for (const col of MERGE_BACKFILL_COLUMNS) {
+      if (keeper[col] != null) continue;
+      const donor = losers.find((l) => l[col] != null);
+      if (donor) {
+        patch[col] = donor[col];
+        summary.fields.push(col);
+      }
+    }
+    // A course_api_id is unique across the table, so it can only move once the
+    // duplicate has let go of it. Un-merge does not put it back — the survivor
+    // is the row that should be re-importing from that source from now on.
+    for (const col of MERGE_EXTERNAL_ID_COLUMNS) {
+      if (keeper[col] != null) continue;
+      const donor = losers.find((l) => l[col] != null);
+      if (!donor) continue;
+      const { error } = await supabase
+        .from('courses')
+        .update({ [col]: null })
+        .eq('id', donor.id);
+      if (error) throw new Error(`releasing ${col}: ${error.message}`);
+      patch[col] = donor[col];
+      summary.fields.push(col);
+    }
+    // Copied geometry makes the survivor synced, which is what un-hides it.
+    if (summary.holes > 0 || summary.features > 0) {
+      if (keeper.osm_status !== 'synced') {
+        patch.osm_status = 'synced';
+        patch.osm_error = null;
+        patch.osm_synced_at =
+          losers.map((l) => l.osm_synced_at).find(Boolean) ?? new Date().toISOString();
+        summary.fields.push('osm_status');
+      }
+    }
+    if (Object.keys(patch).length) {
+      const { error } = await supabase.from('courses').update(patch).eq('id', keepId);
+      if (error) throw new Error(`updating the surviving course: ${error.message}`);
+    }
+
+    // --- 5. move the rounds -------------------------------------------------
+    // Before the duplicates are retired, so a round is never left pointing at a
+    // course players can no longer see.
+    const loserTeeIds = new Set(loserTees.map((t) => String(t.id)));
+    const teeTargetById = new Map<string, string | null>();
+    for (const t of loserTees) teeTargetById.set(String(t.id), teeIdByKey.get(teeKey(t)) ?? null);
+
+    const { data: movedRounds, error: roundsErr } = await supabase
+      .from('rounds')
+      .update({ course_id: keepId })
+      .in('course_id', loserIds)
+      .select('id, tee_id');
+    if (roundsErr) throw new Error(`moving rounds: ${roundsErr.message}`);
+    summary.rounds = movedRounds?.length ?? 0;
+
+    // Re-point each moved round at the survivor's equivalent tee. Rounds are
+    // grouped by target so this is one write per distinct tee, not per round.
+    const roundsByTarget = new Map<string, string[]>();
+    for (const r of movedRounds ?? []) {
+      const teeId = r.tee_id ? String(r.tee_id) : '';
+      if (!teeId || !loserTeeIds.has(teeId)) continue;
+      const target = teeTargetById.get(teeId) ?? null;
+      const key = target ?? '';
+      const arr = roundsByTarget.get(key) ?? [];
+      arr.push(String(r.id));
+      roundsByTarget.set(key, arr);
+    }
+    for (const [target, roundIds] of roundsByTarget) {
+      const { error } = await supabase
+        .from('rounds')
+        .update({ tee_id: target || null })
+        .in('id', roundIds);
+      if (error) throw new Error(`re-pointing round tees: ${error.message}`);
+    }
+
+    // --- 6. retire the duplicates ------------------------------------------
+    const { error: markErr } = await supabase
+      .from('courses')
+      .update({ merged_into: keepId, merged_at: new Date().toISOString(), merged_by: userId })
+      .in('id', loserIds);
+    if (markErr) throw new Error(`retiring the duplicates: ${markErr.message}`);
+  } catch (err) {
+    return errorResponse(500, 'Merge failed', (err as Error).message);
+  }
+
+  return jsonResponse({ keepId, merged: loserIds, ...summary });
+}
+
+/**
+ * Put a merged course back in circulation. Deliberately narrow: it restores
+ * visibility only. Rounds stay on the survivor and copied holes/tees stay
+ * copied, because unpicking those would need a record of what each row looked
+ * like beforehand — and the reason to un-merge is almost always "these are two
+ * different courses", which wants a fresh sync anyway, not a rewind.
+ */
+async function handleUnmergeCourse(args: Record<string, unknown>): Promise<Response> {
+  const courseId = String(args.courseId ?? '');
+  if (!courseId) return errorResponse(400, 'courseId is required');
+  const supabase = serviceClient();
+  const { data, error } = await supabase
+    .from('courses')
+    .update({ merged_into: null, merged_at: null, merged_by: null })
+    .eq('id', courseId)
+    .select('id, name')
+    .maybeSingle();
+  if (error) return errorResponse(500, 'Could not un-merge course', error.message);
+  if (!data) return errorResponse(404, 'Course not found');
+  return jsonResponse({ courseId, name: data.name });
+}
+
+// ---------------------------------------------------------------------------
+// teeGapScan / teeBulkImport
+//
+// Tee sets are what make a round playable properly: the selected tee stamps the
+// round's rating/slope, seeds each hole's yardage, and decides where the tee
+// marker sits on the hole map. A course with none of them still renders, but
+// every yardage on it is a guess.
+//
+// The library arrived from a bulk state import, which brings coordinates and
+// names but no scorecard, so the overwhelming majority of courses have zero tee
+// sets. Filling that in one course at a time through the detail page is not a
+// realistic amount of clicking, hence a scan and a batched runner.
+// ---------------------------------------------------------------------------
+
+/** Wall clock for one bulk batch, well inside the function's own limit. */
+const TEE_BATCH_BUDGET_MS = 45_000;
+/** Don't start another course without room to finish it. */
+const TEE_MIN_COURSE_BUDGET_MS = 4_000;
+/** Two OpenGolfAPI calls per course; this keeps the run under their rate cap. */
+const TEE_PER_COURSE_GAP_MS = 150;
+
+interface TeeGapCourse {
+  id: string;
+  name: string;
+  city: string | null;
+  state: string | null;
+  source: string | null;
+  osm_status: string | null;
+  opengolf_id: string | null;
+}
+
+/**
+ * Courses with no tee sets at all.
+ *
+ * Computed by reading both tables rather than asking PostgREST for a left
+ * anti-join, which it can't express: `course_tees` is small (a few hundred rows
+ * against a few thousand courses), so pulling the course_id column and
+ * subtracting is both simpler and cheaper than the alternatives.
+ */
+async function handleTeeGapScan(args: Record<string, unknown>): Promise<Response> {
+  const state = String(args.state ?? '').trim().toUpperCase();
+  const syncedOnly = args.syncedOnly !== false;
+  const supabase = serviceClient();
+
+  const courses: TeeGapCourse[] = [];
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    let query = supabase
+      .from('courses')
+      .select('id, name, city, state, source, osm_status, opengolf_id')
+      .is('merged_into', null)
+      .order('name')
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (state && state !== 'ALL') query = query.eq('state', state);
+    if (syncedOnly) query = query.eq('osm_status', 'synced');
+    const { data, error } = await query;
+    if (error) return errorResponse(500, 'Could not read courses', error.message);
+    const rows = (data ?? []) as unknown as TeeGapCourse[];
+    courses.push(...rows);
+    if (rows.length < PAGE_SIZE) break;
+  }
+
+  const withTees = new Set<string>();
+  for (let offset = 0; ; offset += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('course_tees')
+      .select('course_id')
+      .range(offset, offset + PAGE_SIZE - 1);
+    if (error) return errorResponse(500, 'Could not read tee sets', error.message);
+    const rows = (data ?? []) as unknown as Array<{ course_id: string }>;
+    for (const r of rows) withTees.add(r.course_id);
+    if (rows.length < PAGE_SIZE) break;
+  }
+
+  const missing = courses.filter((c) => !withTees.has(c.id));
+  return jsonResponse({
+    scanned: courses.length,
+    withTees: courses.length - missing.length,
+    // Split out because a course with no opengolf_id needs a name match first,
+    // which can be wrong — those are worth importing deliberately, not in bulk.
+    linked: missing.filter((c) => c.opengolf_id).length,
+    unlinked: missing.filter((c) => !c.opengolf_id).length,
+    courses: missing
+  });
+}
+
+/**
+ * Import scorecards for a batch of courses.
+ *
+ * The caller passes explicit ids and loops, the same shape the OSM sync uses:
+ * an edge function has a wall clock, OpenGolfAPI is two round trips per course,
+ * and a run over a few thousand courses has to survive one of them failing.
+ * Progress is therefore the client's to drive — this returns what it managed
+ * and says whether it ran out of time.
+ *
+ * Only courses that already carry an `opengolf_id` are processed. Resolving one
+ * by name is a guess, and a wrong guess writes another course's scorecard over
+ * this one; that stays a per-course decision on the course detail page.
+ */
+async function handleTeeBulkImport(args: Record<string, unknown>): Promise<Response> {
+  const courseIds = ((args.courseIds as unknown[]) ?? []).map((v) => String(v)).filter(Boolean);
+  if (!courseIds.length) return errorResponse(400, 'courseIds is required');
+
+  const supabase = serviceClient();
+  const { data, error } = await supabase
+    .from('courses')
+    .select('id, name, opengolf_id')
+    .in('id', courseIds);
+  if (error) return errorResponse(500, 'Could not load courses', error.message);
+  const byId = new Map(
+    ((data ?? []) as unknown as Array<{ id: string; name: string; opengolf_id: string | null }>).map(
+      (c) => [c.id, c]
+    )
+  );
+
+  const started = Date.now();
+  const results: Array<{
+    courseId: string;
+    name: string;
+    status: 'imported' | 'no_scorecard' | 'unlinked' | 'failed';
+    tees?: number;
+    holes?: number;
+    error?: string;
+  }> = [];
+  let timedOut = false;
+
+  for (const id of courseIds) {
+    if (Date.now() - started > TEE_BATCH_BUDGET_MS - TEE_MIN_COURSE_BUDGET_MS) {
+      timedOut = true;
+      break;
+    }
+    const course = byId.get(id);
+    if (!course) {
+      results.push({ courseId: id, name: id, status: 'failed', error: 'Course not found' });
+      continue;
+    }
+    if (!course.opengolf_id) {
+      results.push({ courseId: id, name: course.name, status: 'unlinked' });
+      continue;
+    }
+    try {
+      const [incomingHoles, incomingTees] = await Promise.all([
+        ogCourseHoles(course.opengolf_id),
+        ogCourseTees(course.opengolf_id)
+      ]);
+      if (incomingHoles.length === 0 && incomingTees.length === 0) {
+        results.push({ courseId: id, name: course.name, status: 'no_scorecard' });
+        continue;
+      }
+      const holes = await applyHoles(supabase, id, incomingHoles);
+      const tees = await applyTees(supabase, id, incomingHoles, incomingTees);
+      results.push({ courseId: id, name: course.name, status: 'imported', tees, holes });
+    } catch (err) {
+      results.push({
+        courseId: id,
+        name: course.name,
+        status: 'failed',
+        error: (err as Error).message.slice(0, 200)
+      });
+    }
+    await new Promise((r) => setTimeout(r, TEE_PER_COURSE_GAP_MS));
+  }
+
+  return jsonResponse({
+    processed: results.length,
+    imported: results.filter((r) => r.status === 'imported').length,
+    failed: results.filter((r) => r.status === 'failed').length,
+    timedOut,
+    results,
+    attribution: OPENGOLF_ATTRIBUTION
+  });
 }

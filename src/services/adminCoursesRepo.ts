@@ -14,6 +14,12 @@ export interface CourseListFilters {
   osmStatus?: string;
   /** 'all' | 'yes' | 'no' — admin verification (migration 030). */
   verified?: string;
+  /**
+   * 'active' (default) | 'merged' | 'all' — duplicate merge state (migration
+   * 040). Merged rows are hidden by default so the admin list shows the same
+   * library players do; 'merged' is how you find one again to un-merge it.
+   */
+  merged?: string;
   search?: string;
   limit?: number;
   offset?: number;
@@ -69,6 +75,9 @@ export const adminCoursesRepo = {
     // rather than vanishing from both sides of the filter.
     if (filters.verified === 'yes') query = query.is('verified', true);
     else if (filters.verified === 'no') query = query.not('verified', 'is', true);
+
+    if (filters.merged === 'merged') query = query.not('merged_into', 'is', null);
+    else if (filters.merged !== 'all') query = query.is('merged_into', null);
 
     const search = filters.search?.trim();
     if (search) {
@@ -189,6 +198,7 @@ export const adminCoursesRepo = {
       .from('courses')
       .select('id', { count: 'exact', head: true })
       .in('source', ['api', 'opengolf'])
+      .is('merged_into', null)
       .or('osm_status.eq.pending,osm_synced_at.is.null');
     if (error) throw toAppError(error, 'Could not count pending courses');
     return count ?? 0;
@@ -204,6 +214,7 @@ export const adminCoursesRepo = {
       .from('courses')
       .select('id', { count: 'exact', head: true })
       .in('source', ['api', 'opengolf'])
+      .is('merged_into', null)
       .eq('osm_status', 'failed');
     if (error) throw toAppError(error, 'Could not count failed courses');
     return count ?? 0;
@@ -216,6 +227,7 @@ export const adminCoursesRepo = {
       .from('courses')
       .update({ osm_status: 'pending', osm_error: null })
       .in('source', ['api', 'opengolf'])
+      .is('merged_into', null)
       .eq('osm_status', 'failed')
       .select('id');
     if (error) throw toAppError(error, 'Could not requeue courses');

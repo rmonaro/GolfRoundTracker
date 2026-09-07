@@ -113,6 +113,12 @@ export interface CourseRow {
   // exists for their region.
   tiles_url: string | null;
   tiles_generated_at: string | null;
+  // Duplicate merge (migration 040). A non-null `merged_into` means this row was
+  // folded into that course: it is hidden from players, its rounds were moved,
+  // and its holes/tees/features are kept only so the merge can be undone.
+  merged_into: string | null;
+  merged_at: string | null;
+  merged_by: string | null;
   /** Zoom range baked into the pack; set as minzoom/maxzoom on the source so
    *  the client never requests a tile the file doesn't contain. */
   tiles_min_zoom: number | null;
