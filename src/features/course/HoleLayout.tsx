@@ -980,6 +980,8 @@ export function HoleLayout({
 
   useEffect(() => {
     setMapErrored(false);
+    // A different basemap gets its own full "did it draw?" budget.
+    mapboxAttemptStartedRef.current = null;
   }, [imagery.kind, imagery.url]);
 
   // Quantised to ~1 m. The fallback SVG is rebuilt whole when this changes, and
@@ -1002,6 +1004,9 @@ export function HoleLayout({
   // what prevents the "map flashes/reloads on every tap" feeling — the main
   // map-creation effect no longer re-fires when the user taps to record.
   const mapRef = useRef<mapboxgl.Map | null>(null);
+  // When the current Mapbox-tier attempt started drawing, or null once it has
+  // succeeded / the tier changed. See the load watchdog below.
+  const mapboxAttemptStartedRef = useRef<number | null>(null);
   const landingMarkerRef = useRef<mapboxgl.Marker | null>(null);
   const userMarkerRef = useRef<mapboxgl.Marker | null>(null);
   // Bumped every time the map-creation effect builds a NEW mapbox instance.
@@ -1178,6 +1183,9 @@ export function HoleLayout({
     map.on('load', () => {
       if (loadWatchdog) clearTimeout(loadWatchdog);
       loadWatchdog = null;
+      // This tier can draw, so the "has Mapbox ever drawn?" budget starts fresh
+      // if it is ever asked again.
+      mapboxAttemptStartedRef.current = null;
       setMapEverLoaded(true);
     });
 
@@ -1185,12 +1193,23 @@ export function HoleLayout({
     // weak connection Mapbox's tile requests don't error, they just never come
     // back, so neither `load` nor `error` ever fires and the map sits there
     // empty. Nothing else in the system notices. Give it a deadline.
+    //
+    // The deadline is carried ACROSS rebuilds until the map draws once. The
+    // teardown below clears the timer, so a rebuild used to restart the full
+    // 12s — and anything that rebuilds the map more often than that (see the
+    // memo note in `useHoleLayout`) meant the watchdog could never fire, which
+    // is precisely the case it exists for: no signal, tiles that never arrive,
+    // and a downloaded pack sitting unused because the tier never demoted.
+    // Reset on a successful load, and on any change of tier.
     if (imagery.kind === 'mapbox') {
+      const startedAt = mapboxAttemptStartedRef.current ?? Date.now();
+      mapboxAttemptStartedRef.current = startedAt;
+      const remaining = Math.max(1000, MAP_LOAD_TIMEOUT_MS - (Date.now() - startedAt));
       loadWatchdog = setTimeout(() => {
         loadWatchdog = null;
         console.warn('[mapbox] no tiles after', MAP_LOAD_TIMEOUT_MS, 'ms — demoting tier');
         reportMapboxUnusable();
-      }, MAP_LOAD_TIMEOUT_MS);
+      }, remaining);
     }
 
     // With our own imagery the style starts blank, so the basemap is a raster

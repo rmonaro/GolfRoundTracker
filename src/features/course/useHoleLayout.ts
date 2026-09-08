@@ -1,3 +1,4 @@
+import { useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { holesRepo, type HoleLayoutData } from '@/services/holesRepo';
 import { selectedTeeBox } from './teeBox';
@@ -39,13 +40,6 @@ export function useHoleLayout(
     queryFn: () => holesRepo.getLayout(courseId!, holeNumber)
   });
 
-  if (!enabled) {
-    return { data: null, courseStatus: null, status: 'none', isLoading: false };
-  }
-  if (query.isLoading) {
-    return { data: null, courseStatus: null, status: 'loading', isLoading: true };
-  }
-
   const courseStatus = query.data?.courseStatus ?? null;
   const raw = query.data?.data ?? null;
 
@@ -53,7 +47,19 @@ export function useHoleLayout(
   // downstream — the map's tee marker, the tee→green axis, distance-from-tee —
   // reads hole.tee_*, so overriding it here fixes all of them at once rather
   // than teaching each consumer about tee selection.
-  const data = (() => {
+  //
+  // MEMOIZED, and that is load-bearing rather than an optimisation. This object
+  // is `HoleLayout`'s `layout` prop, which sits in the deps of the effect that
+  // CREATES the Mapbox instance — so a fresh object here means `map.remove()`
+  // plus a full rebuild on every render of the page holding the map. During a
+  // round that is roughly once a second (the live GPS fix drives `dotPos` /
+  // `liveFix` state), and every other prop into that effect was already
+  // stabilised for exactly this reason. Two consequences, both nastier offline:
+  // the rebuild has to re-read imagery instead of hitting a warm tile cache, so
+  // the flash becomes visible; and the 12s MAP_LOAD_TIMEOUT_MS watchdog that
+  // demotes an undrawable Mapbox tier is cleared by each teardown, so it could
+  // never fire and the map never fell back to a downloaded pack or the SVG.
+  const data = useMemo(() => {
     if (!raw) return null;
     const green: [number, number] | null =
       raw.hole.green_lng != null && raw.hole.green_lat != null
@@ -67,7 +73,14 @@ export function useHoleLayout(
     );
     if (!box) return raw;
     return { ...raw, hole: { ...raw.hole, tee_lng: box[0], tee_lat: box[1] } };
-  })();
+  }, [raw, yardsFromSelectedTee]);
+
+  if (!enabled) {
+    return { data: null, courseStatus: null, status: 'none', isLoading: false };
+  }
+  if (query.isLoading) {
+    return { data: null, courseStatus: null, status: 'loading', isLoading: true };
+  }
 
   let status: HoleLayoutStatus;
   if (courseStatus === 'skip' || courseStatus === 'no_coverage' || !data) {
