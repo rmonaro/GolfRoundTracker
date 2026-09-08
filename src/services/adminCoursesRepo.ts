@@ -160,23 +160,52 @@ export const adminCoursesRepo = {
     return data as Course;
   },
 
+  /** osm_status values a course can hold. Counted individually so the totals
+   *  are real numbers rather than a truncated page — see `stats`. */
+  OSM_STATUSES: ['pending', 'synced', 'failed', 'no_coverage', 'skip'] as const,
+
   async stats(): Promise<{
-    apiCount: number;
+    libraryCount: number;
     byStatus: Record<string, number>;
     pendingSync: number;
     lowConfidenceHoles: number;
   }> {
-    const { data: apiCourses, error: apiErr } = await supabase
-      .from('courses')
-      .select('osm_status')
-      .eq('source', 'api');
-    if (apiErr) throw toAppError(apiErr, 'Could not load stats');
+    // Count the whole ACTIVE library, not just GolfCourseAPI.
+    //
+    // This used to filter `source = 'api'`, which was the entire library when
+    // it was written. The state importer then brought in 3,179 courses from
+    // OpenGolfAPI, none of which this counted — so the overview said 26 while
+    // the courses list, which filters on nothing but merge state, said 3,193.
+    // The overview was not wrong about `api`; it was answering a question
+    // nobody was asking any more.
+    //
+    // Merged duplicates are excluded, so this matches what "All courses" shows
+    // on arrival (its Merged filter defaults to Active).
+    const activeLibrary = () =>
+      supabase.from('courses').select('id', { count: 'exact', head: true }).is('merged_into', null);
+
+    const { count: libraryCount, error: totalErr } = await activeLibrary();
+    if (totalErr) throw toAppError(totalErr, 'Could not load stats');
+
+    // One HEAD count per status rather than selecting every row and grouping in
+    // JS. The old approach read `select('osm_status')` and took `.length`,
+    // which PostgREST caps at 1000 rows — fine against 26 courses, silently
+    // wrong against 3,193.
     const byStatus: Record<string, number> = {};
-    for (const row of apiCourses ?? []) {
-      const k = (row.osm_status as string | null) ?? 'unknown';
-      byStatus[k] = (byStatus[k] ?? 0) + 1;
+    let accounted = 0;
+    for (const status of this.OSM_STATUSES) {
+      const { count, error } = await activeLibrary().eq('osm_status', status);
+      if (error) throw toAppError(error, 'Could not load stats');
+      if (count) {
+        byStatus[status] = count;
+        accounted += count;
+      }
     }
-    const apiCount = apiCourses?.length ?? 0;
+    // Anything with no status at all — a user-added course that has never been
+    // queued. Shown rather than quietly dropped, so the chips add up.
+    const unknown = (libraryCount ?? 0) - accounted;
+    if (unknown > 0) byStatus.unknown = unknown;
+
     const pendingSync = (byStatus.pending ?? 0) + (byStatus.failed ?? 0);
 
     const { count, error: holesErr } = await supabase
@@ -185,7 +214,7 @@ export const adminCoursesRepo = {
       .in('orientation_confidence', ['assumed', 'reversed']);
     if (holesErr) throw toAppError(holesErr, 'Could not count low-confidence holes');
 
-    return { apiCount, byStatus, pendingSync, lowConfidenceHoles: count ?? 0 };
+    return { libraryCount: libraryCount ?? 0, byStatus, pendingSync, lowConfidenceHoles: count ?? 0 };
   },
 
   /**

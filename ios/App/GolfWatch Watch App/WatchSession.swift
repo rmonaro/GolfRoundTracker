@@ -890,6 +890,47 @@ final class WatchSession: NSObject, ObservableObject {
         bumpPendingShotCount(hole: hole, to: base + 1)
     }
 
+    /// The club to stamp on an AUTO-DETECTED strike, resolved right now.
+    ///
+    /// `lastResolvedClubId` alone is not good enough, and that is what put the
+    /// wrong club on shots. It is a side effect of the home view rendering —
+    /// `.onChange(of: rawEffectiveClubId)` — so it only advances while that view
+    /// is actually on screen. On the course the wrist is down and the screen is
+    /// off for most of a hole: the golfer glances at the watch on the tee, walks
+    /// 250 yards, and swings. The detector then stamps the club that was showing
+    /// back on the tee, because nothing has re-rendered since.
+    ///
+    /// So resolve from live state at the moment of impact instead, in the same
+    /// precedence the home view uses, with the remembered value demoted to a
+    /// fallback for when there is no fix to reason from.
+    func clubForStrike() -> String? {
+        // A pick made on the watch is an explicit instruction and outranks any
+        // inference — the golfer has told us what is in their hand.
+        if let local = localSelectedClubId { return local }
+
+        // On the green, the putter (mirrors the phone's auto-select and the
+        // home view's own green handling).
+        if state.onGreen, let putter = state.bag.first(where: { $0.isPutter })?.id {
+            return putter
+        }
+
+        // Live GPS distance to this hole's pin -> nearest club by typical carry.
+        // Same rule as the home view's liveSuggestedClubId, evaluated now.
+        if let yards = liveDistanceToPinYards() {
+            let target = Int(yards.rounded())
+            let candidates = state.bag.filter { !$0.isPutter && $0.typicalYards != nil }
+            if let best = candidates.min(by: {
+                abs(($0.typicalYards ?? 0) - target) < abs(($1.typicalYards ?? 0) - target)
+            }) {
+                return best.id
+            }
+        }
+
+        // No usable fix. The phone's own selection for the current hole is still
+        // better evidence than whatever the screen last happened to show.
+        return state.selectedClubId ?? state.suggestedClubId ?? lastResolvedClubId
+    }
+
     /// Remember the last real resolved club (see `lastResolvedClubId`).
     func noteResolvedClub(_ clubId: String?) {
         if let clubId, clubId != lastResolvedClubId {
@@ -1343,9 +1384,10 @@ final class RoundShotController: ObservableObject {
             // several seconds old. `fixForCapture()` ranks the buffered fixes
             // by accuracy AND age, the same way a manually-recorded shot does.
             location: WatchSession.shared.fixForCapture(),
-            // Tell the phone which club the watch had in hand so the shot latches
-            // the right club even though the phone never saw a watch-side change.
-            clubId: WatchSession.shared.lastResolvedClubId,
+            // Resolved AT IMPACT from live distance, not from whatever the home
+            // view last rendered — the screen is off for most of a hole, so the
+            // remembered value is routinely a club and 200 yards out of date.
+            clubId: WatchSession.shared.clubForStrike(),
             // Apple Health: the round already runs an HKWorkoutSession to keep
             // motion alive wrist-down, so the live bpm is there for the taking.
             heartRate: currentHeartRate

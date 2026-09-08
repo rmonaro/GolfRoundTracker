@@ -1,5 +1,6 @@
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { AuthGuard, PublicOnlyGuard } from '@/features/auth/AuthGuard';
+import { PhoneOnlyRoute } from '@/features/auth/PhoneOnlyRoute';
 import { AuthLayout } from '@/pages/auth/AuthLayout';
 import { SpectatorJoinPage } from '@/pages/spectate/SpectatorJoinPage';
 import { SpectatorLivePage } from '@/pages/spectate/SpectatorLivePage';
@@ -68,7 +69,15 @@ export function AppRouter() {
       >
         <Route index element={<Navigate to="login" replace />} />
         <Route path="login" element={<LoginPage />} />
-        <Route path="signup" element={<SignUpPage />} />
+        {/* Accounts are created on the phone. See PhoneOnlyRoute. */}
+        <Route
+          path="signup"
+          element={
+            <PhoneOnlyRoute to="/auth/login">
+              <SignUpPage />
+            </PhoneOnlyRoute>
+          }
+        />
         <Route path="forgot-password" element={<ForgotPasswordPage />} />
       </Route>
 

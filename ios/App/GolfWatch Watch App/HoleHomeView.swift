@@ -3,7 +3,8 @@ import SwiftUI
 /// Main read view shown when a round is active. Two modes:
 ///   • Idle (default): two-column layout — yards-to-pin + suggested club on
 ///     the left, score / shots / putts on the right, and a 2×2 control grid
-///     (Track + Add Shot over prev/next arrows). Track toggles round-wide
+///     (Track + Add Shot over prev/next arrows, replaced by a single pulsing
+///     beacon while tracking runs). Track toggles round-wide
 ///     auto-tracking (synced with the phone); Add Shot logs a shot at the
 ///     current GPS. Both auto-record — the club picker only opens from the
 ///     club pill. Off-course the action buttons are hidden.
@@ -40,6 +41,10 @@ struct HoleHomeView: View {
     @State private var madePuttHole: Int?
     /// Brief confirmation flash after tapping "Set flag here" (pin sent to phone).
     @State private var flagJustSet = false
+    /// Drives the tracking indicator's pulse. Toggled once on appear into a
+    /// `repeatForever` animation; SwiftUI suspends it while the watch face is
+    /// down, so it costs nothing between glances.
+    @State private var trackingPulse = false
 
     var body: some View {
         let s = session.state
@@ -341,15 +346,17 @@ struct HoleHomeView: View {
         s.bag.first(where: { $0.id == effectiveClubId(s) })?.isPutter ?? false
     }
 
-    /// Bottom controls — a 2×2 grid:
-    ///   Row 1:  Track (auto-track toggle)  |  Add Shot (GPS auto-record)
-    ///   Row 2:  ◀ prev hole                |  next hole ▶
+    /// Bottom controls, which depend on whether auto-tracking is running:
+    ///   tracking OFF:  Track  |  Add Shot        (+ hole arrows when idle)
+    ///   tracking ON:   a single pulsing "Tracking" beacon
     ///
-    /// "Track" toggles round-wide auto-tracking, kept in sync with the phone.
-    /// Turning it OFF at the ball records the shot there (then resumes on the
-    /// next tap). "Add Shot" logs a shot at the current GPS without changing the
-    /// auto-track state. Both auto-record via GPS — the phone infers the result
-    /// and a brief overview flashes; neither opens the club picker.
+    /// "Track" turns on round-wide auto-tracking, kept in sync with the phone.
+    /// "Add Shot" logs a shot at the current GPS without changing the auto-track
+    /// state. Both auto-record via GPS — the phone infers the result and a brief
+    /// overview flashes; neither opens the club picker.
+    ///
+    /// Once tracking is on, both are replaced by `trackingIndicator` — see there
+    /// for why "Add Shot" goes away rather than staying put.
     ///
     /// Off-course the action buttons are hidden (mirroring the phone, which
     /// won't start tracking out of range); only a "not in range" note + the
@@ -402,30 +409,90 @@ struct HoleHomeView: View {
             // Optimistic local override wins so the button flips the instant
             // it's tapped, before the phone roundtrip confirms.
             let tracking = session.localAutoTracking ?? s.autoTracking
-            VStack(spacing: 6) {
-                HStack(spacing: 6) {
-                    bigButton(
-                        title: tracking ? "Stop" : "Track",
-                        system: tracking ? "stop.fill" : "location.fill",
-                        tint: tracking ? .red : .yellow
-                    ) {
-                        if tracking {
-                            // At the ball: record the shot here, then pause
-                            // auto-tracking until the next tap re-arms it.
-                            recordManualShot(s)
-                            session.setAutoTrack(false)
-                        } else {
+            if tracking {
+                // Tracking is running: one control, not two. A pulsing beacon
+                // says the watch is watching without the golfer having to read
+                // anything, and there is nothing to add manually while every
+                // shot is being picked up automatically — so "Add Shot" would
+                // only be a way to double-count.
+                trackingIndicator(s)
+            } else {
+                VStack(spacing: 6) {
+                    HStack(spacing: 6) {
+                        bigButton(title: "Track", system: "location.fill", tint: .yellow) {
                             session.setAutoTrack(true)
                         }
-                    }
-                    bigButton(title: "Add Shot", system: "plus", tint: .green) {
-                        // Log a shot at the current GPS now. Auto-track (if on)
-                        // keeps running — this is an extra manual log.
-                        recordManualShot(s)
+                        bigButton(title: "Add Shot", system: "plus", tint: .green) {
+                            // Log a shot at the current GPS now.
+                            recordManualShot(s)
+                        }
                     }
                 }
             }
         }
+    }
+
+    /// Live-tracking beacon — the only control on screen while auto-tracking.
+    ///
+    /// Replaces the Track/Add Shot pair rather than sitting alongside them. Two
+    /// reasons: a glance has to answer "is it recording?" without reading a
+    /// word, which a pulse does and a static label does not; and while every
+    /// strike is being picked up automatically, a manual "Add Shot" is a way to
+    /// log the same shot twice.
+    ///
+    /// Tapping it does what the old "Stop" button did — records a shot at the
+    /// current position, THEN pauses tracking. That pairing is deliberate and is
+    /// the reason it isn't just a toggle: the moment a golfer reaches for this
+    /// is when they are standing at their ball, so the tap is also how the shot
+    /// they just played gets its end position. Since "Add Shot" is hidden here,
+    /// dropping that would leave no way to log a shot by hand at all.
+    @ViewBuilder
+    private func trackingIndicator(_ s: WatchRoundState) -> some View {
+        Button {
+            recordManualShot(s)
+            session.setAutoTrack(false)
+        } label: {
+            HStack(spacing: 8) {
+                ZStack {
+                    // The halo carries the pulse; the dot stays put so the
+                    // control doesn't appear to wobble.
+                    Circle()
+                        .fill(Color.red.opacity(0.35))
+                        .frame(width: 22, height: 22)
+                        .scaleEffect(trackingPulse ? 1.6 : 0.9)
+                        .opacity(trackingPulse ? 0 : 0.9)
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 10, height: 10)
+                }
+                .frame(width: 26, height: 26)
+
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("Tracking")
+                        .font(.system(size: 14, weight: .bold))
+                    Text("Tap to stop")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .frame(maxWidth: .infinity)
+            .frame(height: 40)
+        }
+        .buttonStyle(.plain)
+        .background(Color.red.opacity(0.18))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .onAppear {
+            // Kicked off here rather than at declaration so it restarts if the
+            // view is rebuilt (hole change, returning from the shot flow).
+            trackingPulse = false
+            withAnimation(.easeInOut(duration: 1.1).repeatForever(autoreverses: false)) {
+                trackingPulse = true
+            }
+        }
+        .onDisappear { trackingPulse = false }
+        .accessibilityLabel("Tracking shots. Tap to record this shot and stop tracking.")
     }
 
     /// Record a shot at the current GPS (Track-off "at the ball" or Add Shot),
