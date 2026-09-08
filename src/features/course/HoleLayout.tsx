@@ -389,18 +389,6 @@ export function teeToGreenBearing(hole: CourseHole): number | null {
   return ((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360;
 }
 
-/** Convert stored feature coords + is_line flag into a GeoJSON geometry. */
-function coordsToGeometry(
-  coords: unknown,
-  isLine: boolean
-): GeoJSON.LineString | GeoJSON.Polygon | null {
-  if (!Array.isArray(coords) || coords.length === 0) return null;
-  if (isLine) {
-    return { type: 'LineString', coordinates: coords as [number, number][] };
-  }
-  return { type: 'Polygon', coordinates: coords as [number, number][][] };
-}
-
 /** Flatten polygon-or-line coords into a flat [lng, lat] list for bounds extension. */
 function flattenCoords(coords: unknown, isLine: boolean): [number, number][] {
   if (!Array.isArray(coords) || coords.length === 0) return [];
@@ -938,6 +926,28 @@ export function HoleLayout({
   // re-init and a visible flash.
   const imagery = useImagerySource(layout.hole.course_id);
 
+  /**
+   * The camera, kept across a map REBUILD.
+   *
+   * Changing imagery tier tears the map down and builds a new one, and the new
+   * one frames the hole overview from scratch — so a golfer who had zoomed into
+   * the green to place a pin was snapped back out every time the basemap
+   * switched. `useImagerySource` now damps that switching, but a rebuild still
+   * happens legitimately (a pack finishing its download, signal genuinely
+   * going), and it should not cost them their view.
+   *
+   * Keyed by hole + mode: moving to the next hole, or into putting mode, IS a
+   * different view and should frame itself normally.
+   */
+  const keptCameraRef = useRef<{
+    key: string;
+    center: mapboxgl.LngLatLike;
+    zoom: number;
+    bearing: number;
+    pitch: number;
+  } | null>(null);
+  const cameraKey = `${layout.hole.id}|${puttingMode ? 'putt' : 'hole'}`;
+
   // A pack renders from bytes already on the device, so it needs NO network —
   // that is the entire point of downloading one. It therefore must not be gated
   // on connectivity the way Mapbox is. Without this, a golfer who had saved the
@@ -1213,13 +1223,8 @@ export function HoleLayout({
       });
     }
 
-    // Group features by feature_type so we can register one source per type.
     // Bounds are kept TIGHT — just tee + green — so fitBounds zooms to frame
     // the playing line, not every cartpath that happens to cross the hole.
-    // Features themselves still render at their real coords; some may fall
-    // slightly outside the visible viewport, and that's fine.
-    const polygonsByType = new Map<string, GeoJSON.Feature[]>();
-    const linesByType = new Map<string, GeoJSON.Feature[]>();
     const bounds = new mapboxgl.LngLatBounds(
       [hole.tee_lng, hole.tee_lat],
       [hole.tee_lng, hole.tee_lat]
@@ -1231,20 +1236,6 @@ export function HoleLayout({
     // no-op; errant shots widen the bbox just enough to stay in view.
     for (const pt of shotEndPoints) {
       bounds.extend(pt);
-    }
-
-    for (const f of layout.features) {
-      const geom = coordsToGeometry(f.coords, f.is_line);
-      if (!geom) continue;
-      const feat: GeoJSON.Feature = {
-        type: 'Feature',
-        geometry: geom,
-        properties: { id: f.id }
-      };
-      const bucket = f.is_line ? linesByType : polygonsByType;
-      const arr = bucket.get(f.feature_type) ?? [];
-      arr.push(feat);
-      bucket.set(f.feature_type, arr);
     }
 
     // Putting bounds: a fixed ±18m square centered on the hole's recorded
@@ -1300,63 +1291,33 @@ export function HoleLayout({
           ]
         : [hole.tee_lng, hole.tee_lat];
 
+    // Declared up here because onLoad reads it: a restored camera counts as
+    // user-moved, so the resize observer leaves it alone.
+    let userMovedCamera = false;
+
     const onLoad = () => {
       // Force a resize on load: if the container measured 0×0 at map construction
       // time (common when parent flex / percent-height chains haven't settled),
       // the canvas is locked to that size until we tell it otherwise.
       map.resize();
 
-      // Layer addition order matters — each addLayer goes on top by default,
-      // so we add bottom-up: polygons → outlines → straight line → centerline → label.
-
-      for (const type of FEATURE_LAYER_ORDER) {
-        const style = getStyle(type);
-        const polys = polygonsByType.get(type);
-        if (polys && polys.length > 0) {
-          const sourceId = `feat-${type}`;
-          map.addSource(sourceId, {
-            type: 'geojson',
-            data: { type: 'FeatureCollection', features: polys }
-          });
-          map.addLayer({
-            id: `${sourceId}-fill`,
-            type: 'fill',
-            source: sourceId,
-            paint: {
-              'fill-color': style.fill,
-              'fill-opacity': style.fillOpacity
-            }
-          });
-          map.addLayer({
-            id: `${sourceId}-outline`,
-            type: 'line',
-            source: sourceId,
-            paint: {
-              'line-color': style.outline,
-              'line-width': style.lineWidth,
-              'line-opacity': 0.9
-            }
-          });
-        }
-        const lines = linesByType.get(type);
-        if (lines && lines.length > 0) {
-          const sourceId = `feat-${type}-line`;
-          map.addSource(sourceId, {
-            type: 'geojson',
-            data: { type: 'FeatureCollection', features: lines }
-          });
-          map.addLayer({
-            id: `${sourceId}-layer`,
-            type: 'line',
-            source: sourceId,
-            paint: {
-              'line-color': style.outline,
-              'line-width': style.lineWidth,
-              'line-opacity': 0.9
-            }
-          });
-        }
-      }
+      // Course FEATURES (fairway, green, bunker, water, tee boxes) are
+      // deliberately NOT drawn on this map.
+      //
+      // They exist to make the schematic SVG legible — that render has no
+      // imagery, so without polygons it would be a blank rectangle with a line
+      // across it. Here there IS imagery: the satellite view already shows the
+      // real bunkers and the real green, in their real shapes. Painting our
+      // OSM-derived approximations over the top only ever disagreed with what
+      // was underneath, and the disagreement is what you notice.
+      //
+      // The polygons are still loaded and still load-bearing — lie inference
+      // and tap-to-record test against the feature DATA (see pointInPolygon),
+      // which is unaffected by whether anything is rendered.
+      //
+      // What follows is drawn on purpose: the playing line, the aim line,
+      // shot dots and labels. Those are the app talking, not the terrain.
+      // Layer addition order still matters — each addLayer goes on top.
 
       // (Tee→green dashed reference line removed — the amber aim line + the
       // dogleg centerline cover the same intent without the extra clutter.)
@@ -1912,6 +1873,21 @@ export function HoleLayout({
         }
       }
 
+      // A rebuild of the SAME view (an imagery tier change, not a new hole)
+      // restores where the golfer had the camera instead of re-framing. Marking
+      // it as user-moved keeps the resize observer from pulling it back out.
+      const kept = keptCameraRef.current;
+      if (kept && kept.key === cameraKey) {
+        map.jumpTo({
+          center: kept.center,
+          zoom: kept.zoom,
+          bearing: kept.bearing,
+          pitch: kept.pitch
+        });
+        userMovedCamera = true;
+        return;
+      }
+
       // Frame the hole overview once the canvas is ready (see applyOverview).
       applyOverview(false);
       // Belt-and-suspenders: re-frame once after the map settles, in case the
@@ -1982,7 +1958,6 @@ export function HoleLayout({
     // never fight their gesture. Detecting interaction via DOM pointer/wheel on
     // the container (not Mapbox camera events) avoids tripping on programmatic
     // jumpTo/easeTo from applyOverview itself.
-    let userMovedCamera = false;
     const markUserMoved = () => {
       userMovedCamera = true;
     };
@@ -2327,6 +2302,21 @@ export function HoleLayout({
       container.removeEventListener('pointerdown', markUserMoved);
       container.removeEventListener('wheel', markUserMoved);
       if (reframeRaf != null) cancelAnimationFrame(reframeRaf);
+      // Hold on to the view if the golfer had moved it, so a rebuild of this
+      // same hole can put them back where they were.
+      if (userMovedCamera) {
+        try {
+          keptCameraRef.current = {
+            key: cameraKey,
+            center: map.getCenter(),
+            zoom: map.getZoom(),
+            bearing: map.getBearing(),
+            pitch: map.getPitch()
+          };
+        } catch {
+          // Map already disposed — nothing worth keeping.
+        }
+      }
       mapRef.current = null;
       map.remove();
     };

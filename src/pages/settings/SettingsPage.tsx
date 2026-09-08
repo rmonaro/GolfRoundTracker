@@ -20,6 +20,7 @@ import TuneRoundedIcon from '@mui/icons-material/TuneRounded';
 import CloudDownloadRoundedIcon from '@mui/icons-material/CloudDownloadRounded';
 import LogoutRoundedIcon from '@mui/icons-material/LogoutRounded';
 import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
+import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import AdminPanelSettingsRoundedIcon from '@mui/icons-material/AdminPanelSettingsRounded';
 import { useIsAdmin } from '@/admin/hooks/useIsAdmin';
 import { useAppModeStore, homePathFor } from '@/stores/appModeStore';
@@ -251,6 +252,27 @@ export function SettingsPage() {
                 control={<Switch checked={themeMode === 'dark'} onChange={toggleTheme} />}
                 label={themeMode === 'dark' ? 'Dark mode' : 'Light mode'}
               />
+            </Stack>
+          </CardContent>
+        </Card>
+
+        <Card elevation={0} sx={{ bgcolor: 'background.paper', borderRadius: '5px' }}>
+          <CardContent>
+            <Typography variant="caption" color="text.secondary" sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}>
+              Spectators
+            </Typography>
+            <Stack mt={1} spacing={1} alignItems="flex-start">
+              <Typography variant="caption" color="text.secondary">
+                Give family a code so they can follow your tournament rounds live. Tournament
+                rounds only — everything else stays private.
+              </Typography>
+              <Button
+                startIcon={<VisibilityRoundedIcon />}
+                variant="outlined"
+                onClick={() => navigate('/settings/spectators')}
+              >
+                Manage spectator codes
+              </Button>
             </Stack>
           </CardContent>
         </Card>
