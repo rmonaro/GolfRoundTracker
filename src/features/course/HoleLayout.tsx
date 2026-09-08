@@ -389,18 +389,6 @@ export function teeToGreenBearing(hole: CourseHole): number | null {
   return ((Math.atan2(dLng, dLat) * 180) / Math.PI + 360) % 360;
 }
 
-/** Convert stored feature coords + is_line flag into a GeoJSON geometry. */
-function coordsToGeometry(
-  coords: unknown,
-  isLine: boolean
-): GeoJSON.LineString | GeoJSON.Polygon | null {
-  if (!Array.isArray(coords) || coords.length === 0) return null;
-  if (isLine) {
-    return { type: 'LineString', coordinates: coords as [number, number][] };
-  }
-  return { type: 'Polygon', coordinates: coords as [number, number][][] };
-}
-
 /** Flatten polygon-or-line coords into a flat [lng, lat] list for bounds extension. */
 function flattenCoords(coords: unknown, isLine: boolean): [number, number][] {
   if (!Array.isArray(coords) || coords.length === 0) return [];
@@ -1235,13 +1223,8 @@ export function HoleLayout({
       });
     }
 
-    // Group features by feature_type so we can register one source per type.
     // Bounds are kept TIGHT — just tee + green — so fitBounds zooms to frame
     // the playing line, not every cartpath that happens to cross the hole.
-    // Features themselves still render at their real coords; some may fall
-    // slightly outside the visible viewport, and that's fine.
-    const polygonsByType = new Map<string, GeoJSON.Feature[]>();
-    const linesByType = new Map<string, GeoJSON.Feature[]>();
     const bounds = new mapboxgl.LngLatBounds(
       [hole.tee_lng, hole.tee_lat],
       [hole.tee_lng, hole.tee_lat]
@@ -1253,20 +1236,6 @@ export function HoleLayout({
     // no-op; errant shots widen the bbox just enough to stay in view.
     for (const pt of shotEndPoints) {
       bounds.extend(pt);
-    }
-
-    for (const f of layout.features) {
-      const geom = coordsToGeometry(f.coords, f.is_line);
-      if (!geom) continue;
-      const feat: GeoJSON.Feature = {
-        type: 'Feature',
-        geometry: geom,
-        properties: { id: f.id }
-      };
-      const bucket = f.is_line ? linesByType : polygonsByType;
-      const arr = bucket.get(f.feature_type) ?? [];
-      arr.push(feat);
-      bucket.set(f.feature_type, arr);
     }
 
     // Putting bounds: a fixed ±18m square centered on the hole's recorded
@@ -1332,57 +1301,23 @@ export function HoleLayout({
       // the canvas is locked to that size until we tell it otherwise.
       map.resize();
 
-      // Layer addition order matters — each addLayer goes on top by default,
-      // so we add bottom-up: polygons → outlines → straight line → centerline → label.
-
-      for (const type of FEATURE_LAYER_ORDER) {
-        const style = getStyle(type);
-        const polys = polygonsByType.get(type);
-        if (polys && polys.length > 0) {
-          const sourceId = `feat-${type}`;
-          map.addSource(sourceId, {
-            type: 'geojson',
-            data: { type: 'FeatureCollection', features: polys }
-          });
-          map.addLayer({
-            id: `${sourceId}-fill`,
-            type: 'fill',
-            source: sourceId,
-            paint: {
-              'fill-color': style.fill,
-              'fill-opacity': style.fillOpacity
-            }
-          });
-          map.addLayer({
-            id: `${sourceId}-outline`,
-            type: 'line',
-            source: sourceId,
-            paint: {
-              'line-color': style.outline,
-              'line-width': style.lineWidth,
-              'line-opacity': 0.9
-            }
-          });
-        }
-        const lines = linesByType.get(type);
-        if (lines && lines.length > 0) {
-          const sourceId = `feat-${type}-line`;
-          map.addSource(sourceId, {
-            type: 'geojson',
-            data: { type: 'FeatureCollection', features: lines }
-          });
-          map.addLayer({
-            id: `${sourceId}-layer`,
-            type: 'line',
-            source: sourceId,
-            paint: {
-              'line-color': style.outline,
-              'line-width': style.lineWidth,
-              'line-opacity': 0.9
-            }
-          });
-        }
-      }
+      // Course FEATURES (fairway, green, bunker, water, tee boxes) are
+      // deliberately NOT drawn on this map.
+      //
+      // They exist to make the schematic SVG legible — that render has no
+      // imagery, so without polygons it would be a blank rectangle with a line
+      // across it. Here there IS imagery: the satellite view already shows the
+      // real bunkers and the real green, in their real shapes. Painting our
+      // OSM-derived approximations over the top only ever disagreed with what
+      // was underneath, and the disagreement is what you notice.
+      //
+      // The polygons are still loaded and still load-bearing — lie inference
+      // and tap-to-record test against the feature DATA (see pointInPolygon),
+      // which is unaffected by whether anything is rendered.
+      //
+      // What follows is drawn on purpose: the playing line, the aim line,
+      // shot dots and labels. Those are the app talking, not the terrain.
+      // Layer addition order still matters — each addLayer goes on top.
 
       // (Tee→green dashed reference line removed — the amber aim line + the
       // dogleg centerline cover the same intent without the extra clutter.)
