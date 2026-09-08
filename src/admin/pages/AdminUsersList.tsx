@@ -69,7 +69,13 @@ export function AdminUsersList() {
                 {u.created_at ? new Date(u.created_at).toLocaleDateString() : '—'}
               </TableCell>
               <TableCell>
-                {u.is_admin ? <Chip size="small" color="primary" label="Admin" /> : '—'}
+                {u.is_super_admin ? (
+                  <Chip size="small" color="secondary" label="Super admin" />
+                ) : u.is_admin ? (
+                  <Chip size="small" color="primary" label="Admin" />
+                ) : (
+                  '—'
+                )}
               </TableCell>
             </TableRow>
           ))}

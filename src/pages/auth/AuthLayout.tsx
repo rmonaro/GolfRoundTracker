@@ -9,7 +9,6 @@ export function AuthLayout() {
         minHeight: "100dvh",
         display: "flex",
         flexDirection: "column",
-        justifyContent: "space-between",
         bgcolor: "background.default",
         px: 3,
         py: 6,
@@ -17,27 +16,11 @@ export function AuthLayout() {
           "radial-gradient(ellipse at top, rgba(46,125,50,0.25), transparent 60%), radial-gradient(ellipse at bottom, rgba(76,175,80,0.18), transparent 70%)",
       }}
     >
-      <Stack alignItems="center" spacing={1} mt={2}>
-        <Box
-          component="img"
-          src={appIconUrl}
-          alt="Golf Round Tracker"
-          sx={{
-            width: 64,
-            height: 64,
-            borderRadius: 4,
-            objectFit: "cover",
-            display: "block",
-          }}
-        />
-        <Typography variant="h5" sx={{ fontWeight: 900, fontSize: "32px" }}>
-          RoundIQ
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          TRACK EVERY ROUND. PLAY YOUR BEST.
-        </Typography>
-      </Stack>
-
+      {/* Brand and form are ONE block, centred together in the space above the
+          footer. Previously the outer column was space-between, which pinned
+          the logo to the top of the screen and left it floating a long way
+          above "Welcome back" — on a tall window they read as two unrelated
+          things rather than one sign-in card. */}
       <Box
         sx={{
           flex: 1,
@@ -47,9 +30,30 @@ export function AuthLayout() {
           py: 4,
         }}
       >
-        <Box sx={{ width: "100%", maxWidth: 420 }}>
+        <Stack spacing={4} sx={{ width: "100%", maxWidth: 420 }}>
+          <Stack alignItems="center" spacing={1}>
+            <Box
+              component="img"
+              src={appIconUrl}
+              alt="Golf Round Tracker"
+              sx={{
+                width: 64,
+                height: 64,
+                borderRadius: 4,
+                objectFit: "cover",
+                display: "block",
+              }}
+            />
+            <Typography variant="h5" sx={{ fontWeight: 900, fontSize: "32px" }}>
+              RoundIQ
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              TRACK EVERY ROUND. PLAY YOUR BEST.
+            </Typography>
+          </Stack>
+
           <Outlet />
-        </Box>
+        </Stack>
       </Box>
 
       <Typography variant="caption" color="text.secondary" align="center">

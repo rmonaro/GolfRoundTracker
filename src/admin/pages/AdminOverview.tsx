@@ -88,7 +88,7 @@ export function AdminOverview() {
                 Course Library
               </Typography>
               <Typography variant="h3" sx={{ fontWeight: 800 }}>
-                {data.apiCount}
+                {data.libraryCount.toLocaleString()}
               </Typography>
               <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap mt={1}>
                 {Object.entries(data.byStatus).map(([k, v]) => (

@@ -47,6 +47,8 @@ export interface ProfileRow {
   skill_level: SkillLevel | null;
   gender: Gender | null;
   is_admin: boolean;
+  /** Can grant and revoke admin access. Implies is_admin — migration 042. */
+  is_super_admin: boolean;
   onboarded_at: string | null;
   created_at: string;
 }

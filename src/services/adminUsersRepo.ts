@@ -48,6 +48,24 @@ export const adminUsersRepo = {
     }));
   },
 
+  /**
+   * Grant or revoke admin access. Super admins only.
+   *
+   * Routed through the `admin_set_user_admin` RPC (migration 042) rather than a
+   * direct update: the grantor is taken from auth.uid() inside the function, so
+   * this cannot be used to act as somebody else, and the profiles trigger still
+   * fires behind it as the real enforcement. The RPC refuses self-changes and
+   * refuses to touch another super admin.
+   */
+  async setUserAdmin(userId: string, makeAdmin: boolean): Promise<Profile> {
+    const { data, error } = await supabase.rpc('admin_set_user_admin', {
+      target_user_id: userId,
+      make_admin: makeAdmin
+    });
+    if (error) throw toAppError(error, 'Could not change admin access');
+    return data as Profile;
+  },
+
   async getOne(id: string): Promise<Profile | null> {
     const { data, error } = await supabase
       .from('profiles')
