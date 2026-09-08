@@ -47,6 +47,31 @@ final class SwingDetector {
     /// treat the swing as an air swing (impact ≈ the peak-speed moment).
     private let airSwingTimeoutS = 0.8
 
+    // --- stuck-phase timeouts ---
+    //
+    // Without these the machine has NO route back to idle except completing a
+    // swing, and that loses real shots on the course. Every non-idle phase is
+    // entered on motion that only MIGHT be a swing: pulling a club from the
+    // bag, a waggle, an arm swinging while walking. If that motion doesn't go
+    // on to satisfy the next transition, the phase simply persists — and the
+    // golfer's next real swing is then read as the CONTINUATION of the stale
+    // one rather than a new swing from idle. Its backswing gets consumed as a
+    // downswing, the window is wrong, and the shot is either mis-measured or
+    // dropped as an air swing.
+    //
+    // Generous next to a real swing (takeaway to finish is ~1.5-2.5s), so a
+    // slow deliberate backswing or a pause at the top is never cut short. These
+    // only fire on motion that was never a swing to begin with.
+    private let backswingTimeoutS = 3.0
+    private let topOfBackswingTimeoutS = 3.0
+    /// A settle that never arrives — the arm kept moving after a strike (walking
+    /// off, or straight into a re-tee). The strike itself was real, so this
+    /// CLOSES the swing rather than discarding it.
+    private let impactTimeoutS = 4.0
+
+    /// When the current phase was entered. Drives the timeouts above.
+    private var phaseSince: TimeInterval?
+
     private var dominantAxis = 0
     private var lastSignAtDominant: Double = 0
     private var quietSince: TimeInterval?
@@ -57,10 +82,21 @@ final class SwingDetector {
     /// Feed one sample. Returns `.finished` exactly once, on the sample that
     /// completes a swing; otherwise nil.
     func advance(with s: MotionSample) -> SwingPhase? {
+        // Deal with a phase that is going nowhere BEFORE the transitions below,
+        // so a stale phase never gets to consume this sample as if it were part
+        // of its own swing.
+        if phase != .idle {
+            switch resolveStalledPhase(at: s.t) {
+            case .none: break
+            case .abandoned: return nil
+            case .completed: return .finished
+            }
+        }
+
         switch phase {
         case .idle:
             if s.angularSpeed > startOmega {
-                phase = .backswing
+                enter(.backswing, at: s.t)
                 tStart = s.t
                 dominantAxis = indexOfMaxAbs(s.rotationRate)
                 lastSignAtDominant = signOf(s.rotationRate[dominantAxis])
@@ -71,14 +107,14 @@ final class SwingDetector {
             // The dominant rotation axis reverses direction at a low-speed
             // pivot = top of the backswing.
             if sg != 0 && sg != lastSignAtDominant && s.angularSpeed < startOmega {
-                phase = .topOfBackswing
+                enter(.topOfBackswing, at: s.t)
                 tTop = s.t
             }
             if sg != 0 { lastSignAtDominant = sg }
 
         case .topOfBackswing:
             if s.angularSpeed > startOmega {
-                phase = .downswing
+                enter(.downswing, at: s.t)
                 downswingStart = s.t
                 peakOmega = s.angularSpeed
                 peakOmegaTime = s.t
@@ -92,14 +128,14 @@ final class SwingDetector {
             if s.linearAccelMag > peakImpactG { peakImpactG = s.linearAccelMag }
             if s.linearAccelMag >= impactAccel {
                 // Real strike.
-                phase = .impact
+                enter(.impact, at: s.t)
                 tImpact = s.t
                 quietSince = nil
             } else if let ds = downswingStart, s.t - ds > airSwingTimeoutS {
                 // No contact within the window → rehearsal / air swing. Use the
                 // peak-speed moment as the impact reference so the timing
                 // metrics still work.
-                phase = .impact
+                enter(.impact, at: s.t)
                 isAirSwing = true
                 tImpact = peakOmegaTime ?? s.t
                 quietSince = nil
@@ -110,7 +146,7 @@ final class SwingDetector {
             if s.angularSpeed < quietOmega {
                 if let since = quietSince {
                     if s.t - since > finishSettleS {
-                        phase = .finished
+                        enter(.finished, at: s.t)
                         tFinish = s.t
                         return .finished
                     }
@@ -138,8 +174,70 @@ final class SwingDetector {
         )
     }
 
+    /// Move to `next`, remembering when — the timeouts are measured from here.
+    private func enter(_ next: SwingPhase, at t: TimeInterval) {
+        phase = next
+        phaseSince = t
+    }
+
+    private enum StallOutcome {
+        /// Still within its allowance — carry on.
+        case none
+        /// Nothing had been struck yet, so the phase was simply dropped.
+        case abandoned
+        /// A real strike was already detected; the swing was closed out.
+        case completed
+    }
+
+    /// Handle a phase that has outstayed its allowance.
+    ///
+    /// Only HARD timeouts, deliberately. An earlier version also abandoned a
+    /// phase whose motion had gone quiet, which reads as the obvious signal —
+    /// but at the top of the backswing the wrist IS quiet, so it fired during
+    /// real swings. Resetting there is worse than the stall it cured: the
+    /// downswing then re-enters `.backswing` from idle and the impact spike
+    /// arrives in a phase that cannot recognise it, losing the shot outright.
+    ///
+    /// The allowances below are long next to a real swing, so they only ever
+    /// fire on motion that was never a swing. Recovering in three seconds
+    /// instead of never is what matters here — shots are minutes apart.
+    private func resolveStalledPhase(at t: TimeInterval) -> StallOutcome {
+        guard let since = phaseSince else {
+            // No entry stamp — adopt this sample so the timeout has an origin.
+            phaseSince = t
+            return .none
+        }
+        // Clock went backwards (CoreMotion re-bases timestamps across a
+        // restart). Re-anchor rather than treating every sample as an eternity.
+        if t < since {
+            phaseSince = t
+            return .none
+        }
+
+        switch phase {
+        case .backswing where t - since > backswingTimeoutS,
+             .topOfBackswing where t - since > topOfBackswingTimeoutS:
+            // Nothing was struck, so there is nothing to lose by dropping it.
+            reset()
+            return .abandoned
+
+        case .impact where t - since > impactTimeoutS:
+            // A real impact spike WAS seen; only the settle never came. Closing
+            // the swing here records the shot instead of throwing it away.
+            tFinish = t
+            phase = .finished
+            return .completed
+
+        default:
+            // `.downswing` has its own escape (airSwingTimeoutS) and `.finished`
+            // is consumed by the caller on the next line.
+            return .none
+        }
+    }
+
     func reset() {
         phase = .idle
+        phaseSince = nil
         tStart = nil; tTop = nil; tImpact = nil; tFinish = nil
         isAirSwing = false
         peakImpactG = 0
