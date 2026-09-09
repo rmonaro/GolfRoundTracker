@@ -282,6 +282,11 @@ alter table public.shots add column if not exists penalty_type text
   check (penalty_type in ('ob', 'water', 'lost_ball', 'unplayable', 'wrong_ball', 'bunker'));
 
 create index if not exists shots_round_hole_idx on public.shots(round_id, hole_id, shot_number);
+-- The FK `shots.hole_id → round_holes.id` gets its own index: `hole_id` is not
+-- the leading column above, so the per-row `on delete cascade` from round_holes
+-- has none to use. Hygiene rather than a measured win — at current row counts
+-- the seq scan is sub-millisecond. See migration 043.
+create index if not exists shots_hole_id_idx on public.shots(hole_id);
 
 -- ---------------------------------------------------------------------------
 -- TournamentManagement (TM) integration (migration 021)

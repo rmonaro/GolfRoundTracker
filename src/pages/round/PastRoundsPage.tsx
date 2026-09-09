@@ -15,9 +15,12 @@ import {
   DialogTitle,
   IconButton,
   Stack,
+  Tab,
+  Tabs,
   Typography
 } from '@mui/material';
 import GolfCourseRoundedIcon from '@mui/icons-material/GolfCourseRounded';
+import PlayArrowRoundedIcon from '@mui/icons-material/PlayArrowRounded';
 import DeleteOutlineRoundedIcon from '@mui/icons-material/DeleteOutlineRounded';
 import MoreVertRoundedIcon from '@mui/icons-material/MoreVertRounded';
 import { useNavigate } from 'react-router-dom';
@@ -27,6 +30,8 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { useRounds } from '@/features/stats/useRounds';
 import { useAuthStore } from '@/stores/authStore';
 import { roundRepo } from '@/services/roundRepo';
+import { useRoundStore } from '@/stores/roundStore';
+import { useResumeRemoteRound } from '@/features/round/useResumeRemoteRound';
 import { scoreVsPar } from '@/utils/format';
 
 interface PendingDelete {
@@ -46,13 +51,30 @@ export function PastRoundsPage() {
   const [pending, setPending] = useState<PendingDelete | null>(null);
   /** Id of the card currently slid open to reveal its delete button. */
   const [revealedId, setRevealedId] = useState<string | null>(null);
+  const [tab, setTab] = useState<'completed' | 'unfinished'>('completed');
+
+  // The round this device is holding, if any. It appears in the Unfinished tab
+  // like any other, but it is the one whose delete must ALSO clear the local
+  // store — otherwise the row goes and the resume card stays.
+  const activeRoundId = useRoundStore((s) => s.active?.roundId ?? null);
+  const endRound = useRoundStore((s) => s.endRound);
+  const resumeRemote = useResumeRemoteRound();
 
   const deleteRound = useMutation({
     mutationFn: (roundId: string) => roundRepo.deleteRound(roundId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['rounds', userId] });
+    onSuccess: (_res, roundId) => {
+      // Deleting the round this device is playing has to clear the local copy
+      // too, or the resume card keeps offering a round that no longer exists.
+      if (roundId === activeRoundId) endRound();
       setPending(null);
       setRevealedId(null);
+    },
+    // Refetch on failure too. A request that misses its deadline is aborted at
+    // the socket, which does NOT roll back the delete the server is already
+    // running — so an error here doesn't mean the round is still there. Reload
+    // the list either way and let the server say.
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey: ['rounds', userId] });
     }
   });
 
@@ -65,11 +87,161 @@ export function PastRoundsPage() {
   }
 
   const completed = (data ?? []).filter((r) => r.completed_at);
+  // Rounds that were started and never finished. Nothing ever deleted these:
+  // `startRound` replaces the local `active` round outright, so starting a
+  // second round orphans the first — its row stays on the server with
+  // `completed_at` null, and every list here filtered to completed rounds, so
+  // it became invisible AND undeletable. This tab is where they surface.
+  const unfinished = (data ?? []).filter((r) => !r.completed_at);
 
   return (
     <Box>
       <PageHeader title="Past Rounds" back />
-      {completed.length === 0 ? (
+      <Tabs
+        value={tab}
+        onChange={(_e, v: 'completed' | 'unfinished') => {
+          setTab(v);
+          setRevealedId(null);
+        }}
+        variant="fullWidth"
+        sx={{ px: 2, mb: 1.5 }}
+      >
+        <Tab value="completed" label={`Completed (${completed.length})`} />
+        <Tab value="unfinished" label={`Unfinished (${unfinished.length})`} />
+      </Tabs>
+
+      {tab === 'unfinished' && (
+        <Box px={2} pb={2}>
+          {resumeRemote.error && (
+            <Alert severity="warning" sx={{ mb: 1.5 }}>
+              {(resumeRemote.error as Error).message}
+            </Alert>
+          )}
+          {unfinished.length === 0 ? (
+            <EmptyState
+              icon={<GolfCourseRoundedIcon fontSize="inherit" />}
+              title="Nothing unfinished"
+              description="Rounds you start but never finish show up here."
+            />
+          ) : (
+            <Stack spacing={1.5}>
+              {unfinished.map((r) => {
+                const revealed = revealedId === r.id;
+                const isHere = r.id === activeRoundId;
+                return (
+                  <Box
+                    key={r.id}
+                    sx={{ position: 'relative', overflow: 'hidden', borderRadius: '5px' }}
+                  >
+                    <Box
+                      sx={{
+                        position: 'absolute',
+                        top: 0,
+                        right: 0,
+                        bottom: 0,
+                        width: REVEAL_WIDTH,
+                        display: 'flex'
+                      }}
+                    >
+                      <Button
+                        aria-label={`Delete unfinished round at ${r.course_name}`}
+                        color="error"
+                        variant="contained"
+                        onClick={() =>
+                          setPending({
+                            id: r.id,
+                            courseName: r.course_name,
+                            startedAt: r.started_at
+                          })
+                        }
+                        sx={{ minWidth: 0, width: '100%', height: '100%', borderRadius: 0 }}
+                      >
+                        <DeleteOutlineRoundedIcon />
+                      </Button>
+                    </Box>
+
+                    <Card
+                      elevation={0}
+                      sx={{
+                        bgcolor: 'background.paper',
+                        position: 'relative',
+                        borderRadius: '5px',
+                        transform: revealed
+                          ? `translateX(-${REVEAL_WIDTH}px)`
+                          : 'translateX(0)',
+                        transition: 'transform 0.22s ease'
+                      }}
+                    >
+                      <IconButton
+                        aria-label="Round options"
+                        size="small"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRevealedId(revealed ? null : r.id);
+                        }}
+                        sx={{
+                          position: 'absolute',
+                          top: 6,
+                          right: 6,
+                          zIndex: 2,
+                          color: 'text.secondary'
+                        }}
+                      >
+                        <MoreVertRoundedIcon fontSize="small" />
+                      </IconButton>
+                      <CardContent sx={{ pr: 5 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Started {dayjs(r.started_at).format('ddd MMM D, YYYY h:mm A')}
+                        </Typography>
+                        <Typography variant="h6" noWrap>
+                          {r.course_name}
+                        </Typography>
+                        <Stack direction="row" spacing={0.75} mt={0.5}>
+                          <Chip label={`${r.holes_played} holes`} size="small" />
+                          {isHere && (
+                            <Chip
+                              label="On this device"
+                              size="small"
+                              color="primary"
+                              variant="outlined"
+                            />
+                          )}
+                        </Stack>
+                        <Button
+                          variant="outlined"
+                          fullWidth
+                          startIcon={<PlayArrowRoundedIcon />}
+                          sx={{ mt: 1.5 }}
+                          disabled={resumeRemote.isPending}
+                          onClick={() => {
+                            if (revealed) {
+                              setRevealedId(null);
+                              return;
+                            }
+                            // Already the round on this device — just open it.
+                            if (isHere) {
+                              navigate('/round/play');
+                              return;
+                            }
+                            resumeRemote.mutate(r, {
+                              onSuccess: () => navigate('/round/play')
+                            });
+                          }}
+                        >
+                          {isHere ? 'Open' : 'Resume'}
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  </Box>
+                );
+              })}
+            </Stack>
+          )}
+        </Box>
+      )}
+
+      {tab === 'completed' &&
+        (completed.length === 0 ? (
         <EmptyState
           icon={<GolfCourseRoundedIcon fontSize="inherit" />}
           title="No completed rounds yet"
@@ -218,7 +390,7 @@ export function PastRoundsPage() {
             );
           })}
         </Stack>
-      )}
+        ))}
 
       <Dialog
         open={pending !== null}

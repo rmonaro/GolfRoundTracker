@@ -31,37 +31,96 @@ const SHARED_VISIBLE =
  *  than this means they should type another word, not scroll further. */
 const SEARCH_LIMIT = 50;
 
+/**
+ * Select list that makes a library course prove it is actually PLAYABLE.
+ *
+ * The two `!inner` embeds are EXISTENCE TESTS, not data. An inner join drops
+ * any course with no row on the other side, so this returns only courses that
+ * have both:
+ *   • `course_tees`   — at least one named tee set, or the setup screen has no
+ *                       tees to pick and the round gets no rating/slope/yardages
+ *   • `hole_features` — at least one OSM polygon, or the hole map is an empty
+ *                       frame: no greens, bunkers or fairways to draw
+ *
+ * `osm_status = 'synced'` in SHARED_VISIBLE is NOT the same test. A sync can
+ * succeed and still land nothing usable — a course whose OSM relation has holes
+ * but no mapped features comes back 'synced' with zero polygons, and until now
+ * that course sat in the picker looking identical to a fully mapped one right
+ * up to the moment the map opened blank.
+ *
+ * Paired with `limit(1, { referencedTable })` at each call site so the payload
+ * carries one throwaway id per course instead of every tee and every bunker —
+ * the join is the point, the rows are not.
+ */
+const PLAYABLE_SELECT = '*, course_tees!inner(id), hole_features!inner(id)';
+
+/**
+ * Strip the join artefacts. Callers expect a `Course`, and letting the embedded
+ * arrays ride along would put them in the query cache, the round payload and
+ * anything else that spreads a course row.
+ */
+function mergeByName(...lists: Course[][]): Course[] {
+  const byId = new Map<string, Course>();
+  for (const list of lists) for (const c of list) byId.set(c.id, c);
+  return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function stripEmbeds(rows: unknown[]): Course[] {
+  return (rows as Array<Record<string, unknown>>).map((row) => {
+    const { course_tees: _t, hole_features: _f, ...course } = row;
+    return course as unknown as Course;
+  });
+}
+
 export const courseRepo = {
   /**
    * Returns courses visible to the user:
-   *   • shared library courses (`source = 'api'`) and admin-`verified` ones,
-   *     BUT only where OSM geometry actually landed (`osm_status = 'synced'`),
-   *   • plus any course the user added themselves, regardless of sync state.
+   *   • shared library courses (`source = 'api'` / `opengolf`) and
+   *     admin-`verified` ones, BUT only where the app can actually play them:
+   *     OSM geometry landed (`osm_status = 'synced'`) AND the course has at
+   *     least one tee set and at least one mapped polygon (PLAYABLE_SELECT),
+   *   • plus any course the user added themselves, regardless of either gate.
    *
-   * The geometry gate is the point: without holes, tees and greens there is no
-   * hole map, no distance-to-green and no shot auto-tracking — the course looks
-   * broken rather than basic. A library course the user never asked for is not
-   * worth offering in that state.
+   * The gate is the point: without holes, tees and greens there is no hole map,
+   * no distance-to-green and no shot auto-tracking — the course looks broken
+   * rather than basic. A library course the user never asked for is not worth
+   * offering in that state, and 'synced' alone does not prove it (see
+   * PLAYABLE_SELECT).
    *
-   * Their OWN courses are deliberately exempt. `create` defaults osm_status to
-   * 'pending', so gating those too would make a course vanish the moment it was
-   * added, and the natural response to that is to add it again.
+   * Their OWN courses are deliberately exempt from BOTH gates. `create`
+   * defaults osm_status to 'pending' and a hand-entered course has no tee rows
+   * and no polygons by definition — gating those would make a course vanish the
+   * moment it was added, and delete the point of the manual-entry screen. The
+   * natural response to a course vanishing is to add it again.
    */
   async list(userId: string | null): Promise<Course[]> {
-    const shared = SHARED_VISIBLE;
-    let query = supabase
+    // TWO queries, not one, because the two halves are gated differently and an
+    // inner join cannot be applied to half a result set. The shared library has
+    // to prove it has tees + polygons (PLAYABLE_SELECT); the user's own courses
+    // are exempt, exactly as they are exempt from the osm_status gate.
+    const sharedQuery = supabase
       .from('courses')
-      .select('*')
+      .select(PLAYABLE_SELECT)
       .is('merged_into', null)
+      .or(SHARED_VISIBLE)
+      .limit(1, { referencedTable: 'course_tees' })
+      .limit(1, { referencedTable: 'hole_features' })
       .order('name', { ascending: true });
-    if (userId) {
-      query = query.or(`${shared},created_by_user.eq.${userId}`);
-    } else {
-      query = query.or(shared);
-    }
-    const { data, error } = await query;
-    if (error) throw toAppError(error, 'Could not load courses');
-    return data ?? [];
+
+    const ownQuery = userId
+      ? supabase
+          .from('courses')
+          .select('*')
+          .is('merged_into', null)
+          .eq('created_by_user', userId)
+          .order('name', { ascending: true })
+      : null;
+
+    const [sharedRes, ownRes] = await Promise.all([sharedQuery, ownQuery]);
+    if (sharedRes.error) throw toAppError(sharedRes.error, 'Could not load courses');
+    if (ownRes?.error) throw toAppError(ownRes.error, 'Could not load courses');
+
+    return mergeByName(stripEmbeds(sharedRes.data ?? []), (ownRes?.data as Course[]) ?? []);
   },
 
   /**
@@ -79,17 +138,62 @@ export const courseRepo = {
     // Escape PostgREST's or() delimiters so a name with a comma or bracket
     // can't break out of the filter expression.
     const safe = q.replace(/[,()]/g, ' ');
-    const visible = userId ? `${SHARED_VISIBLE},created_by_user.eq.${userId}` : SHARED_VISIBLE;
+    const matches = `name.ilike.%${safe}%,club_name.ilike.%${safe}%,city.ilike.%${safe}%`;
+
+    // Same split as `list`, for the same reason: search must not surface a
+    // library course the app can't map, and must not hide one the user typed in
+    // themselves.
+    const sharedQuery = supabase
+      .from('courses')
+      .select(PLAYABLE_SELECT)
+      .is('merged_into', null)
+      .or(SHARED_VISIBLE)
+      .or(matches)
+      .limit(1, { referencedTable: 'course_tees' })
+      .limit(1, { referencedTable: 'hole_features' })
+      .order('name', { ascending: true })
+      .limit(SEARCH_LIMIT);
+
+    const ownQuery = userId
+      ? supabase
+          .from('courses')
+          .select('*')
+          .is('merged_into', null)
+          .eq('created_by_user', userId)
+          .or(matches)
+          .order('name', { ascending: true })
+          .limit(SEARCH_LIMIT)
+      : null;
+
+    const [sharedRes, ownRes] = await Promise.all([sharedQuery, ownQuery]);
+    if (sharedRes.error) throw toAppError(sharedRes.error, 'Could not search courses');
+    if (ownRes?.error) throw toAppError(ownRes.error, 'Could not search courses');
+
+    return mergeByName(stripEmbeds(sharedRes.data ?? []), (ownRes?.data as Course[]) ?? []).slice(
+      0,
+      SEARCH_LIMIT
+    );
+  },
+
+  /**
+   * Exact lookup by GolfCourseAPI id, bypassing the playable gate.
+   *
+   * `list`/`search` deliberately hide library courses with no tee sets or no
+   * polygons, which is right for a picker and wrong for an identity lookup: a
+   * tournament names the course it is played at, and "we filtered it out of the
+   * browse list" is not a reason to conclude we don't have it. Without this,
+   * `useTournamentCourse` would miss the row and re-import it on every start.
+   */
+  async findByApiId(courseApiId: string): Promise<Course | null> {
     const { data, error } = await supabase
       .from('courses')
       .select('*')
+      .eq('course_api_id', courseApiId)
       .is('merged_into', null)
-      .or(visible)
-      .or(`name.ilike.%${safe}%,club_name.ilike.%${safe}%,city.ilike.%${safe}%`)
-      .order('name', { ascending: true })
-      .limit(SEARCH_LIMIT);
-    if (error) throw toAppError(error, 'Could not search courses');
-    return data ?? [];
+      .limit(1)
+      .maybeSingle();
+    if (error) throw toAppError(error, 'Could not look up course');
+    return data ?? null;
   },
 
   /**

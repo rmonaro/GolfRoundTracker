@@ -311,4 +311,58 @@ describe('multi-round tracking', () => {
       expect(useRoundStore.getState().active?.roundSyncedAt).toBeUndefined();
     });
   });
+
+  describe('hydrateFromRemote', () => {
+    // Every column `roundSync.roundPayload` sends has to survive the round
+    // trip. The reconciler rebuilds the `rounds` row from the local object
+    // alone, so a field dropped here isn't merely missing locally — the next
+    // push writes null over it on the server. tee_id/tee_name did exactly that.
+    const remoteRound = {
+      id: 'a3f1c2d4-0000-4000-8000-0000000000ff',
+      user_id: 'u1',
+      course_id: 'c1',
+      course_name: 'Away GC',
+      holes_played: 18,
+      score: 0,
+      par: 72,
+      score_vs_par: 0,
+      started_at: '2026-09-09T10:00:00Z',
+      completed_at: null,
+      course_rating: 71.2,
+      slope_rating: 129,
+      estimated_handicap: null,
+      handicap_differential: null,
+      tm_registration_id: null,
+      tm_round_number: null,
+      tm_tournament_slug: null,
+      tee_id: 'c3f1c2d4-0000-4000-8000-0000000000aa',
+      tee_name: 'Blue',
+      scored_by_user_id: null,
+      scoring_mode: 'SELF' as const,
+      pending_athlete_email: null,
+      pending_registration_id: null,
+      athlete_confirmed_at: null,
+      athlete_dispute_note: null,
+      tm_card_role: null
+    };
+
+    it('keeps the selected tee so the next push does not erase it', () => {
+      useRoundStore.getState().hydrateFromRemote(remoteRound, [], []);
+      const active = useRoundStore.getState().active;
+      expect(active?.teeId).toBe('c3f1c2d4-0000-4000-8000-0000000000aa');
+      expect(active?.teeName).toBe('Blue');
+    });
+
+    it('marks the round as already on the server', () => {
+      // It came FROM the server. Left unset, the reconciler treats the row as
+      // never pushed and re-uploads it on every pass.
+      useRoundStore.getState().hydrateFromRemote(remoteRound, [], []);
+      expect(useRoundStore.getState().active?.roundSyncedAt).toBeTruthy();
+    });
+
+    it('opens at the first unplayed hole', () => {
+      useRoundStore.getState().hydrateFromRemote(remoteRound, [], []);
+      expect(useRoundStore.getState().active?.currentHoleIndex).toBe(0);
+    });
+  });
 });

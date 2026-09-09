@@ -29,6 +29,7 @@ import { useRounds } from '@/features/stats/useRounds';
 import { scoreVsPar } from '@/utils/format';
 import { computeCompletedTotals } from '@/features/round/computeRoundTotals';
 import { roundRepo } from '@/services/roundRepo';
+import { useRemoteLiveRound, useResumeRemoteRound } from '@/features/round/useResumeRemoteRound';
 
 export function RoundHomePage() {
   const active = useRoundStore((s) => s.active);
@@ -39,6 +40,11 @@ export function RoundHomePage() {
   const { data: rounds } = useRounds();
   const lastRound = (rounds ?? []).filter((r) => r.completed_at)[0];
   const [confirmDelete, setConfirmDelete] = useState(false);
+
+  // A round left in progress on another device. Only offered when nothing is
+  // live here — see useResumeRemoteRound for why taking over is guarded.
+  const remoteLive = useRemoteLiveRound();
+  const resumeRemote = useResumeRemoteRound();
 
   // If the active round is a tournament round, reconcile it against the DB so a
   // stale/empty local store (e.g. a duplicate round) is healed to the real one.
@@ -132,6 +138,65 @@ export function RoundHomePage() {
               >
                 Resume Round
               </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Started elsewhere and never finished. The row is on the server
+            (live rounds sync with completed_at null); it just had no home in
+            the UI, because every list here filters to completed rounds. */}
+        {!active && remoteLive && (
+          <Card
+            elevation={0}
+            sx={{
+              bgcolor: 'background.paper',
+              border: '1px dashed',
+              borderColor: 'primary.main',
+              borderRadius: '5px'
+            }}
+          >
+            <CardContent>
+              <Typography
+                variant="caption"
+                color="primary"
+                sx={{ textTransform: 'uppercase', letterSpacing: 0.6 }}
+              >
+                In progress on another device
+              </Typography>
+              <Typography variant="h5" sx={{ mt: 0.5 }}>
+                {remoteLive.course_name}
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                Started {new Date(remoteLive.started_at).toLocaleString()}
+              </Typography>
+              {resumeRemote.error && (
+                <Typography variant="body2" color="error" sx={{ mt: 1 }}>
+                  {(resumeRemote.error as Error).message}
+                </Typography>
+              )}
+              <Button
+                variant="outlined"
+                size="large"
+                fullWidth
+                startIcon={<PlayArrowRoundedIcon />}
+                sx={{ mt: 2 }}
+                disabled={resumeRemote.isPending}
+                onClick={() =>
+                  resumeRemote.mutate(remoteLive, {
+                    onSuccess: () => navigate('/round/play')
+                  })
+                }
+              >
+                {resumeRemote.isPending ? 'Loading round…' : 'Continue Here'}
+              </Button>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: 'block', mt: 1 }}
+              >
+                Picks up where the other device left off. Keep playing on one
+                device at a time — whichever saves last wins.
+              </Typography>
             </CardContent>
           </Card>
         )}

@@ -1,0 +1,31 @@
+-- Migration 043 — Index shots.hole_id
+-- Dialect: PostgreSQL (Supabase). Safe to re-run.
+--
+-- HYGIENE, NOT A FIX. Read this before assuming it solved a slow delete.
+--
+-- `shots.hole_id → round_holes.id on delete cascade` had no index whose leading
+-- column is `hole_id` (the only candidate, `shots_round_hole_idx`, leads with
+-- `round_id`). Postgres enforces a cascade with one statement per parent row —
+-- `delete from shots where hole_id = $1` for each of the 18 round_holes rows —
+-- so each of those did a sequential scan. Supabase's own performance advisor
+-- flags this as an unindexed foreign key, and it is the kind of thing that only
+-- ever gets worse with row count.
+--
+-- MEASURED 2026-09-09, before this index existed, on a real 67-shot round:
+--
+--   Trigger for constraint round_holes_round_id_fkey: time=0.735 calls=1
+--   Trigger for constraint shots_round_id_fkey:       time=1.753 calls=1
+--   Trigger for constraint shots_hole_id_fkey:        time=0.663 calls=18
+--   Execution Time: 3.436 ms
+--
+-- i.e. the whole cascade is sub-millisecond at 1,339 shots / 792 kB, because a
+-- seq scan of a table that small is faster than an index lookup would be. So
+-- this index buys nothing today. It was added while chasing a round delete that
+-- blew the client's request deadline; that turned out to be spent OUTSIDE
+-- Postgres entirely, and this was kept only because an unindexed FK on a
+-- growing table is worth closing anyway.
+--
+-- NOT `concurrently`: the Supabase CLI runs each migration inside a
+-- transaction, where `create index concurrently` is not allowed. At this size
+-- the ACCESS EXCLUSIVE lock is instant.
+create index if not exists shots_hole_id_idx on public.shots(hole_id);

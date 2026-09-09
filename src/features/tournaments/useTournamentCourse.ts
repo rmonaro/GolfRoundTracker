@@ -1,8 +1,9 @@
 import { useMemo } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCourses } from '@/features/round/useStartRound';
 import { useImportCourse } from '@/admin/hooks/useCoursesApi';
 import { useAuthStore } from '@/stores/authStore';
+import { courseRepo } from '@/services/courseRepo';
 import type { Course } from '@/models';
 
 /**
@@ -20,12 +21,24 @@ export function useTournamentCourse(externalCourseId: string | null | undefined)
   const importCourse = useImportCourse();
   const queryClient = useQueryClient();
 
-  const matched = useMemo<Course | null>(() => {
+  const fromList = useMemo<Course | null>(() => {
     if (!externalCourseId) return null;
     return (
       courses.data?.find((c) => c.course_api_id === externalCourseId) ?? null
     );
   }, [courses.data, externalCourseId]);
+
+  // The browse list hides library courses with no tee sets or no polygons, so a
+  // miss there does NOT mean we lack the course. Ask by id before concluding an
+  // import is needed — otherwise every tournament on such a course re-imports
+  // on every start.
+  const byApiId = useQuery({
+    queryKey: ['course-by-api-id', externalCourseId],
+    enabled: !!externalCourseId && !fromList && !courses.isLoading,
+    queryFn: () => courseRepo.findByApiId(externalCourseId as string)
+  });
+
+  const matched = fromList ?? byApiId.data ?? null;
 
   const ensureCourse = async (): Promise<Course | null> => {
     if (matched) return matched;
@@ -38,7 +51,7 @@ export function useTournamentCourse(externalCourseId: string | null | undefined)
 
   return {
     course: matched,
-    isLoadingCourses: courses.isLoading,
+    isLoadingCourses: courses.isLoading || byApiId.isLoading,
     isImporting: importCourse.isPending,
     importError: importCourse.error as Error | null,
     ensureCourse

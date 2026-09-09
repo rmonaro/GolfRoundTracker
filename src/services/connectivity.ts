@@ -44,6 +44,22 @@ export const REQUEST_TIMEOUT_MS = 8000;
 export const SLOW_REQUEST_TIMEOUT_MS = 60_000;
 
 /**
+ * Deadline for a PostgREST WRITE.
+ *
+ * A read that misses its deadline costs nothing — the caller falls back to the
+ * cache and tries again later. A write that misses one is ambiguous: aborting
+ * the socket does not roll the statement back, so the change may well have
+ * landed while the user is told it failed. Deleting a round is the worst case,
+ * because the cascade to round_holes and shots makes it the slowest statement
+ * the app issues.
+ *
+ * So writes get more rope than reads. Not unlimited — the point of a deadline
+ * survives — but enough that a slow-but-working server finishes instead of
+ * being reported as a network failure on full wifi.
+ */
+export const WRITE_REQUEST_TIMEOUT_MS = 20_000;
+
+/**
  * Foreground heartbeat. Platform events cover the interface going up and down,
  * but signal FADING fires nothing at all — the radio stays "connected" while
  * throughput goes to zero. Without a poll, a golfer walking from the car park

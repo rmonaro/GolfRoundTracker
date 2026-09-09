@@ -658,13 +658,30 @@ export const useRoundStore = create<RoundState>()(
             courseRating: round.course_rating,
             slopeRating: round.slope_rating,
             totalPar: round.par,
+            // `rounds` has no total_yardage column — genuinely not recoverable.
             totalYardage: null,
             startedAt: round.started_at,
             currentHoleIndex: resumeIndex,
             holes: localHoles,
             tmRegistrationId: round.tm_registration_id ?? null,
             tmRoundNumber: round.tm_round_number ?? null,
-            tmTournamentSlug: round.tm_tournament_slug ?? null
+            tmTournamentSlug: round.tm_tournament_slug ?? null,
+            // EVERY column `roundPayload` sends has to come back, or the first
+            // reconcile after a hydrate writes null over it. The reconciler
+            // rebuilds the `rounds` row from this object alone, so a field
+            // restored as undefined is a field about to be erased on the
+            // server. tee_id / tee_name were the ones that actually went
+            // missing: a resumed round lost which tee was played, and then
+            // deleted it upstream too.
+            teeId: round.tee_id ?? null,
+            teeName: round.tee_name ?? null,
+            scoringMode: round.scoring_mode ?? 'SELF',
+            scoredByUserId: round.scored_by_user_id ?? null,
+            pendingAthleteEmail: round.pending_athlete_email ?? null,
+            tmCardRole: round.tm_card_role ?? null,
+            // It came FROM the server, so it is by definition already there.
+            // Left null, the reconciler treats the round row as never pushed.
+            roundSyncedAt: new Date().toISOString()
           }
         });
       }
