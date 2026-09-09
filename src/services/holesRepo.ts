@@ -178,27 +178,36 @@ async function fetchLayoutFromNetwork(
   courseId: string,
   holeNumber: number
 ): Promise<LayoutResult> {
-  const { data: course, error: courseErr } = await supabase
-    .from('courses')
-    .select('osm_status')
-    .eq('id', courseId)
-    .maybeSingle();
-  if (courseErr) throw toAppError(courseErr, 'Could not load course');
-  if (!course) return { data: null, courseStatus: null };
+  // THE HOLE ROW IS THE EVIDENCE, NOT `osm_status`.
+  //
+  // This used to read the course first and short-circuit to `data: null`
+  // whenever the status was `skip`/`no_coverage` — so a course whose geometry
+  // was already in the database rendered nothing, because a flag on a different
+  // table said it shouldn't exist. The two do fall out of step: a sync writes
+  // holes and features and then marks the status, a later re-sync can fail
+  // after the rows are already there, and an admin can import geometry by hand.
+  // The spectator feed never consulted the flag, which is why the same hole drew
+  // fine for a viewer and not for the player standing on the tee.
+  //
+  // Asked together rather than in sequence: the status is only needed to
+  // EXPLAIN an absent hole, so waiting for it before looking for the hole cost
+  // a round trip on the path that matters.
+  const [courseRes, holeRes] = await Promise.all([
+    supabase.from('courses').select('osm_status').eq('id', courseId).maybeSingle(),
+    supabase
+      .from('holes')
+      .select('*')
+      .eq('course_id', courseId)
+      .eq('hole_number', holeNumber)
+      .maybeSingle()
+  ]);
+  if (courseRes.error) throw toAppError(courseRes.error, 'Could not load course');
+  if (holeRes.error) throw toAppError(holeRes.error, 'Could not load hole geometry');
 
-  const courseStatus = (course.osm_status ?? null) as CourseOsmStatus | null;
-  // Short-circuit when there's no chance of geometry.
-  if (courseStatus === 'skip' || courseStatus === 'no_coverage') {
-    return { data: null, courseStatus };
-  }
-
-  const { data: hole, error: holeErr } = await supabase
-    .from('holes')
-    .select('*')
-    .eq('course_id', courseId)
-    .eq('hole_number', holeNumber)
-    .maybeSingle();
-  if (holeErr) throw toAppError(holeErr, 'Could not load hole geometry');
+  const courseStatus = (courseRes.data?.osm_status ?? null) as CourseOsmStatus | null;
+  const hole = holeRes.data;
+  // No geometry: NOW the status matters, because it is the only thing that can
+  // say whether this is "syncing" or "never going to happen".
   if (!hole) return { data: null, courseStatus };
 
   // Load EVERY feature for the course, then assign each to its nearest hole

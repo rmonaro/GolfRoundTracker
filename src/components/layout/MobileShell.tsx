@@ -8,6 +8,7 @@ import WatchRoundedIcon from '@mui/icons-material/WatchRounded';
 import EmojiEventsRoundedIcon from '@mui/icons-material/EmojiEventsRounded';
 import AssignmentIndRoundedIcon from '@mui/icons-material/AssignmentIndRounded';
 import SettingsRoundedIcon from '@mui/icons-material/SettingsRounded';
+import VisibilityRoundedIcon from '@mui/icons-material/VisibilityRounded';
 import { Capacitor } from '@capacitor/core';
 import { Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAppModeStore } from '@/stores/appModeStore';
@@ -52,6 +53,12 @@ const tournamentTabs = (canScore: boolean) => [
   ...(canScore
     ? [{ value: '/scoring', label: 'Scoring', icon: <AssignmentIndRoundedIcon /> }]
     : []),
+  // Sharing a code with family is a tournament-day action, and it was buried
+  // two levels inside Settings — found by the athlete only after someone asked
+  // how to watch. It gets its own tab on this side, at /follow rather than
+  // /settings/spectators because Settings replaces the app nav with its own
+  // section bar (see `ownsBottomBar`), which would leave the tab looking dead.
+  { value: '/follow', label: 'Follow', icon: <VisibilityRoundedIcon /> },
   { value: '/settings', label: 'Settings', icon: <SettingsRoundedIcon /> }
 ];
 

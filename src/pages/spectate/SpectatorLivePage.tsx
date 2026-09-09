@@ -7,18 +7,27 @@ import {
   CardContent,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Divider,
+  IconButton,
   MenuItem,
   Stack,
   TextField,
   Typography
 } from '@mui/material';
+import OpenInFullRoundedIcon from '@mui/icons-material/OpenInFullRounded';
 import { useQuery } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { PageHeader } from '@/components/layout/PageHeader';
 import { spectatorFeed, type SpectatorFeed } from '@/services/spectatorFeed';
 import { useSpectatorStore } from '@/stores/spectatorStore';
+import { useAuthStore } from '@/stores/authStore';
 import { SpectatorHoleMap } from '@/features/spectate/SpectatorHoleMap';
+import { SpectatorMapView } from '@/features/spectate/SpectatorMapView';
 import { scoreVsPar } from '@/utils/format';
 import type { RoundHole, Shot } from '@/models';
 
@@ -79,6 +88,10 @@ export function SpectatorLivePage() {
   const storedRoundId = useSpectatorStore((s) => s.roundId);
   const selectRound = useSpectatorStore((s) => s.selectRound);
   const leave = useSpectatorStore((s) => s.leave);
+  const setPendingFollow = useSpectatorStore((s) => s.setPendingFollow);
+  const signedIn = useAuthStore((s) => !!s.session);
+  /** Shown on the way out — see the dialog at the foot of this file. */
+  const [leaving, setLeaving] = useState(false);
   const [holeNumber, setHoleNumber] = useState<number | null>(null);
 
   useEffect(() => {
@@ -131,6 +144,8 @@ export function SpectatorLivePage() {
   // Follow the athlete around the course unless the viewer has picked a hole to
   // look at, in which case leave them there.
   const [pinnedHole, setPinnedHole] = useState(false);
+  /** Full-screen read-only map. See SpectatorMapView. */
+  const [mapOpen, setMapOpen] = useState(false);
   useEffect(() => {
     if (!pinnedHole) setHoleNumber(currentHole);
   }, [currentHole, pinnedHole]);
@@ -149,13 +164,7 @@ export function SpectatorLivePage() {
         title={data?.athleteName ?? 'Watching'}
         subtitle={round?.course_name ?? undefined}
         action={
-          <Button
-            size="small"
-            onClick={() => {
-              leave();
-              navigate('/spectate', { replace: true });
-            }}
-          >
+          <Button size="small" onClick={() => setLeaving(true)}>
             Leave
           </Button>
         }
@@ -310,7 +319,15 @@ export function SpectatorLivePage() {
                   </Stack>
 
                   {round.course_id && (
-                    <Box sx={{ height: 260, mb: 1.5, borderRadius: 1, overflow: 'hidden' }}>
+                    <Box
+                      sx={{
+                        height: 260,
+                        mb: 1.5,
+                        borderRadius: 1,
+                        overflow: 'hidden',
+                        position: 'relative'
+                      }}
+                    >
                       <SpectatorHoleMap
                         code={code}
                         courseId={round.course_id}
@@ -318,6 +335,22 @@ export function SpectatorLivePage() {
                         shots={shownShots}
                         clubs={data!.clubs}
                       />
+                      {/* Opens the same map full screen. The card is a glance;
+                          this is for actually reading the hole. */}
+                      <IconButton
+                        aria-label="Open full map"
+                        onClick={() => setMapOpen(true)}
+                        sx={{
+                          position: 'absolute',
+                          top: 8,
+                          right: 8,
+                          bgcolor: 'background.paper',
+                          boxShadow: 2,
+                          '&:hover': { bgcolor: 'background.paper' }
+                        }}
+                      >
+                        <OpenInFullRoundedIcon fontSize="small" />
+                      </IconButton>
                     </Box>
                   )}
 
@@ -355,6 +388,80 @@ export function SpectatorLivePage() {
           </>
         )}
       </Stack>
+
+      {/* Leaving is the one moment the viewer knows they might want this
+          athlete back, and the only moment the app can ask. A code lives in
+          this phone's localStorage and nowhere else: clear the app's data,
+          change handset, or watch somebody else, and it is gone. */}
+      <Dialog
+        open={leaving}
+        onClose={() => setLeaving(false)}
+        fullWidth
+        maxWidth="xs"
+        PaperProps={{ sx: { borderRadius: '5px' } }}
+      >
+        <DialogTitle>Keep following {data?.athleteName ?? 'this player'}?</DialogTitle>
+        <DialogContent>
+          <DialogContentText variant="body2">
+            {signedIn
+              ? `Save ${data?.athleteName ?? 'this player'} to your account and you can come back to their rounds — including finished ones — without the code.`
+              : `A free account remembers them, so you can watch their next round, and look back over past ones, without asking for the code again. It works on any phone you sign in on.`}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions sx={{ flexWrap: 'wrap', gap: 1, px: 3, pb: 2 }}>
+          <Button
+            onClick={() => {
+              setLeaving(false);
+              leave();
+              navigate('/spectate', { replace: true });
+            }}
+          >
+            Just leave
+          </Button>
+          <Box sx={{ flex: 1 }} />
+          <Button
+            variant="contained"
+            onClick={() => {
+              // Park the code either way. Signed in, `useFlushSpectatorFollow`
+              // redeems it on the next render; signed out, it survives the
+              // whole sign-up detour and is redeemed the moment a session
+              // exists. Neither path needs this screen to still be mounted.
+              if (code) setPendingFollow(code);
+              setLeaving(false);
+              leave();
+              if (signedIn) {
+                navigate('/spectate', { replace: true });
+              } else {
+                navigate('/auth/signup', { replace: true });
+              }
+            }}
+          >
+            {signedIn ? 'Save to my account' : 'Create free account'}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {round?.course_id && shownHole != null && (
+        <SpectatorMapView
+          open={mapOpen}
+          onClose={() => setMapOpen(false)}
+          code={code}
+          courseId={round.course_id}
+          athleteName={data?.athleteName ?? ''}
+          holeNumber={shownHole}
+          holes={holes}
+          holeRow={shownHoleRow}
+          shots={shownShots}
+          clubs={data?.clubs ?? {}}
+          // Stepping holes in the map pins the view, exactly as tapping the
+          // hole strip does — otherwise the next poll would yank the viewer
+          // back to whatever hole the athlete is on.
+          onHoleChange={(n) => {
+            setPinnedHole(true);
+            setHoleNumber(n);
+          }}
+        />
+      )}
     </Box>
   );
 }

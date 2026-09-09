@@ -284,6 +284,11 @@ export function AppRouter() {
 
         {/* Shared by both sides */}
         <Route path="/settings" element={<SettingsPage />} />
+        {/* Spectator sharing has two doors: the Follow tab on the tournament
+            side, and the Settings card that has always linked here. Same page,
+            two paths, because /settings/* swaps the app nav for the Settings
+            section bar and a tab pointing there would render with no tab bar. */}
+        <Route path="/follow" element={<SpectatorSharePage />} />
         <Route path="/settings/spectators" element={<SpectatorSharePage />} />
       </Route>
 

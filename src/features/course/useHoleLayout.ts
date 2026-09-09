@@ -82,13 +82,22 @@ export function useHoleLayout(
     return { data: null, courseStatus: null, status: 'loading', isLoading: true };
   }
 
+  // Geometry in hand beats anything `courses.osm_status` claims. That flag and
+  // the `holes` rows drift apart in both directions — a re-sync that fails
+  // leaves `failed` on a course that was mapped fine last week, geometry gets
+  // imported by hand, and a status is set at the END of a sync that has already
+  // written its rows. Reading the flag first meant a fully mapped hole rendered
+  // "Hole layout syncing" to the player while the spectator feed, which never
+  // looks at the flag, drew the same hole correctly.
+  //
+  // So the status only decides what to SAY when there is nothing to draw.
   let status: HoleLayoutStatus;
-  if (courseStatus === 'skip' || courseStatus === 'no_coverage' || !data) {
-    status = 'unavailable';
+  if (data) {
+    status = 'ready';
   } else if (courseStatus === 'pending' || courseStatus === 'failed') {
     status = 'pending';
   } else {
-    status = 'ready';
+    status = 'unavailable';
   }
 
   return { data, courseStatus, status, isLoading: false };

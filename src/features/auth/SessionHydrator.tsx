@@ -1,4 +1,5 @@
 import { useBag } from '@/features/bag/useBag';
+import { useFlushSpectatorFollow } from '@/features/spectate/useFlushSpectatorFollow';
 
 /**
  * Renders nothing. Fires session-scoped queries that populate Zustand stores
@@ -11,5 +12,9 @@ import { useBag } from '@/features/bag/useBag';
  */
 export function SessionHydrator() {
   useBag();
+  // Saves an athlete a spectator asked to keep, the moment they have an account
+  // to keep them on. Here rather than on a spectator screen because the sign-up
+  // detour ends somewhere else entirely.
+  useFlushSpectatorFollow();
   return null;
 }

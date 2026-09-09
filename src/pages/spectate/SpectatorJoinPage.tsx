@@ -4,6 +4,7 @@ import {
   Box,
   Button,
   CircularProgress,
+  Divider,
   Stack,
   TextField,
   Typography,
@@ -11,9 +12,11 @@ import {
 } from '@mui/material';
 import QrCodeScannerRoundedIcon from '@mui/icons-material/QrCodeScannerRounded';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
+import { useQuery } from '@tanstack/react-query';
 import { spectatorFeed } from '@/services/spectatorFeed';
-import { formatShareCode, normaliseShareCode } from '@/services/spectatorRepo';
+import { formatShareCode, normaliseShareCode, spectatorRepo } from '@/services/spectatorRepo';
 import { useSpectatorStore } from '@/stores/spectatorStore';
+import { useAuthStore } from '@/stores/authStore';
 import { QrScanner } from '@/features/spectate/QrScanner';
 
 /**
@@ -43,6 +46,15 @@ export function SpectatorJoinPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const join = useSpectatorStore((s) => s.join);
+  const signedIn = useAuthStore((s) => !!s.session);
+
+  // Athletes this viewer saved to their account (migration 045). Signed-out
+  // viewers have none by definition, so the query never runs for them.
+  const follows = useQuery({
+    queryKey: ['spectator-follows'],
+    enabled: signedIn,
+    queryFn: () => spectatorRepo.listFollows()
+  });
   const [code, setCode] = useState(() => formatShareCode(params.get('code') ?? ''));
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -114,6 +126,32 @@ export function SpectatorJoinPage() {
         </Box>
 
         {error && <Alert severity="error">{error}</Alert>}
+
+        {/* Saved athletes — one tap back into somebody they already follow,
+            above the code field because for a returning viewer this IS the
+            screen. A revoked follow stays listed and says so, rather than
+            vanishing and leaving them wondering where their player went. */}
+        {signedIn && (follows.data?.length ?? 0) > 0 && (
+          <Stack spacing={1}>
+            <Typography variant="caption" color="text.secondary">
+              Saved
+            </Typography>
+            {follows.data!.map((f) => (
+              <Button
+                key={f.id}
+                variant="outlined"
+                size="large"
+                disabled={loading || f.revoked}
+                onClick={() => void submit(f.code)}
+                sx={{ justifyContent: 'flex-start' }}
+              >
+                {f.athlete_name ?? 'Athlete'}
+                {f.revoked ? ' · code no longer active' : ''}
+              </Button>
+            ))}
+            <Divider sx={{ pt: 1 }} />
+          </Stack>
+        )}
 
         <TextField
           label="Spectator code"

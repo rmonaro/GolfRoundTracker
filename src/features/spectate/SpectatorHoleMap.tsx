@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, type MutableRefObject } from 'react';
 import { Box, CircularProgress, Typography } from '@mui/material';
 import { useQuery } from '@tanstack/react-query';
 import { spectatorFeed } from '@/services/spectatorFeed';
@@ -13,6 +13,13 @@ interface SpectatorHoleMapProps {
   /** Shots on this hole, already ordered. */
   shots: Shot[];
   clubs: Record<string, string>;
+  /**
+   * Tighter markers and padding, for the inline card. False gives the
+   * full-screen view the same framing the player's own round screen uses.
+   */
+  compact?: boolean;
+  /** Receives a "frame the whole hole" fn so a parent can offer a recenter. */
+  recenterRef?: MutableRefObject<(() => void) | null>;
 }
 
 /**
@@ -32,7 +39,9 @@ export function SpectatorHoleMap({
   courseId,
   holeNumber,
   shots,
-  clubs
+  clubs,
+  compact = true,
+  recenterRef
 }: SpectatorHoleMapProps) {
   const { data, isLoading, error } = useQuery({
     queryKey: ['spectator-layout', code, courseId],
@@ -95,11 +104,17 @@ export function SpectatorHoleMap({
     );
   }
 
+  // READ ONLY, and that is a matter of which props are absent rather than a
+  // flag: no `onShotLanded` (so a tap records nothing), no `aimMode`, no
+  // `onShotEndPointMoved` (so the dots can't be dragged), no pin editing.
+  // `interactive` is pan and zoom only — a spectator can look anywhere on the
+  // hole, and change nothing.
   return (
     <HoleLayout
       layout={layout}
-      compact
+      compact={compact}
       interactive
+      recenterRef={recenterRef}
       shotEndPoints={shotEndPoints}
       shotLabels={shotLabels}
     />

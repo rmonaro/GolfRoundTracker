@@ -34,16 +34,55 @@ export function normaliseShareCode(input: string): string {
 }
 
 /**
- * The URL a QR code encodes.
+ * Public web origin the spectator link should point at, e.g.
+ * `https://rounds.example.com`. Set it in `.env` as VITE_PUBLIC_WEB_URL.
+ *
+ * DELIBERATELY EMPTY TODAY — the app ships only as a Capacitor build, so there
+ * is no web address a link could point at. Inside Capacitor
+ * `window.location.origin` is `capacitor://localhost` (iOS) or
+ * `http://localhost` (Android): a scheme that resolves only on the athlete's
+ * own phone, so a QR built from it encodes a link nobody else's camera can
+ * open, and the share sheet texts the same dead URL.
+ *
+ * With no base the code itself is the payload, which is the right answer for a
+ * native-only app anyway: the spectator needs the app installed regardless, and
+ * the join screen's own scanner reads a bare code (`codeFromScan`). This exists
+ * so that shipping a web build later is a one-line change rather than a hunt.
+ */
+const PUBLIC_WEB_BASE = (import.meta.env.VITE_PUBLIC_WEB_URL as string | undefined)
+  ?.trim()
+  .replace(/\/+$/, '');
+
+/**
+ * The URL a QR code encodes, or null when we have no origin worth handing out.
  *
  * Deliberately a link to the join screen with the code in the query string, not
  * the bare code: scanned with a phone's own camera app — which is how most
  * people scan anything — a link opens straight into the spectator view, while a
  * bare code would just show them eight characters to retype.
+ *
+ * Null rather than a broken string: a QR that silently goes nowhere is worse
+ * than no QR, because the athlete has no way to tell. Callers fall back to the
+ * code itself, which always works.
  */
-export function shareUrlFor(code: string): string {
-  const base = typeof window !== 'undefined' ? window.location.origin : '';
+export function shareUrlFor(code: string): string | null {
+  const runtime =
+    typeof window !== 'undefined' && /^https?:$/.test(window.location.protocol)
+      ? window.location.origin
+      : null;
+  const base = PUBLIC_WEB_BASE || runtime;
+  if (!base) return null;
   return `${base}/spectate?code=${encodeURIComponent(formatShareCode(code))}`;
+}
+
+/** A code saved against a viewer's account — see migration 045. */
+export interface SpectatorFollow {
+  id: string;
+  code: string;
+  athlete_name: string | null;
+  created_at: string;
+  /** The athlete has retired this code; the follow is a dead bookmark. */
+  revoked?: boolean;
 }
 
 export const spectatorRepo = {
@@ -72,6 +111,31 @@ export const spectatorRepo = {
     return data as SpectatorShare;
   },
 
+  /**
+   * The athlete's code, minting one on first use.
+   *
+   * Creating a code was a deliberate act the golfer had to remember to perform
+   * BEFORE anyone wanted to watch — which is the wrong moment to discover it,
+   * standing on the first tee with a parent asking how to follow along. There
+   * is nothing to decide: a code exposes tournament rounds and nothing else, so
+   * having one costs nothing and it can always be revoked.
+   *
+   * Idempotent, and deliberately returns the existing code rather than adding
+   * to it — a screen that mints a fresh code on every visit would hand out a
+   * different number each time and quietly invalidate the one already texted to
+   * someone.
+   *
+   * This is now the ONLY way a code gets made: the share screen has no create
+   * form, so an athlete has exactly one code, rotated by revoking it. `create`
+   * remains the primitive underneath and is still reachable if a reason to hand
+   * out per-person codes ever comes back.
+   */
+  async ensureShare(label?: string | null): Promise<SpectatorShare> {
+    const existing = await this.listMine();
+    if (existing.length > 0) return existing[0];
+    return this.create(label ?? null);
+  },
+
   /** Retire a code. Anyone still holding it is refused as if it never existed. */
   async revoke(id: string): Promise<void> {
     const { error } = await supabase
@@ -79,6 +143,32 @@ export const spectatorRepo = {
       .update({ revoked_at: new Date().toISOString() })
       .eq('id', id);
     if (error) throw toAppError(error, 'Could not revoke that code');
+  },
+
+  /**
+   * Save a code to the signed-in viewer's account (migration 045).
+   *
+   * Bookmarking, not a grant: reads still go through the edge function with the
+   * code, and the athlete revoking it cuts the follow off at the next poll.
+   */
+  async follow(code: string): Promise<SpectatorFollow> {
+    const { data, error } = await supabase.rpc('follow_spectator_share', {
+      p_code: normaliseShareCode(code)
+    });
+    if (error) throw toAppError(error, 'Could not save that athlete');
+    return data as SpectatorFollow;
+  },
+
+  /** Saved athletes, newest first. Revoked ones are included and flagged. */
+  async listFollows(): Promise<SpectatorFollow[]> {
+    const { data, error } = await supabase.rpc('list_spectator_follows');
+    if (error) throw toAppError(error, 'Could not load your saved athletes');
+    return (data ?? []) as SpectatorFollow[];
+  },
+
+  async unfollow(id: string): Promise<void> {
+    const { error } = await supabase.from('spectator_follows').delete().eq('id', id);
+    if (error) throw toAppError(error, 'Could not remove that athlete');
   },
 
   async rename(id: string, label: string): Promise<void> {
