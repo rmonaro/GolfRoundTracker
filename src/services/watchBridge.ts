@@ -326,20 +326,29 @@ function stripNulls<T>(value: T): T {
 }
 
 /**
- * Web/Android no-op fallback. Lets the same code paths run in browser dev
- * without crashing — calls resolve as if there's no watch present.
+ * Whether a native `WatchBridge` plugin exists to talk to.
+ *
+ * Both iOS and Android now implement the SAME five methods and three events —
+ * `ios/App/WatchBridgePlugin.swift` over WatchConnectivity, and
+ * `android/app/.../WatchBridge.java` over the Wear Data Layer — so everything
+ * below this line, and everything above it in `useWatchSync`, is shared.
+ *
+ * Web keeps the no-op fallback so the same code paths run in browser dev
+ * without crashing: calls resolve as if there's no watch present.
  */
-const isIOSNative = Capacitor.isNativePlatform() && Capacitor.getPlatform() === 'ios';
+const hasWatchBridge =
+  Capacitor.isNativePlatform() &&
+  (Capacitor.getPlatform() === 'ios' || Capacitor.getPlatform() === 'android');
 
 export const watchBridge = {
   /** Activate the WCSession. Safe to call multiple times. */
   async activate() {
-    if (!isIOSNative) return { supported: false } as const;
+    if (!hasWatchBridge) return { supported: false } as const;
     return Raw.activate();
   },
 
   async isReachable(): Promise<boolean> {
-    if (!isIOSNative) return false;
+    if (!hasWatchBridge) return false;
     const { reachable } = await Raw.isReachable();
     return reachable;
   },
@@ -352,7 +361,7 @@ export const watchBridge = {
    * Best-effort — resolves `{ launched: false }` off-iOS or on failure.
    */
   async launchWatch(startPractice = false): Promise<{ launched: boolean; reason?: string }> {
-    if (!isIOSNative) return { launched: false };
+    if (!hasWatchBridge) return { launched: false };
     try {
       return await Raw.launchWatch({ startPractice });
     } catch (err) {
@@ -366,7 +375,7 @@ export const watchBridge = {
    * back, which the phone handles idempotently. Best-effort — no-op off iOS.
    */
   async endWatchPractice(): Promise<void> {
-    if (!isIOSNative) return;
+    if (!hasWatchBridge) return;
     try {
       await Raw.endWatchPractice();
     } catch (err) {
@@ -376,7 +385,7 @@ export const watchBridge = {
 
   /** Push the latest round snapshot to the watch (latest-wins coalescing). */
   async sendState(state: WatchRoundState) {
-    if (!isIOSNative) return;
+    if (!hasWatchBridge) return;
     // WCSession.updateApplicationContext rejects payloads containing
     // unsupported types — and JS `null` bridges to Swift `NSNull`, which
     // counts as unsupported. Strip null/undefined recursively so the
@@ -395,7 +404,7 @@ export const watchBridge = {
   async onMessage(
     cb: (msg: WatchInboundMessage, delivery: 'live' | 'queued') => void
   ): Promise<PluginListenerHandle> {
-    if (!isIOSNative) return { remove: async () => undefined } as PluginListenerHandle;
+    if (!hasWatchBridge) return { remove: async () => undefined } as PluginListenerHandle;
     return Raw.addListener('messageFromWatch', (event) => {
       const parsed = event.message as WatchInboundMessage | { type?: string };
       if (!parsed || typeof parsed !== 'object' || !('type' in parsed) || !parsed.type) return;
@@ -406,7 +415,7 @@ export const watchBridge = {
   async onReachabilityChanged(
     cb: (reachable: boolean) => void
   ): Promise<PluginListenerHandle> {
-    if (!isIOSNative) return { remove: async () => undefined } as PluginListenerHandle;
+    if (!hasWatchBridge) return { remove: async () => undefined } as PluginListenerHandle;
     return Raw.addListener('reachabilityChanged', (event) => cb(event.reachable));
   }
 };

@@ -1,0 +1,76 @@
+apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+apply plugin: 'org.jetbrains.kotlin.plugin.compose'
+
+android {
+    namespace = "com.golfroundtracker.app.wear"
+    compileSdk = rootProject.ext.compileSdkVersion
+
+    defaultConfig {
+        // MUST match the phone module. The Data Layer pairs a watch app to a
+        // phone app by applicationId + signing key; a mismatch leaves two apps
+        // that install fine, see each other as nodes, and never exchange
+        // anything. This is the single most common way a Wear pairing "works
+        // but does nothing".
+        applicationId "com.golfroundtracker.app"
+        minSdk = rootProject.ext.wearMinSdkVersion
+        targetSdk = rootProject.ext.targetSdkVersion
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+    }
+
+    buildFeatures {
+        compose true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation "androidx.core:core-ktx:1.15.0"
+    implementation "androidx.activity:activity-compose:$activityComposeVersion"
+    implementation "androidx.compose.ui:ui:$composeUiVersion"
+    implementation "androidx.compose.ui:ui-tooling-preview:$composeUiVersion"
+    // Compose for Wear OS — its own material library, not the phone's. Wear
+    // components assume a round screen and a rotary crown; the phone ones do not.
+    implementation "androidx.wear.compose:compose-material:$wearComposeVersion"
+    implementation "androidx.wear.compose:compose-foundation:$wearComposeVersion"
+    implementation "com.google.android.gms:play-services-wearable:$playServicesWearableVersion"
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:$coroutinesVersion"
+    // `Task.await()` — Play services returns Tasks, and bridging them by hand
+    // means callback plumbing in every call site.
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-play-services:$coroutinesVersion"
+    // `collectAsStateWithLifecycle` — a plain collectAsState keeps collecting
+    // while the watch screen is off, which on a wrist device is the difference
+    // between a battery complaint and none.
+    implementation "androidx.lifecycle:lifecycle-runtime-compose:2.8.7"
+    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7"
+    // Fused location — the watch's own GPS, which is what makes its distance
+    // live rather than a frozen copy of the phone's last calculation.
+    implementation "com.google.android.gms:play-services-location:21.3.0"
+    // Health Services — the Wear equivalent of HKWorkoutSession. What it buys is
+    // not heart rate; it is PERMISSION TO KEEP RUNNING once the screen goes off.
+    implementation "androidx.health:health-services-client:1.0.0-beta03"
+    implementation "com.google.guava:guava:33.3.1-android"
+    // Health Services returns ListenableFuture, not Task. This is what gives it
+    // `.await()` — without it every call needs a callback wrapper.
+    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-guava:$coroutinesVersion"
+    debugImplementation "androidx.compose.ui:ui-tooling:$composeUiVersion"
+    // The swing detector is pure logic and the highest-risk part of the port —
+    // the only piece that can be verified without a watch on a wrist.
+    testImplementation "junit:junit:$junitVersion"
+}

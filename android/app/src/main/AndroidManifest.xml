@@ -30,6 +30,25 @@
 
         </activity>
 
+        <!-- Watch → phone messages. `exported` must be true: the system's
+             Wearable service is what starts it, and the intent filter is what
+             Play services matches against. The path filter keeps it to our own
+             namespace rather than waking on every Data Layer event on the
+             device. -->
+        <service
+            android:name=".PhoneWearListenerService"
+            android:exported="true">
+            <intent-filter>
+                <!-- DATA_CHANGED carries the durable event queue (recorded
+                     shots); MESSAGE_RECEIVED carries the lossy live position.
+                     Both are needed — see WearProtocol for why they are
+                     separate channels. -->
+                <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/grt/" />
+            </intent-filter>
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

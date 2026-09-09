@@ -1,7 +1,13 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
 
 buildscript {
-    
+    // Declared HERE, not in variables.gradle. Gradle evaluates buildscript
+    // blocks before anything else in the file, so a version set by an
+    // `apply from` — wherever that line sits — is not visible to these
+    // classpath entries. Modules apply the plugins by id and inherit this
+    // version from the classpath, so it is needed in exactly one place.
+    ext.kotlinVersion = '2.0.21'
+
     repositories {
         google()
         mavenCentral()
@@ -9,6 +15,11 @@ buildscript {
     dependencies {
         classpath 'com.android.tools.build:gradle:8.13.0'
         classpath 'com.google.gms:google-services:4.4.4'
+        // Kotlin + the Compose compiler, for :wear only. The :app module stays
+        // Java — Capacitor generates it and there is no reason to widen its
+        // toolchain for a plugin class.
+        classpath "org.jetbrains.kotlin:kotlin-gradle-plugin:$kotlinVersion"
+        classpath "org.jetbrains.kotlin:compose-compiler-gradle-plugin:$kotlinVersion"
 
         // NOTE: Do not place your application dependencies here; they belong
         // in the individual module build.gradle files

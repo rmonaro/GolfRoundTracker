@@ -13,4 +13,18 @@ ext {
     androidxJunitVersion = '1.3.0'
     androidxEspressoCoreVersion = '3.7.0'
     cordovaAndroidVersion = '14.0.1'
+
+    // --- Wear OS companion (:wear) -----------------------------------------
+    // Wear OS 3. Below this the Compose-for-Wear material library is not
+    // supported, and every watch worth targeting is 3+.
+    wearMinSdkVersion = 30
+    // NB: kotlinVersion lives in build.gradle's buildscript block — see the
+    // comment there for why it cannot live here.
+    composeUiVersion = '1.7.6'
+    wearComposeVersion = '1.4.1'
+    activityComposeVersion = '1.9.3'
+    // Data Layer (MessageClient / DataClient / CapabilityClient) lives here,
+    // and it is needed on BOTH sides — phone and watch.
+    playServicesWearableVersion = '18.2.0'
+    coroutinesVersion = '1.9.0'
 }

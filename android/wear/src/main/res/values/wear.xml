@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools" tools:keep="@array/android_wear_capabilities">
+    <!--
+      What the PHONE looks for to decide there is a watch worth talking to.
+
+      A paired watch that has never installed this app is still a Data Layer
+      node, and messages sent to it disappear with no error. Advertising a
+      capability, and filtering on it in WatchBridge, is the difference between
+      "a watch exists" and "our watch app is on it".
+
+      The name must match WearProtocol.CAPABILITY_WEAR_APP on the phone side.
+    -->
+    <string-array name="android_wear_capabilities">
+        <item>grt_wear_app</item>
+    </string-array>
+</resources>

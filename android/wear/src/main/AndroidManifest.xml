@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Declares this as a watch app rather than a phone app that happens to
+         install on one. Play uses it for delivery; the launcher uses it for
+         placement. -->
+    <uses-feature android:name="android.hardware.type.watch" />
+
+    <!-- Phase 2 needs these for the watch's own GPS. Declared now so the
+         permission flow can be built and tested against a real install rather
+         than discovered later. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
+    <!-- Phase 3: keeping the round alive with the screen off.
+         FOREGROUND_SERVICE_LOCATION is what makes holding GPS in the background
+         legal on API 34+; BODY_SENSORS is what Health Services needs to run an
+         exercise at all. A user who refuses BODY_SENSORS still gets a working
+         round screen — see ExerciseSession — it just stops updating when the
+         screen does. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_HEALTH" />
+    <uses-permission android:name="android.permission.BODY_SENSORS" />
+    <uses-permission android:name="android.permission.ACTIVITY_RECOGNITION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@android:style/Theme.DeviceDefault">
+
+        <!-- Standalone=false: this watch app is useless without the phone, which
+             holds the round. Play then only offers it to users who have the
+             phone app. -->
+        <meta-data
+            android:name="com.google.android.wearable.standalone"
+            android:value="false" />
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.DeviceDefault">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Holds the round open while the screen is off. Both foreground
+             service types are declared because it does both jobs at once:
+             `location` for the GPS, `health` for the Health Services exercise
+             that actually stops Wear OS suspending the process. -->
+        <service
+            android:name=".RoundService"
+            android:exported="false"
+            android:foregroundServiceType="location|health" />
+
+        <!-- Receives the round state (DataClient) and commands (MessageClient)
+             from the phone. Started by the system on delivery, so state that
+             arrives while the watch app is closed is already stored by the time
+             the user raises their wrist. -->
+        <service
+            android:name=".PhoneListenerService"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.google.android.gms.wearable.DATA_CHANGED" />
+                <action android:name="com.google.android.gms.wearable.MESSAGE_RECEIVED" />
+                <data android:scheme="wear" android:host="*" android:pathPrefix="/grt/" />
+            </intent-filter>
+        </service>
+    </application>
+</manifest>

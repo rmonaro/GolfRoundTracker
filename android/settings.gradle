@@ -1,4 +1,9 @@
 include ':app'
+// Wear OS companion. A SEPARATE application module, not a variant: it ships its
+// own APK to the watch, needs its own minSdk (Wear OS 3 = 30 vs the phone's 24)
+// and its own Compose toolchain. It shares the phone's applicationId and signing
+// key, which is what the Data Layer requires to pair the two.
+include ':wear'
 include ':capacitor-cordova-android-plugins'
 project(':capacitor-cordova-android-plugins').projectDir = new File('./capacitor-cordova-android-plugins/')
 
