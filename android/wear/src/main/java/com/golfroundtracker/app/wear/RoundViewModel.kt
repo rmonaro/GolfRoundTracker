@@ -37,22 +37,46 @@ class RoundViewModel(app: Application) : AndroidViewModel(app) {
     private val _tracking = MutableStateFlow(false)
     val tracking: StateFlow<Boolean> = _tracking
 
+    /**
+     * A club picked on the watch, shown immediately.
+     *
+     * The pick travels to the phone, the phone applies it and sends a fresh
+     * snapshot back — fast on a good link, unbounded on a bad one. Without an
+     * optimistic override the golfer taps a club and watches the old one stay on
+     * screen, which reads as the tap not landing, so they tap again. Cleared
+     * once the phone's snapshot agrees.
+     */
+    private val _clubOverride = MutableStateFlow<String?>(null)
+
+    /** The golfer's ± correction to the putt distance, in feet. */
+    private val _puttFeetOverride = MutableStateFlow<Int?>(null)
+    val puttFeetOverride: StateFlow<Int?> = _puttFeetOverride
+
+    /** Blocks a second putt while the first is in flight. */
+    private val _puttSending = MutableStateFlow(false)
+    val puttSending: StateFlow<Boolean> = _puttSending
+
     val screen: StateFlow<RoundScreenModel> =
         combine(
             RoundStateStore.state,
             RoundStateStore.heardFromPhone,
-            LocationRepository.fix
-        ) { state, heard, fix ->
+            LocationRepository.fix,
+            _clubOverride
+        ) { state, heard, fix, override ->
+            // The override wins until the phone's snapshot catches up with it,
+            // at which point it is dropped and the phone is authoritative again.
+            if (override != null && state.selectedClubId == override) _clubOverride.value = null
             RoundScreenModel(
                 state = state,
                 heardFromPhone = heard,
                 fix = fix,
-                distance = distanceFor(state, fix)
+                distance = distanceFor(state, fix),
+                effectiveClubId = override ?: state.selectedClubId
             )
         }.stateIn(
             viewModelScope,
             SharingStarted.WhileSubscribed(5_000),
-            RoundScreenModel(RoundState.NONE, false, null, Distance.Unknown)
+            RoundScreenModel(RoundState.NONE, false, null, Distance.Unknown, null)
         )
 
     fun onPermissionResult(granted: Boolean) {
@@ -127,7 +151,39 @@ class RoundViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setPin(fix: Fix) = PhoneLink.setPin(getApplication(), fix)
 
-    fun selectClub(clubId: String) = PhoneLink.selectClub(getApplication(), clubId)
+    fun selectClub(clubId: String) {
+        _clubOverride.value = clubId
+        PhoneLink.selectClub(getApplication(), clubId)
+    }
+
+    /**
+     * Nudge the putt distance. Clamped at zero — a negative distance to the flag
+     * is not a thing, and the phone would store it.
+     */
+    fun adjustPutt(deltaFeet: Int, currentFeet: Int?) {
+        val base = _puttFeetOverride.value ?: currentFeet ?: 0
+        _puttFeetOverride.value = (base + deltaFeet).coerceAtLeast(0)
+    }
+
+    /** Forget a ± correction; the next hole's putt starts from GPS again. */
+    fun clearPuttOverride() {
+        _puttFeetOverride.value = null
+    }
+
+    fun recordPutt(made: Boolean, feet: Int?, fix: Fix?, clubId: String?) {
+        if (_puttSending.value) return
+        _puttSending.value = true
+        PhoneLink.recordPutt(getApplication(), clubId, made, feet, fix)
+        _puttFeetOverride.value = null
+        // Time-based rather than acknowledgement-based, deliberately: the
+        // durable queue gives the watch no ack to wait on, and a putt is holed
+        // once. A second of dead buttons costs nothing; a double-tapped putt is
+        // a stroke the golfer has to go and delete on the phone.
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(1_000)
+            _puttSending.value = false
+        }
+    }
 
     fun setAutoTrack(active: Boolean) = PhoneLink.setAutoTrack(getApplication(), active)
 
@@ -151,8 +207,21 @@ data class RoundScreenModel(
     val state: RoundState,
     val heardFromPhone: Boolean,
     val fix: Fix?,
-    val distance: Distance
-)
+    val distance: Distance,
+    /** The watch's optimistic pick, else the phone's selection. */
+    val effectiveClubId: String?
+) {
+    val effectiveClub: RoundState.Club?
+        get() = state.bag.firstOrNull { it.clubId == effectiveClubId }
+
+    /**
+     * The putt view is gated on a PUTTER being in hand, not merely on being near
+     * the green. Proximity alone flipped the phone into putting mode while the
+     * player was still chipping from the fringe.
+     */
+    val isPutting: Boolean
+        get() = state.onGreen && effectiveClub?.isPutter == true
+}
 
 /** Distance plus WHERE it came from, because the UI says so. */
 sealed interface Distance {

@@ -51,6 +51,7 @@ class RoundService : Service() {
             return START_NOT_STICKY
         }
 
+        instance = this
         // Must come first and within a few seconds of start, or the system kills
         // the service with a ForegroundServiceDidNotStartInTimeException.
         startForeground(NOTIFICATION_ID, buildNotification())
@@ -84,6 +85,7 @@ class RoundService : Service() {
     }
 
     override fun onDestroy() {
+        if (instance === this) instance = null
         location.stop()
         swings.stop()
         scope?.cancel()
@@ -132,6 +134,27 @@ class RoundService : Service() {
     }
 
     companion object {
+        /**
+         * The live service, so a practice session can read the health summary
+         * its exercise has been accumulating.
+         *
+         * ONE exercise session, not two. Health Services allows a single
+         * exercise per device, and a round and a practice session are mutually
+         * exclusive in the golfer's world anyway — you are on the course or you
+         * are on the range. The watchOS code hit the same wall with
+         * HKWorkoutSession: starting one while practice still held the other
+         * fails, and the failure surfaces as a session that silently never
+         * starts.
+         */
+        @Volatile
+        private var instance: RoundService? = null
+
+        /** Null when no session is running, or when the exercise never started
+         *  (no Health Services, sensors refused). Callers must treat that as
+         *  "no readings", not zero. */
+        fun currentHealthSummary(): ExerciseSession.HealthSummary? =
+            instance?.exercise?.summary()
+
         private const val CHANNEL_ID = "grt_round"
         private const val NOTIFICATION_ID = 1
         private const val ACTION_STOP = "com.golfroundtracker.app.wear.STOP_ROUND"

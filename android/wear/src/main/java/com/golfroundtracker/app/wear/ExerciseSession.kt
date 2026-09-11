@@ -10,6 +10,7 @@ import androidx.health.services.client.data.ExerciseLapSummary
 import androidx.health.services.client.data.ExerciseState
 import androidx.health.services.client.data.ExerciseType
 import androidx.health.services.client.data.ExerciseUpdate
+import androidx.health.services.client.data.SampleDataPoint
 import androidx.health.services.client.data.WarmUpConfig
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -40,6 +41,49 @@ class ExerciseSession(private val context: Context) {
     enum class Status { Idle, Warmup, Active, Unavailable }
 
     /**
+     * Heart-rate summary over the session.
+     *
+     * ACCUMULATED HERE rather than asked for at the end, because Health Services
+     * streams samples and keeps no history: whatever is not collected as it
+     * arrives is gone. Min and max are exactly why — an average could be derived
+     * later from a total, but the extremes cannot be reconstructed from
+     * anything.
+     *
+     * `count == 0` means no readings, which is a real and common state: a watch
+     * with the sensor refused, an exercise that never started, or simply a
+     * session short enough that none arrived. Callers must distinguish it from
+     * zero BPM rather than sending a zero the phone would store as a reading.
+     */
+    private var hrSum = 0.0
+    private var hrCount = 0
+    private var hrMin = Double.MAX_VALUE
+    private var hrMax = 0.0
+    private var calories = 0.0
+
+    data class HealthSummary(
+        val avgHeartRate: Int?,
+        val minHeartRate: Int?,
+        val maxHeartRate: Int?,
+        val activeCalories: Int?
+    )
+
+    fun summary(): HealthSummary =
+        if (hrCount == 0) {
+            HealthSummary(null, null, null, calories.takeIf { it > 0 }?.toInt())
+        } else {
+            HealthSummary(
+                avgHeartRate = (hrSum / hrCount).toInt(),
+                minHeartRate = hrMin.toInt(),
+                maxHeartRate = hrMax.toInt(),
+                activeCalories = calories.takeIf { it > 0 }?.toInt()
+            )
+        }
+
+    private fun resetSummary() {
+        hrSum = 0.0; hrCount = 0; hrMin = Double.MAX_VALUE; hrMax = 0.0; calories = 0.0
+    }
+
+    /**
      * Start a golf exercise, or report that we cannot.
      *
      * Capabilities are checked rather than assumed: `ExerciseType.GOLF` is
@@ -48,6 +92,7 @@ class ExerciseSession(private val context: Context) {
      * So the requested set is INTERSECTED with what this device says it can do.
      */
     suspend fun start(): Boolean {
+        resetSummary()
         return try {
             val capabilities = client.getCapabilitiesAsync().await()
             val golf = capabilities.getExerciseTypeCapabilities(ExerciseType.GOLF)
@@ -107,6 +152,7 @@ class ExerciseSession(private val context: Context) {
 
     private val callback = object : ExerciseUpdateCallback {
         override fun onExerciseUpdateReceived(update: ExerciseUpdate) {
+            collectMetrics(update)
             _state.value = when (update.exerciseStateInfo.state) {
                 ExerciseState.ACTIVE -> Status.Active
                 ExerciseState.PREPARING -> Status.Warmup
@@ -119,6 +165,34 @@ class ExerciseSession(private val context: Context) {
         }
 
         override fun onAvailabilityChanged(dataType: DataType<*, *>, availability: Availability) = Unit
+
+        /**
+         * Fold this update's samples into the running summary.
+         *
+         * Heart rate arrives as DELTA samples (several per update, each a
+         * reading) while calories arrive as an AGGREGATE total, so the two are
+         * read differently: samples are folded in, the total simply replaces
+         * what we had. Reading calories as a delta and summing them would
+         * multiply the number by however many updates the session saw.
+         */
+        private fun collectMetrics(update: ExerciseUpdate) {
+            val samples: List<SampleDataPoint<Double>> =
+                update.latestMetrics.getData(DataType.HEART_RATE_BPM)
+            for (sample in samples) {
+                val bpm = sample.value
+                // Health Services reports 0 while the sensor is searching for a
+                // reading — folding those in would drag the average down and
+                // make the minimum meaningless.
+                if (bpm <= 0) continue
+                hrSum += bpm
+                hrCount++
+                if (bpm < hrMin) hrMin = bpm
+                if (bpm > hrMax) hrMax = bpm
+            }
+            update.latestMetrics.getData(DataType.CALORIES_TOTAL)?.let {
+                calories = it.total
+            }
+        }
         override fun onLapSummaryReceived(lapSummary: ExerciseLapSummary) = Unit
         override fun onRegistered() = Unit
         override fun onRegistrationFailed(throwable: Throwable) {

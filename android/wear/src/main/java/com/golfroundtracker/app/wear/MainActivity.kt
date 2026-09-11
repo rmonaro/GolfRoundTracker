@@ -31,7 +31,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { WearApp(model) }
+        // The phone's `launchWatch(startPractice: true)` arrives as this extra,
+        // routed here by PhoneListenerService — see the command handler there
+        // for why a service has to start the Activity rather than the phone
+        // launching it directly.
+        val startInPractice =
+            intent?.getBooleanExtra(PhoneListenerService.EXTRA_START_PRACTICE, false) == true
+        setContent { WearApp(model, startInPractice = startInPractice) }
         readLastKnownState()
         if (!model.hasLocationPermission.value) {
             requestLocation.launch(Manifest.permission.ACCESS_FINE_LOCATION)

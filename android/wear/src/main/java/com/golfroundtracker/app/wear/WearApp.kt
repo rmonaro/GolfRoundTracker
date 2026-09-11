@@ -12,6 +12,11 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
@@ -36,10 +41,29 @@ import androidx.wear.compose.material.TimeText
  * on a round screen without a scroll.
  */
 @Composable
-fun WearApp(model: RoundViewModel = viewModel()) {
+fun WearApp(model: RoundViewModel = viewModel(), startInPractice: Boolean = false) {
     val screen by model.screen.collectAsStateWithLifecycle()
     val hasPermission by model.hasLocationPermission.collectAsStateWithLifecycle()
     val tracking by model.tracking.collectAsStateWithLifecycle()
+    val practising by PracticeSession.active.collectAsStateWithLifecycle()
+    val puttFeetOverride by model.puttFeetOverride.collectAsStateWithLifecycle()
+    val puttSending by model.puttSending.collectAsStateWithLifecycle()
+    // Local, not in the view model: which screen is on top is a property of
+    // this composition, and it must not survive the app being reopened on a
+    // different hole.
+    var pickingClub by remember { mutableStateOf(false) }
+    var tempoTrainer by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    // Launched by the phone with `startPractice`. Fires once — a recomposition
+    // must not open a second session over the first, which would abandon the
+    // swings already recorded into it.
+    LaunchedEffect(startInPractice) {
+        if (startInPractice && !practising) {
+            PracticeSession.start(context, scope, screen.state.selectedClubId)
+        }
+    }
 
     // A STOPGAP request, not the real one.
     //
@@ -58,14 +82,62 @@ fun WearApp(model: RoundViewModel = viewModel()) {
         screen.fix?.let { model.publishPosition(it) }
     }
 
+    // A ± correction belongs to the putt it was made for. Carrying it to the
+    // next green would silently record the wrong distance there.
+    LaunchedEffect(screen.state.holeNumber) { model.clearPuttOverride() }
+
     MaterialTheme {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             TimeText()
             when {
+                // Practice wins over everything: it is an explicit thing the
+                // golfer started, and it does not care whether a round is live
+                // or whether the phone has been heard from.
+                tempoTrainer -> TempoTrainerScreen(onClose = { tempoTrainer = false })
+                practising -> PracticeScreen(onEnd = { PracticeSession.end(context) })
                 !screen.heardFromPhone -> Message("Waiting for phone…")
-                !screen.state.active -> Message("No round in progress")
+                !screen.state.active -> NoRound(
+                    onPractice = {
+                        PracticeSession.start(context, scope, screen.state.selectedClubId)
+                    },
+                    onTempo = { tempoTrainer = true }
+                )
                 !hasPermission -> Message("Location off — open settings to let the watch measure")
-                else -> RoundScreen(screen, tracking, model)
+
+                pickingClub -> ClubPickerScreen(
+                    bag = screen.state.bag,
+                    selectedClubId = screen.effectiveClubId,
+                    onPick = { clubId ->
+                        model.selectClub(clubId)
+                        // Straight back to the round. Picking a club is a step
+                        // on the way to a shot, never a destination.
+                        pickingClub = false
+                    }
+                )
+
+                // Putter in hand AND on the green — see RoundScreenModel.
+                screen.isPutting -> PuttScreen(
+                    feet = puttFeetOverride ?: (screen.distance as? Distance.Feet)?.value,
+                    sending = puttSending,
+                    onAdjust = { delta ->
+                        model.adjustPutt(delta, (screen.distance as? Distance.Feet)?.value)
+                    },
+                    onRecord = { made ->
+                        model.recordPutt(
+                            made = made,
+                            feet = puttFeetOverride ?: (screen.distance as? Distance.Feet)?.value,
+                            fix = screen.fix,
+                            clubId = screen.effectiveClubId
+                        )
+                    }
+                )
+
+                else -> RoundScreen(
+                    screen = screen,
+                    tracking = tracking,
+                    model = model,
+                    onPickClub = { pickingClub = true }
+                )
             }
         }
     }
@@ -86,7 +158,8 @@ private fun Message(text: String) {
 private fun RoundScreen(
     screen: RoundScreenModel,
     tracking: Boolean,
-    model: RoundViewModel
+    model: RoundViewModel,
+    onPickClub: () -> Unit
 ) {
     val state = screen.state
     Column(
@@ -128,6 +201,15 @@ private fun RoundScreen(
             horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)
         ) {
             SmallButton(label = "◀", primary = false, enabled = true) { model.navigate(false) }
+            // The club in hand, and the way to change it. Shown as the club's
+            // own name rather than a generic "Club" so the golfer can confirm
+            // at a glance what the next shot will be recorded against.
+            SmallButton(
+                label = screen.effectiveClub?.name ?: "Club",
+                primary = false,
+                enabled = screen.state.bag.isNotEmpty(),
+                onClick = onPickClub
+            )
             SmallButton(
                 label = "Pin",
                 primary = false,
@@ -189,4 +271,36 @@ private fun SmallButton(
         colors = if (primary) ChipDefaults.primaryChipColors() else ChipDefaults.secondaryChipColors(),
         modifier = Modifier.size(width = 58.dp, height = 36.dp)
     )
+}
+
+/**
+ * The resting screen. Offers practice, because it is the one thing the watch can
+ * do entirely on its own — no round, no phone state, just the motion sensors.
+ */
+@Composable
+private fun NoRound(onPractice: () -> Unit, onTempo: () -> Unit) {
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+        modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)
+    ) {
+        Text(
+            text = "No round in progress",
+            textAlign = TextAlign.Center,
+            style = MaterialTheme.typography.body2,
+            color = MaterialTheme.colors.onSurfaceVariant
+        )
+        Chip(
+            onClick = onPractice,
+            label = { Text("Practice", style = MaterialTheme.typography.button) },
+            colors = ChipDefaults.primaryChipColors(),
+            modifier = Modifier.padding(top = 10.dp)
+        )
+        Chip(
+            onClick = onTempo,
+            label = { Text("Tempo", style = MaterialTheme.typography.button) },
+            colors = ChipDefaults.secondaryChipColors(),
+            modifier = Modifier.padding(top = 6.dp)
+        )
+    }
 }

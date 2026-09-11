@@ -66,9 +66,10 @@ class PhoneListenerService : WearableListenerService() {
                     .putExtra(EXTRA_START_PRACTICE, command == WearProtocol.CMD_START_PRACTICE)
                 startActivity(intent)
             }
-            // Phase 4 owns the practice session; accepted and ignored now so the
-            // phone's endWatchPractice() is not an error against this build.
-            WearProtocol.CMD_END_PRACTICE -> Unit
+            // The phone ending a session the user started on the watch. This
+            // is why PracticeSession is a process-wide holder: there is no
+            // Activity here to route through, and quite possibly none alive.
+            WearProtocol.CMD_END_PRACTICE -> PracticeSession.end(this)
             else -> android.util.Log.w("PhoneListener", "unknown command: $command")
         }
     }

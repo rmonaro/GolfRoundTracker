@@ -152,6 +152,122 @@ object PhoneLink {
         sendEvent(context, event)
     }
 
+    /**
+     * A shot the golfer described rather than one inferred from GPS.
+     *
+     * Currently only putts reach here. GPS CANNOT MEASURE A PUTT — two fixes
+     * eight feet apart are inside the error of either — so for a putt the
+     * `distanceFeet` the player saw and nudged is the AUTHORITATIVE distance,
+     * not a fallback. That is why this message carries it and `autoShot` does
+     * not.
+     */
+    fun recordPutt(
+        context: Context,
+        clubId: String?,
+        made: Boolean,
+        distanceFeet: Int?,
+        fix: Fix?
+    ) {
+        val event = JSONObject()
+            .put("type", "recordShot")
+            .put("clubId", clubId ?: JSONObject.NULL)
+            .put("targetType", "putt")
+            .put("targetResult", if (made) "made" else "missed")
+            .put("distanceFeet", distanceFeet ?: JSONObject.NULL)
+        fix?.let { event.put("endLat", it.lat).put("endLng", it.lng) }
+        sendEvent(context, event)
+    }
+
+    // --- Practice mode --------------------------------------------------------
+
+    fun practiceStarted(context: Context, sessionId: String, clubId: String?) {
+        sendEvent(
+            context,
+            JSONObject()
+                .put("type", "practiceStarted")
+                .put("sessionId", sessionId)
+                .put("clubId", clubId ?: JSONObject.NULL)
+        )
+    }
+
+    fun practiceClubSelected(context: Context, sessionId: String, clubId: String) {
+        sendEvent(
+            context,
+            JSONObject()
+                .put("type", "practiceClubSelected")
+                .put("sessionId", sessionId)
+                .put("clubId", clubId)
+        )
+    }
+
+    fun practiceEnded(
+        context: Context,
+        sessionId: String,
+        swingCount: Int,
+        durationSeconds: Int,
+        health: ExerciseSession.HealthSummary?
+    ) {
+        val event = JSONObject()
+            .put("type", "practiceEnded")
+            .put("sessionId", sessionId)
+            .put("swingCount", swingCount)
+            .put("durationSeconds", durationSeconds)
+
+        // OMITTED, never zeroed. Every health field is optional in the
+        // contract, and a zero would be persisted as a genuine reading of
+        // nothing — a resting heart rate of 0 in a player's history. A watch
+        // with no sensor, a refused permission and a session too short for a
+        // reading all land here, and all three mean "we don't know".
+        health?.avgHeartRate?.let { event.put("avgHeartRate", it) }
+        health?.maxHeartRate?.let { event.put("maxHeartRate", it) }
+        health?.minHeartRate?.let { event.put("minHeartRate", it) }
+        health?.activeCalories?.let { event.put("activeCalories", it) }
+        // hrvSdnn is deliberately absent: Health Services exposes no SDNN
+        // equivalent during an exercise, and the iOS value is itself usually
+        // missing mid-activity. Inventing one from beat spacing would be a
+        // number nobody could trust.
+
+        sendEvent(context, event)
+    }
+
+    /**
+     * One detected swing's metrics. The phone runs its rules engine on these and
+     * writes `swing_metrics`, so the SCALES matter as much as the values — see
+     * SwingMetricsCalculator on why the thresholds were copied, not re-derived.
+     */
+    fun swingDetected(
+        context: Context,
+        sessionId: String,
+        swingIndex: Int,
+        clubId: String?,
+        metrics: SwingMetrics
+    ) {
+        val event = JSONObject()
+            .put("type", "swingDetected")
+            .put("sessionId", sessionId)
+            .put("swingIndex", swingIndex)
+            .put("clubId", clubId ?: JSONObject.NULL)
+            // Epoch SECONDS here, unlike roundImpact's millis. Not a slip — it
+            // is what the phone's contract specifies for this message.
+            .put("capturedAt", System.currentTimeMillis() / 1000)
+            .put("backswingTimeMs", metrics.backswingTimeMs)
+            .put("downswingTimeMs", metrics.downswingTimeMs)
+            .put("tempoRatio", metrics.tempoRatio)
+            .put("transitionScore", metrics.transitionScore)
+            .put("estimatedHandSpeed", metrics.estimatedHandSpeed)
+            .put("wristRotationScore", metrics.wristRotationScore)
+            .put("finishStabilityScore", metrics.finishStabilityScore)
+            .put("planeAxis", org.json.JSONArray(metrics.planeAxis))
+            .put("swingType", metrics.swingType)
+            .put("isAirSwing", metrics.isAirSwing)
+            .put("backswingRotation", metrics.backswingRotation)
+            .put("releaseTimingScore", metrics.releaseTimingScore)
+            .put("decelerationScore", metrics.decelerationScore)
+            .put("transitionDirectionScore", metrics.transitionDirectionScore)
+            .put("addressGravity", org.json.JSONArray(metrics.addressGravity))
+        sendEvent(context, event)
+    }
+
     fun trackingPosition(context: Context, fix: Fix) {
         sendLiveUpdate(
             context,

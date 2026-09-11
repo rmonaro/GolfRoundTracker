@@ -7,6 +7,9 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.ApiException;
+import com.google.android.gms.common.api.CommonStatusCodes;
 import com.google.android.gms.tasks.Task;
 import com.google.android.gms.wearable.CapabilityClient;
 import com.google.android.gms.wearable.CapabilityInfo;
@@ -67,13 +70,71 @@ public class WatchBridge extends Plugin {
      */
     private static WatchBridge instance;
 
-    /** Nodes with our capability, refreshed by the listener below. */
-    private final Set<String> connectedNodes = Collections.synchronizedSet(new HashSet<>());
+    /**
+     * Nodes running OUR watch app — the ones worth sending to.
+     *
+     * Not filtered on `isNearby()`. That was the first version and it is too
+     * strict: a node reachable over the cloud, or a paired emulator (which
+     * commonly reports itself as not nearby), can still receive data items
+     * perfectly well. Nearby is asked about separately, and only to answer
+     * `isReachable`.
+     */
+    private final Set<String> appNodes = Collections.synchronizedSet(new HashSet<>());
+
+    /** Subset of the above that is physically close — the `isReachable` answer. */
+    private final Set<String> nearbyAppNodes = Collections.synchronizedSet(new HashSet<>());
 
     private CapabilityClient.OnCapabilityChangedListener capabilityListener;
 
+    /**
+     * Set once Play services says the Wearable API does not exist here.
+     *
+     * WHAT THAT ACTUALLY MEANS: the Data Layer is not merely "no watch paired",
+     * it is not installed. Wearable.API is delivered with the Wear OS companion
+     * app (com.google.android.wearable.app), so a phone that has never had it —
+     * most emulators, and any phone whose owner has never set up a watch —
+     * fails EVERY call with API_UNAVAILABLE, permanently, no matter what is
+     * paired later.
+     *
+     * It has to be latched. Without it `sendState` re-attempts on every state
+     * change — several times a minute for a whole round — and each failure logs
+     * a twenty-line stack trace for a condition that cannot change while the app
+     * is running. This is the exact equivalent of iOS's
+     * `WCSession.isSupported() == false`, and the plugin now answers the same
+     * way: supported:false, and every method a quiet no-op.
+     */
+    private volatile boolean wearableUnavailable = false;
+
     static WatchBridge current() {
         return instance;
+    }
+
+    /**
+     * True when the failure is "this device has no Data Layer", as opposed to a
+     * transient error worth retrying.
+     */
+    private boolean isApiUnavailable(Throwable err) {
+        if (!(err instanceof ApiException)) return false;
+        int code = ((ApiException) err).getStatusCode();
+        return code == CommonStatusCodes.API_NOT_CONNECTED
+            || code == ConnectionResult.API_UNAVAILABLE;
+    }
+
+    /** Latch it, and tell JS the same thing iOS says when WCSession is absent. */
+    private void markUnavailable(Throwable err) {
+        if (wearableUnavailable) return;
+        wearableUnavailable = true;
+        appNodes.clear();
+        nearbyAppNodes.clear();
+        android.util.Log.i(
+            "WatchBridge",
+            "Wearable API unavailable on this device — watch features off. "
+                + "This phone has no Wear OS companion app (com.google.android.wearable.app); "
+                + "the Data Layer ships with it."
+        );
+        JSObject event = new JSObject();
+        event.put("reachable", false);
+        notifyListeners("reachabilityChanged", event);
     }
 
     @Override
@@ -89,7 +150,10 @@ public class WatchBridge extends Plugin {
             }
         };
         Wearable.getCapabilityClient(getContext())
-            .addListener(capabilityListener, WearProtocol.CAPABILITY_WEAR_APP);
+            .addListener(capabilityListener, WearProtocol.CAPABILITY_WEAR_APP)
+            .addOnFailureListener(err -> {
+                if (isApiUnavailable(err)) markUnavailable(err);
+            });
 
         refreshCapability(null);
 
@@ -113,41 +177,85 @@ public class WatchBridge extends Plugin {
      * lands. `call` may be null for the load-time refresh.
      */
     private void refreshCapability(final PluginCall call) {
+        if (wearableUnavailable) {
+            if (call != null) resolveActivation(call, false, false);
+            return;
+        }
         Task<CapabilityInfo> task = Wearable.getCapabilityClient(getContext())
             .getCapability(WearProtocol.CAPABILITY_WEAR_APP, CapabilityClient.FILTER_REACHABLE);
 
         task.addOnSuccessListener(info -> {
             updateNodes(info);
-            if (call != null) {
-                JSObject result = new JSObject();
-                result.put("supported", true);
-                result.put("paired", !connectedNodes.isEmpty());
-                call.resolve(result);
+            if (call == null) {
+                emitActivation(null);
+                return;
             }
-            emitActivation(null);
+            // `isPaired` means A WATCH EXISTS, which is not the same as our app
+            // being on it — exactly the iOS distinction — so it needs the node
+            // list, not the capability list. Asked second so the answer carries
+            // both facts.
+            Wearable.getNodeClient(getContext())
+                .getConnectedNodes()
+                .addOnSuccessListener(nodes -> {
+                    resolveActivation(call, true, !nodes.isEmpty());
+                    emitActivation(null);
+                })
+                .addOnFailureListener(err2 -> {
+                    // Capability worked but the node list did not. Report what
+                    // we do know rather than failing the whole call.
+                    resolveActivation(call, true, !appNodes.isEmpty());
+                    emitActivation(null);
+                });
         }).addOnFailureListener(err -> {
             // No Play services, no watch, an emulator without the Wear stack:
-            // all of these are "there is no watch here", not a crash. The iOS
-            // plugin reports `supported:false` the same way when
-            // WCSession.isSupported() is false.
-            connectedNodes.clear();
-            if (call != null) {
-                JSObject result = new JSObject();
-                result.put("supported", false);
-                result.put("paired", false);
-                call.resolve(result);
-            }
+            // all of these are "there is no watch here", not a crash.
+            if (isApiUnavailable(err)) markUnavailable(err);
+            appNodes.clear();
+            nearbyAppNodes.clear();
+            if (call != null) resolveActivation(call, false, false);
             emitActivation(err.getMessage());
         });
     }
 
+    /**
+     * Answer `activate()` in the SHAPE iOS uses.
+     *
+     * This is the whole reason the phone reported "not connected" against a
+     * perfectly working watch: the first version resolved `{supported, paired}`,
+     * while every caller reads `isPaired` — so the check was `undefined`, and
+     * `Boolean(undefined)` is false, forever. The five keys below are the
+     * contract (`WatchBridgeRawPlugin.activate` in watchBridge.ts); a plugin
+     * that implements the same METHODS but a different result shape is not the
+     * same plugin, and nothing catches it at compile time.
+     */
+    private void resolveActivation(PluginCall call, boolean supported, boolean paired) {
+        JSObject result = new JSObject();
+        result.put("supported", supported);
+        // 2 = WCSessionActivationStateActivated, so a numeric check reads the
+        // same on both platforms.
+        result.put("activationState", supported ? 2 : 0);
+        // A watch is paired with this phone. Says nothing about our app.
+        result.put("isPaired", paired);
+        // A node advertises our capability, i.e. the watch app is installed.
+        result.put("isWatchAppInstalled", !appNodes.isEmpty());
+        // ...and is close enough to talk to right now.
+        result.put("isReachable", !nearbyAppNodes.isEmpty());
+        call.resolve(result);
+    }
+
     private void updateNodes(CapabilityInfo info) {
-        boolean was = !connectedNodes.isEmpty();
-        connectedNodes.clear();
+        boolean was = !appNodes.isEmpty();
+        appNodes.clear();
+        nearbyAppNodes.clear();
         for (Node node : info.getNodes()) {
-            if (node.isNearby()) connectedNodes.add(node.getId());
+            appNodes.add(node.getId());
+            if (node.isNearby()) nearbyAppNodes.add(node.getId());
         }
-        boolean now = !connectedNodes.isEmpty();
+        android.util.Log.i(
+            "WatchBridge",
+            "watch nodes: " + appNodes.size() + " with our app, " + nearbyAppNodes.size() + " nearby"
+        );
+        boolean now = !appNodes.isEmpty();
         if (was != now) {
             JSObject event = new JSObject();
             event.put("reachable", now);
@@ -174,7 +282,7 @@ public class WatchBridge extends Plugin {
     @PluginMethod
     public void isReachable(PluginCall call) {
         JSObject result = new JSObject();
-        result.put("reachable", !connectedNodes.isEmpty());
+        result.put("reachable", !nearbyAppNodes.isEmpty());
         call.resolve(result);
     }
 
@@ -193,7 +301,7 @@ public class WatchBridge extends Plugin {
     }
 
     private void sendCommand(String command, PluginCall call, String resultKey) {
-        Set<String> targets = new HashSet<>(connectedNodes);
+        Set<String> targets = wearableUnavailable ? new HashSet<>() : new HashSet<>(appNodes);
         if (targets.isEmpty()) {
             JSObject result = new JSObject();
             result.put(resultKey, false);
@@ -223,6 +331,13 @@ public class WatchBridge extends Plugin {
             call.reject("state is required");
             return;
         }
+        // Nothing to send to, and nothing that will change. Resolving quietly
+        // matches the iOS plugin's behaviour with no paired watch, and stops a
+        // round's worth of pushes each logging a stack trace.
+        if (wearableUnavailable) {
+            call.resolve();
+            return;
+        }
 
         PutDataMapRequest request = PutDataMapRequest.create(WearProtocol.ROUND_STATE_PATH);
         request.getDataMap().putString(WearProtocol.KEY_STATE_JSON, state.toString());
@@ -246,7 +361,11 @@ public class WatchBridge extends Plugin {
             // one is along in seconds, and a rejected promise here would surface
             // as an error toast for something the user cannot act on.
             .addOnFailureListener(err -> {
-                android.util.Log.w("WatchBridge", "sendState failed", err);
+                if (isApiUnavailable(err)) {
+                    markUnavailable(err);
+                } else {
+                    android.util.Log.w("WatchBridge", "sendState failed", err);
+                }
                 call.resolve();
             });
     }
